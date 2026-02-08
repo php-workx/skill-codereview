@@ -1,8 +1,5 @@
-data
-
-# Sonar outputs
-.sonarqube/
-.scannerwork/
+# Research data (not part of distributable skill)
+data/
 
 # macOS
 .DS_Store
@@ -12,4 +9,10 @@ __pycache__/
 *.pyc
 
 # IDEs
-.idea
+.idea/
+
+# Node
+node_modules/
+
+# Build artifacts
+download.log

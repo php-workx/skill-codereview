@@ -1,0 +1,36 @@
+{
+  "name": "@php-workx/skill-codereview",
+  "version": "1.0.0",
+  "description": "AI-powered multi-pass code review skill for Claude, Codex, and Cursor. Deterministic scans + parallel explorer-judge AI review with structured findings.",
+  "keywords": [
+    "skill",
+    "claude",
+    "codex",
+    "cursor",
+    "code-review",
+    "ai-review",
+    "static-analysis",
+    "agent",
+    "ai-agent",
+    "openskills"
+  ],
+  "scripts": {
+    "validate": "bash -n skill/scripts/validate_output.sh && bash -n scripts/install-codereview-skill.sh",
+    "prepublishOnly": "npm run validate"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/php-workx/skill-codereview.git"
+  },
+  "license": "MIT",
+  "files": [
+    "skill/",
+    "prompts/codereview.md",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ]
+}

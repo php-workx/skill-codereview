@@ -1,6 +1,6 @@
 # References
 
-The review prompt files used by this skill live in the workspace root:
+The review prompt files are co-located with the skill:
 
 ```
 prompts/

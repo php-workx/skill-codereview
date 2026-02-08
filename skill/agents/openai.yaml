@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code Review"
+  short_description: "Multi-pass AI code review with deterministic scans and explorer-judge architecture"
+  default_prompt: "Use $codereview to review my current branch changes for bugs, security issues, and test gaps."

@@ -1,0 +1,13 @@
+.git
+.idea
+.claude
+.agents
+__pycache__
+*.pyc
+data/
+docs/
+templates/
+download_reviews.sh
+download.log
+CHANGELOG.md
+.gitignore

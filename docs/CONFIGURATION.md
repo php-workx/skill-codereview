@@ -1,0 +1,114 @@
+# Configuration
+
+The codereview skill supports optional repo-level configuration via `.codereview.yaml` in the repository root. All settings have sensible defaults — no configuration is required.
+
+## Config File Schema
+
+```yaml
+# .codereview.yaml (optional)
+
+# Which review passes to run (default: all 4)
+passes:
+  - correctness
+  - security
+  - reliability
+  - test-adequacy
+
+# Minimum confidence for AI findings (default: 0.65)
+confidence_floor: 0.65
+
+# Review cadence — controls when /codereview runs automatically
+# Options: manual (default), pre-commit, pre-push, wave-end
+cadence: manual
+
+# Pushback level — controls how aggressively findings are surfaced
+# Options: fix-all (default), selective, cautious
+pushback_level: fix-all
+
+# Paths to ignore (glob patterns)
+ignore_paths:
+  - "*.generated.*"
+  - "vendor/"
+  - "node_modules/"
+
+# Paths to focus on (higher priority for findings in these paths)
+focus_paths:
+  - "src/auth/"
+  - "src/payments/"
+
+# Custom instructions included in all review passes
+custom_instructions: |
+  This repo uses Django ORM. Flag any raw SQL queries.
+  All API endpoints must have rate limiting.
+```
+
+## Settings Reference
+
+### `passes`
+
+Which AI review passes to run. Default: all 4.
+
+| Pass | Focus |
+|------|-------|
+| `correctness` | Functional bugs, regressions, logic errors |
+| `security` | Auth, injection, secrets, trust boundaries |
+| `reliability` | Timeouts, retries, resource leaks, performance |
+| `test-adequacy` | Missing tests, stale tests, mock-heavy tests |
+
+### `confidence_floor`
+
+Minimum confidence score for AI findings to appear in the report. Default: `0.65`. Range: `0.0` to `1.0`.
+
+Higher values reduce false positives but may miss some real issues.
+
+### `cadence`
+
+When the skill should be invoked in agent workflows. Default: `manual`.
+
+| Mode | When It Runs |
+|------|-------------|
+| `manual` | Only when user invokes `/codereview` |
+| `pre-commit` | Before every commit in agent workflows |
+| `pre-push` | Before push (agent checks before sharing) |
+| `wave-end` | After a batch of tasks completes |
+
+The cadence setting is advisory — it tells the agent *when* to call the skill, not a git hook.
+
+### `pushback_level`
+
+Controls how aggressively findings are surfaced. Default: `fix-all`.
+
+| Level | Must Fix | Should Fix | Consider |
+|-------|----------|------------|----------|
+| `fix-all` | Fix immediately | Fix in this PR | Fix if time permits |
+| `selective` | Fix immediately | Fix in this PR | Informational only |
+| `cautious` | Fix immediately | Informational | Informational only |
+
+### `ignore_paths`
+
+Glob patterns for files to exclude from review. These files are filtered out of `CHANGED_FILES` before deterministic scans and AI review.
+
+### `focus_paths`
+
+Glob patterns for high-priority paths. Findings in these paths get slightly boosted in the ranking within each tier.
+
+### `custom_instructions`
+
+Free-text instructions included in the context packet for all review passes. Use this for repo-specific conventions that the AI should enforce.
+
+## Precedence
+
+If multiple configuration sources exist:
+
+1. CLI flags (highest priority)
+2. `.codereview.yaml` in repo root
+3. Built-in defaults (lowest priority)
+
+## No Config Required
+
+If no `.codereview.yaml` exists, the skill uses defaults:
+- All 4 passes enabled
+- 0.65 confidence floor
+- Manual cadence
+- fix-all pushback
+- No ignored or focused paths

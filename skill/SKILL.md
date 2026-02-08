@@ -278,6 +278,25 @@ fi
 if [ -f .pre-commit-config.yaml ] && command -v pre-commit &>/dev/null; then
   pre-commit run --files $CHANGED_FILES 2>&1 | head -200
 fi
+
+# sonarqube — deep static analysis via the sonarqube skill's Python scanner
+# Requires: python3 + sonarqube.py from skill-sonarqube (local mode needs Docker + sonar-scanner)
+# The script auto-starts a local SonarQube container if none is running.
+# Output: .sonarqube/findings.json with structured findings per file.
+SONAR_SCRIPT="$HOME/.claude/skills/sonarqube/sonarqube.py"
+if [ ! -f "$SONAR_SCRIPT" ]; then
+  SONAR_SCRIPT="$HOME/.codex/skills/sonarqube/sonarqube.py"
+fi
+if [ -f "$SONAR_SCRIPT" ] && command -v python3 &>/dev/null; then
+  python3 "$SONAR_SCRIPT" scan --mode local --severity medium --scope new \
+    --base-ref "${BASE_REF:-HEAD~1}" --list-only --output-dir .sonarqube 2>/dev/null
+  # Read findings if scan succeeded
+  if [ -f .sonarqube/findings.json ]; then
+    cat .sonarqube/findings.json | head -500
+  fi
+else
+  echo "sonarqube skill not installed (see skill-sonarqube README)"
+fi
 ```
 
 **Record `tool_status`** for each tool (ran / skipped / not_installed / failed) with version and finding count. Use these standard keys:
@@ -289,6 +308,7 @@ fi
 | `osv_scanner` | osv-scanner |
 | `shellcheck` | shellcheck (shell files only) |
 | `pre_commit` | pre-commit |
+| `sonarqube` | sonarqube (local or cloud, via skill-sonarqube) |
 | `radon` | radon (Step 2d) |
 | `gocyclo` | gocyclo (Step 2d) |
 | `standards` | Language standards (Step 2f) |
@@ -313,7 +333,9 @@ The AI review uses an **explorer-judge architecture**: specialized explorer sub-
 **4a. Launch 4 explorer sub-agents in parallel** (single message, all at once):
 
 ```bash
-# Paths to prompt files (relative to workspace root)
+# Paths to prompt files (relative to skill directory)
+# When installed, these live alongside SKILL.md in the skill's prompts/ subdirectory.
+# The executing agent should locate them relative to this SKILL.md file.
 GLOBAL_CONTRACT="prompts/reviewer-global-contract.md"
 CORRECTNESS_PASS="prompts/reviewer-correctness-pass.md"
 SECURITY_PASS="prompts/reviewer-security-pass.md"
@@ -464,6 +486,7 @@ Output the review in this format:
 | osv-scanner | osv_scanner | not_installed | — |
 | shellcheck | shellcheck | ran | 1 |
 | pre-commit | pre_commit | skipped | — |
+| sonarqube | sonarqube | not_installed | — |
 | radon | radon | ran | 2 hotspots |
 | standards | standards | ran | python, go |
 | AI: correctness | ai_correctness | ran | 4 |
@@ -600,6 +623,7 @@ Must conform to `findings-schema.json`. Contains the full envelope:
     "osv_scanner": { "status": "not_installed", "version": null, "finding_count": 0, "note": "go install github.com/google/osv-scanner/cmd/osv-scanner@latest" },
     "shellcheck": { "status": "ran", "version": "0.10.0", "finding_count": 1, "note": null },
     "pre_commit": { "status": "skipped", "version": null, "finding_count": 0, "note": "no .pre-commit-config.yaml" },
+    "sonarqube": { "status": "not_installed", "version": null, "finding_count": 0, "note": "see skill-sonarqube README" },
     "radon": { "status": "ran", "version": "6.0.1", "finding_count": 2, "note": "2 functions with complexity C or worse" },
     "standards": { "status": "ran", "version": null, "finding_count": 0, "note": "loaded: python, go" },
     "ai_correctness": { "status": "ran", "version": null, "finding_count": 4, "note": null },
@@ -614,7 +638,7 @@ Must conform to `findings-schema.json`. Contains the full envelope:
 
 **7c. Validate output** (optional, if `jq` available):
 ```bash
-bash skills/codereview/scripts/validate_output.sh \
+bash scripts/validate_output.sh \
   --findings .agents/reviews/YYYY-MM-DD-<target>.json \
   --report .agents/reviews/YYYY-MM-DD-<target>.md
 ```
@@ -693,7 +717,7 @@ The pushback level affects the **Next Steps** section in the report. At `fix-all
 
 ## Prompt Files
 
-The review prompts live in the workspace `prompts/` directory:
+The review prompts live in the `prompts/` directory alongside this SKILL.md:
 
 | File | Purpose |
 |------|---------|
@@ -746,7 +770,7 @@ Reviews changes against `main` and checks if the spec requirements are addressed
 | Launching explorers without reading prompt files first | Explorers get no global contract or pass-specific instructions, produce unstructured output | Always `Read` the prompt files in Step 4 before constructing explorer prompts |
 | Launching judge before all 4 explorers finish | Judge has incomplete findings, misses cross-cutting issues | Wait for all 4 Task results before launching the judge |
 | Posting PR comments without user confirmation | Unwanted noise on the PR, user didn't consent | Always ask "Would you like me to post these as inline PR comments?" first |
-| Forgetting to include deterministic scan results in explorer prompts | Explorers restate what semgrep/trivy already found, creating duplicates | Pass scan summaries to each explorer with "do not restate" instruction |
+| Forgetting to include deterministic scan results in explorer prompts | Explorers restate what semgrep/trivy/sonarqube already found, creating duplicates | Pass scan summaries to each explorer with "do not restate" instruction |
 | Skipping context gathering (Step 2) | Explorers can't trace callers/callees, miss integration bugs | Step 2 is critical — don't jump straight to Step 3/4 |
 | Not extracting `CHANGED_FILES` in Step 1 | Steps 2d, 2f, and 3 can't scope to changed files, run on entire repo | Every diff mode must set `CHANGED_FILES` via `--name-only` |
 
@@ -772,6 +796,8 @@ See `references/design.md` for the full architecture diagram, explorer-judge rat
 | No spec | Skips spec check, report omits "Spec Gaps" section |
 | Missing tools | Scans skipped with explicit status, AI passes still run, report notes gaps |
 | Shell files in diff | shellcheck runs if installed, scoped to .sh files only |
+| sonarqube skill installed | Runs `sonarqube.py scan --list-only`, findings merged as deterministic source |
+| sonarqube not installed | Skipped with tool_status note, other scans and AI passes still run |
 | radon/gocyclo available | Complexity scores included in context, hotspots noted in tool status |
 | Standards skill installed | Language-specific rules loaded and included in explorer context |
 | All tools available | Deterministic + AI findings merged, deduplicated, tiered |
@@ -806,7 +832,7 @@ See `references/design.md` for the full architecture diagram, explorer-judge rat
 
 Run the validation script to verify:
 ```bash
-bash skills/codereview/scripts/validate_output.sh \
+bash scripts/validate_output.sh \
   --findings .agents/reviews/<latest>.json \
   --report .agents/reviews/<latest>.md
 ```
@@ -818,5 +844,4 @@ bash skills/codereview/scripts/validate_output.sh \
 - `findings-schema.json` — JSON Schema for the findings artifact
 - `scripts/validate_output.sh` — Output validation script
 - `references/design.md` — Architecture diagram, design rationale, and future plans
-- `docs/tooling-ai-code-review-playbook-2026-02-08.md` — Full playbook and reference architecture
-- `templates/review-tooling-scorecard.csv` — Evaluation scorecard for comparing tools
+- `prompts/` — Explorer sub-agent prompt files (global contract + 4 passes)

@@ -17,7 +17,8 @@ This document contains background context for the codereview skill. It is not ne
                               │
 ┌──────────────────────────────────────────────────────────────┐
 │  Step 3: Deterministic Scans                                  │
-│  semgrep, trivy, osv-scanner, shellcheck, pre-commit          │
+│  semgrep, trivy, osv-scanner, shellcheck, pre-commit,         │
+│  sonarqube (via skill-sonarqube, if installed)                 │
 │  → Produces deterministic findings                            │
 └──────────────────────────────────────────────────────────────┘
                               │
@@ -77,7 +78,7 @@ This document contains background context for the codereview skill. It is not ne
 | Configurable pushback level | fix-all for agent workflows, cautious for human review | User feedback: agents should fix most issues, but not rabbit-hole |
 | Configurable review cadence | pre-commit for quality-critical, wave-end for throughput | User request: some projects need every-commit review |
 | Next Steps with fix ordering | Guide downstream agents on what to fix and in what order | receiving-code-review implementation ordering |
-| Deterministic scans before AI | Run semgrep/trivy/osv-scanner first so AI skips restating their findings | Previous plan, playbook 4-stage pipeline |
+| Deterministic scans before AI | Run semgrep/trivy/osv-scanner/sonarqube first so AI skips restating their findings | Previous plan, playbook 4-stage pipeline |
 | Comprehensive findings (no hard cap) | Code agents fix fast — surface everything actionable, let tiers prioritize | Agent-assisted workflow reality |
 | Action tiers (Must/Should/Consider) | Structured prioritization without losing lower-severity findings | Replaces rigid comment budget |
 | Confidence floor (0.65) | Dramatically reduces false positives | Playbook signal controls |
