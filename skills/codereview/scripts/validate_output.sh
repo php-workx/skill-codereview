@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# validate_output.sh — Validate codereview skill output artifacts
+# Usage: validate_output.sh --findings <json> [--report <md>]
+#
+# Checks:
+#  1.  findings.json is valid JSON
+#  2.  Required envelope fields (run_id, timestamp, scope, base_ref, head_ref, verdict, tool_status, findings)
+#  2b. Verdict value is PASS/WARN/FAIL
+#  2c. Strengths is an array (if present)
+#  2d. Spec gaps is an array (if present)
+#  3.  Each finding has required fields (id, source, pass, severity, confidence, file, line, summary)
+#  4.  Confidence gating: no AI findings below 0.65
+#  5.  Evidence gating: high/critical findings have failure_mode populated
+#  6.  Valid severity values
+#  7.  Valid source values
+#  8.  Tool status present and non-empty
+#  9.  Action tier classification on every finding
+#  10. Tier summary consistency
+#  11. Report markdown: verdict, strengths, tier sections, summary
+
+set -euo pipefail
+
+FINDINGS=""
+REPORT=""
+ERRORS=0
+
+usage() {
+  echo "Usage: $0 --findings <json> [--report <md>]"
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --findings) FINDINGS="$2"; shift 2 ;;
+    --report)   REPORT="$2";   shift 2 ;;
+    *)          usage ;;
+  esac
+done
+
+[ -z "$FINDINGS" ] && usage
+
+if ! command -v jq &>/dev/null; then
+  echo "FAIL: jq is required but not installed"
+  exit 1
+fi
+
+echo "Validating: $FINDINGS"
+echo "---"
+
+# 1. Valid JSON
+if ! jq empty "$FINDINGS" 2>/dev/null; then
+  echo "FAIL: Not valid JSON"
+  exit 1
+fi
+echo "PASS: Valid JSON"
+
+# 2. Required envelope fields
+for field in run_id timestamp scope base_ref head_ref verdict tool_status findings; do
+  if [ "$(jq "has(\"$field\")" "$FINDINGS")" != "true" ]; then
+    echo "FAIL: Missing required envelope field: $field"
+    ERRORS=$((ERRORS + 1))
+  fi
+done
+echo "PASS: Envelope fields present"
+
+# 2b. Verdict value validation
+VERDICT=$(jq -r '.verdict // empty' "$FINDINGS" 2>/dev/null)
+if [ -n "$VERDICT" ]; then
+  case "$VERDICT" in
+    PASS|WARN|FAIL) echo "PASS: Verdict value valid ($VERDICT)" ;;
+    *) echo "FAIL: Invalid verdict value: $VERDICT (must be PASS/WARN/FAIL)"; ERRORS=$((ERRORS + 1)) ;;
+  esac
+fi
+
+# 2c. Strengths is an array (if present)
+if [ "$(jq 'has("strengths")' "$FINDINGS")" = "true" ]; then
+  if [ "$(jq '.strengths | type' "$FINDINGS")" != '"array"' ]; then
+    echo "FAIL: strengths must be an array"
+    ERRORS=$((ERRORS + 1))
+  else
+    echo "PASS: Strengths is an array ($(jq '.strengths | length' "$FINDINGS") items)"
+  fi
+fi
+
+# 2d. Spec gaps is an array (if present)
+if [ "$(jq 'has("spec_gaps")' "$FINDINGS")" = "true" ]; then
+  if [ "$(jq '.spec_gaps | type' "$FINDINGS")" != '"array"' ]; then
+    echo "FAIL: spec_gaps must be an array"
+    ERRORS=$((ERRORS + 1))
+  else
+    echo "PASS: spec_gaps is an array ($(jq '.spec_gaps | length' "$FINDINGS") items)"
+  fi
+fi
+
+# 3. Required finding fields
+FINDING_COUNT=$(jq '.findings | length' "$FINDINGS")
+echo "INFO: $FINDING_COUNT findings"
+
+REQUIRED_FIELDS='["id","source","pass","severity","confidence","file","line","summary"]'
+# Count findings that are missing at least one required field
+BAD_FINDING_COUNT=$(jq --argjson req "$REQUIRED_FIELDS" \
+  '[.findings[] | . as $f | select([$req[] | select($f[.] == null)] | length > 0)] | length' \
+  "$FINDINGS")
+if [ "$BAD_FINDING_COUNT" -gt 0 ]; then
+  # Show which fields are missing for debugging
+  MISSING_DETAIL=$(jq -r --argjson req "$REQUIRED_FIELDS" \
+    '.findings[] | . as $f | [$req[] | select($f[.] == null)] | select(length > 0) | "  finding \($f.summary // $f.file // "unknown"): missing \(join(", "))"' \
+    "$FINDINGS" 2>/dev/null | head -5)
+  echo "FAIL: $BAD_FINDING_COUNT findings missing required fields"
+  echo "$MISSING_DETAIL"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "PASS: All findings have required fields"
+fi
+
+# 4. Confidence gating — no AI findings below 0.65
+LOW_CONF=$(jq '[.findings[] | select(.source == "ai" and .confidence < 0.65)] | length' "$FINDINGS")
+if [ "$LOW_CONF" -gt 0 ]; then
+  echo "FAIL: $LOW_CONF AI findings below 0.65 confidence (should have been filtered)"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "PASS: Confidence gating OK"
+fi
+
+# 5. Evidence gating — high/critical must have failure_mode
+MISSING_EVIDENCE=$(jq '[.findings[] | select((.severity == "high" or .severity == "critical") and (.failure_mode == null or .failure_mode == ""))] | length' "$FINDINGS")
+if [ "$MISSING_EVIDENCE" -gt 0 ]; then
+  echo "FAIL: $MISSING_EVIDENCE high/critical findings missing failure_mode"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "PASS: Evidence gating OK"
+fi
+
+# 6. Valid severity values
+BAD_SEV=$(jq '[.findings[] | select(.severity | IN("low","medium","high","critical") | not)] | length' "$FINDINGS")
+if [ "$BAD_SEV" -gt 0 ]; then
+  echo "FAIL: $BAD_SEV findings with invalid severity"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "PASS: Severity values valid"
+fi
+
+# 7. Valid source values
+BAD_SRC=$(jq '[.findings[] | select(.source | IN("deterministic","ai") | not)] | length' "$FINDINGS")
+if [ "$BAD_SRC" -gt 0 ]; then
+  echo "FAIL: $BAD_SRC findings with invalid source"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "PASS: Source values valid"
+fi
+
+# 8. Tool status present and non-empty
+TOOL_COUNT=$(jq '.tool_status | keys | length' "$FINDINGS")
+if [ "$TOOL_COUNT" -eq 0 ]; then
+  echo "FAIL: tool_status is empty"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "PASS: tool_status has $TOOL_COUNT entries"
+fi
+
+# 9. Action tier classification — every finding should have an action_tier
+MISSING_TIER=$(jq '[.findings[] | select(.action_tier == null)] | length' "$FINDINGS")
+if [ "$MISSING_TIER" -gt 0 ]; then
+  echo "FAIL: $MISSING_TIER findings missing action_tier classification"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "PASS: All findings have action_tier"
+fi
+
+# 10. Tier summary consistency (if present)
+if [ "$(jq 'has("tier_summary")' "$FINDINGS")" = "true" ]; then
+  MUST=$(jq '.tier_summary.must_fix // 0' "$FINDINGS")
+  SHOULD=$(jq '.tier_summary.should_fix // 0' "$FINDINGS")
+  CONSIDER=$(jq '.tier_summary.consider // 0' "$FINDINGS")
+  TOTAL=$((MUST + SHOULD + CONSIDER))
+  if [ "$TOTAL" -ne "$FINDING_COUNT" ]; then
+    echo "WARN: tier_summary counts ($TOTAL) don't match findings count ($FINDING_COUNT)"
+  else
+    echo "PASS: tier_summary consistent (must_fix=$MUST, should_fix=$SHOULD, consider=$CONSIDER)"
+  fi
+fi
+
+# 11. Validate report markdown if provided
+if [ -n "$REPORT" ]; then
+  echo "---"
+  echo "Validating report: $REPORT"
+  if [ ! -f "$REPORT" ]; then
+    echo "FAIL: Report file not found"
+    ERRORS=$((ERRORS + 1))
+  else
+    # Required sections
+    for section in "Code Review:" "Verdict:" "Strengths" "Summary"; do
+      if ! grep -q "$section" "$REPORT" 2>/dev/null; then
+        echo "WARN: Report missing expected section containing '$section'"
+      fi
+    done
+    # Tier sections (at least one should be present unless zero findings)
+    TIER_FOUND=0
+    for tier in "Must Fix" "Should Fix" "Consider"; do
+      if grep -q "$tier" "$REPORT" 2>/dev/null; then
+        TIER_FOUND=$((TIER_FOUND + 1))
+      fi
+    done
+    if [ "$TIER_FOUND" -eq 0 ] && [ "$FINDING_COUNT" -gt 0 ]; then
+      echo "WARN: Report has findings but no tier sections (Must Fix / Should Fix / Consider)"
+    fi
+    echo "PASS: Report file exists and is non-empty"
+  fi
+fi
+
+echo "---"
+if [ "$ERRORS" -gt 0 ]; then
+  echo "RESULT: FAIL ($ERRORS errors)"
+  exit 1
+else
+  echo "RESULT: PASS (all checks passed)"
+  exit 0
+fi

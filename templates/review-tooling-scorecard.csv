@@ -1,0 +1,11 @@
+option,p1_p2_precision_weighted_20,high_severity_recall_weighted_20,actionability_weighted_12,noise_control_weighted_10,customization_fidelity_weighted_10,context_depth_weighted_10,workflow_fit_weighted_8,governance_security_weighted_5,cost_latency_weighted_5,total_weighted_score,notes
+CodeRabbit,,,,,,,,,,,
+GitHub Copilot Code Review,,,,,,,,,,,
+GitLab Duo Code Review Flow,,,,,,,,,,,
+Graphite AI Reviews,,,,,,,,,,,
+Sourcery,,,,,,,,,,,
+CodeAnt,,,,,,,,,,,
+Bito,,,,,,,,,,,
+Qodo PR-Agent,,,,,,,,,,,
+Hybrid (Vendor + In-house passes),,,,,,,,,,,
+In-house only,,,,,,,,,,,

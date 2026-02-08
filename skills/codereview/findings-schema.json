@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Code Review Findings",
+  "description": "Output schema for the codereview skill. Contains envelope metadata and an array of findings from deterministic and AI review passes.",
+  "type": "object",
+  "required": ["run_id", "timestamp", "scope", "base_ref", "head_ref", "verdict", "tool_status", "findings"],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "description": "Unique identifier for this review run (ISO timestamp + short hash)"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of when the review started"
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["branch", "range", "staged", "commit", "pr", "path"],
+      "description": "What kind of diff was reviewed"
+    },
+    "base_ref": {
+      "type": "string",
+      "description": "Base reference (branch name, commit SHA, or PR base)"
+    },
+    "head_ref": {
+      "type": "string",
+      "description": "Head reference (branch name, commit SHA, or PR head)"
+    },
+    "pr_number": {
+      "type": ["integer", "null"],
+      "description": "PR number if reviewing a pull request, null otherwise"
+    },
+    "files_reviewed": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of file paths included in the diff"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "WARN", "FAIL"],
+      "description": "Overall merge readiness verdict. PASS: no must-fix issues. WARN: has should-fix issues but no blockers. FAIL: has must-fix issues that block merge."
+    },
+    "verdict_reason": {
+      "type": "string",
+      "description": "1-2 sentence explanation of the verdict"
+    },
+    "strengths": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "2-3 things done well in this change, identified by the review judge"
+    },
+    "spec_gaps": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Requirements from the spec not addressed by the diff. Empty array if no spec was provided."
+    },
+    "tool_status": {
+      "type": "object",
+      "description": "Status of each tool/pass that was attempted",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["ran", "skipped", "failed", "not_installed"]
+          },
+          "version": {
+            "type": ["string", "null"]
+          },
+          "finding_count": {
+            "type": "integer"
+          },
+          "note": {
+            "type": ["string", "null"],
+            "description": "Why skipped/failed, or install hint"
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "source", "pass", "severity", "confidence", "file", "line", "summary"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable finding ID: <pass>-<file-hash>-<line>"
+          },
+          "source": {
+            "type": "string",
+            "enum": ["deterministic", "ai"],
+            "description": "Whether this came from a deterministic tool or an AI pass"
+          },
+          "pass": {
+            "type": "string",
+            "enum": ["correctness", "security", "reliability", "performance", "testing", "maintainability"],
+            "description": "Which review pass produced this finding"
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["low", "medium", "high", "critical"]
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Confidence score. AI findings below 0.65 are suppressed."
+          },
+          "file": {
+            "type": "string",
+            "description": "Relative path to the file"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Line number (0 if file-level finding)"
+          },
+          "summary": {
+            "type": "string",
+            "description": "One-line issue statement"
+          },
+          "evidence": {
+            "type": ["string", "null"],
+            "description": "Concrete evidence: code snippet, tool output, or reproduction steps"
+          },
+          "failure_mode": {
+            "type": ["string", "null"],
+            "description": "What breaks and when. Required for high/critical severity."
+          },
+          "fix": {
+            "type": ["string", "null"],
+            "description": "Smallest safe remediation"
+          },
+          "tests_to_add": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Suggested test scenarios to cover this finding"
+          },
+          "action_tier": {
+            "type": "string",
+            "enum": ["must_fix", "should_fix", "consider"],
+            "description": "Action tier: must_fix (critical/high, conf>=0.80), should_fix (medium or high 0.65-0.79), consider (low or conf 0.65-0.74)"
+          }
+        }
+      }
+    },
+    "tier_summary": {
+      "type": "object",
+      "description": "Count of findings per action tier",
+      "properties": {
+        "must_fix": { "type": "integer" },
+        "should_fix": { "type": "integer" },
+        "consider": { "type": "integer" }
+      }
+    }
+  }
+}

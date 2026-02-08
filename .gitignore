@@ -1,0 +1,15 @@
+data
+
+# Sonar outputs
+.sonarqube/
+.scannerwork/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# IDEs
+.idea
