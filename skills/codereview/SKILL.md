@@ -32,7 +32,9 @@ Parse the argument to determine what to review:
 **If PR number provided** (digits only):
 ```bash
 gh pr diff <number> > /tmp/codereview-diff.patch
+CHANGED_FILES=$(gh pr view <number> --json files --jq '.files[].path')
 gh pr view <number> --json title,body,files --jq '{title: .title, body: .body, files: [.files[].path]}' 2>/dev/null
+# SCOPE=pr, PR_NUMBER=<number>
 ```
 
 **If `--base <branch>` provided** (branch review — all commits since divergence):
@@ -40,6 +42,7 @@ gh pr view <number> --json title,body,files --jq '{title: .title, body: .body, f
 # Three-dot diff: everything committed on this branch since it diverged from <branch>
 MERGE_BASE=$(git merge-base <branch> HEAD)
 git diff $MERGE_BASE..HEAD
+CHANGED_FILES=$(git diff $MERGE_BASE..HEAD --name-only)
 # SCOPE=branch, BASE_REF=<branch>, HEAD_REF=HEAD
 ```
 This is the primary mode for **wave-end reviews** — review all work done on a feature branch.
@@ -47,6 +50,7 @@ This is the primary mode for **wave-end reviews** — review all work done on a 
 **If `--range <from>..<to>` provided** (specific commit range):
 ```bash
 git diff <from>..<to>
+CHANGED_FILES=$(git diff <from>..<to> --name-only)
 # SCOPE=range, BASE_REF=<from>, HEAD_REF=<to>
 ```
 Use this for reviewing a specific wave of commits (e.g., "review the last 5 commits").
@@ -54,6 +58,7 @@ Use this for reviewing a specific wave of commits (e.g., "review the last 5 comm
 **If path provided:**
 ```bash
 git diff HEAD -- <path>
+CHANGED_FILES=$(git diff HEAD --name-only -- <path>)
 # SCOPE=path
 ```
 
@@ -63,10 +68,12 @@ git diff HEAD -- <path>
 STAGED=$(git diff --cached --stat 2>/dev/null)
 if [ -n "$STAGED" ]; then
   git diff --cached
+  CHANGED_FILES=$(git diff --cached --name-only)
   # SCOPE=staged
 else
   # Fall back to last commit
   git diff HEAD~1
+  CHANGED_FILES=$(git diff HEAD~1 --name-only)
   # SCOPE=commit
 fi
 ```
@@ -79,9 +86,10 @@ fi
 
 **Store results for later steps:**
 - `DIFF` — the full diff content
-- `CHANGED_FILES` — list of changed file paths (extracted from the diff via `--stat` or `--name-only`)
+- `CHANGED_FILES` — list of changed file paths (one per line, extracted via `--name-only`)
 - `SCOPE` — one of `branch`, `range`, `staged`, `commit`, `pr`, `path`
 - `BASE_REF` / `HEAD_REF` — the base and head references
+- `PR_NUMBER` — the PR number in PR mode, `null` otherwise
 
 These variables are referenced throughout subsequent steps.
 
@@ -163,6 +171,7 @@ LANGS=""
 echo "$CHANGED_FILES" | grep -qE '\.py$'  && LANGS="$LANGS python"
 echo "$CHANGED_FILES" | grep -qE '\.go$'  && LANGS="$LANGS go"
 echo "$CHANGED_FILES" | grep -qE '\.(ts|tsx)$' && LANGS="$LANGS typescript"
+# JS/JSX maps to typescript — the standards skill uses a single typescript.md for both
 echo "$CHANGED_FILES" | grep -qE '\.(js|jsx)$' && LANGS="$LANGS typescript"
 echo "$CHANGED_FILES" | grep -qE '\.sh$'  && LANGS="$LANGS shell"
 
@@ -217,7 +226,9 @@ If a spec is found, include it in the context packet for requirements completene
 
 Before AI review, run available deterministic tools. Their output serves two purposes: (1) findings with `"source": "deterministic"` go directly into the final report, and (2) AI passes receive the scan results so they skip restating what tools already caught.
 
-**Check tool availability and run each.** Scope scans to `CHANGED_FILES` where the tool supports it — this is faster and avoids noise from unrelated files:
+**Check tool availability and run each.** Scope scans to `CHANGED_FILES` where the tool supports it — this is faster and avoids noise from unrelated files.
+
+**Note on file paths:** `CHANGED_FILES` is newline-delimited. When passing to tools, use `xargs` or quote-safe expansion to handle paths with spaces: `echo "$CHANGED_FILES" | xargs -I{} ...` or convert to an array first.
 
 ```bash
 # semgrep — static analysis / custom rules (scoped to changed files)
@@ -529,6 +540,8 @@ may have missed something. Use your judgment.
 **Verdict:** PASS/WARN/FAIL | **Must Fix:** N | **Should Fix:** N | **Consider:** N
 ```
 
+**Source column format:** The report's Source column combines the `source` and `pass` fields for readability. AI findings show as `AI:<pass>` (e.g., `AI:security` means `source=ai, pass=security`). Deterministic findings show the tool name (e.g., `semgrep`, `shellcheck`).
+
 **For PR mode with inline comments:**
 
 Ask the user: "Would you like me to post these findings as inline PR comments?"
@@ -729,7 +742,7 @@ Reviews changes against `main` and checks if the spec requirements are addressed
                               │
 ┌──────────────────────────────────────────────────────────────┐
 │  Step 3: Deterministic Scans                                  │
-│  semgrep, trivy, osv-scanner, pre-commit                      │
+│  semgrep, trivy, osv-scanner, shellcheck, pre-commit          │
 │  → Produces deterministic findings                            │
 └──────────────────────────────────────────────────────────────┘
                               │
@@ -827,7 +840,7 @@ Reviews changes against `main` and checks if the spec requirements are addressed
 | Check | Requirement |
 |-------|-------------|
 | JSON structure | `findings.json` validates against `findings-schema.json` |
-| Envelope fields | `run_id`, `timestamp`, `scope`, `base_ref`, `head_ref`, `tool_status`, `verdict` present |
+| Envelope fields | `run_id`, `timestamp`, `scope`, `base_ref`, `head_ref`, `verdict`, `verdict_reason`, `strengths`, `files_reviewed`, `tool_status`, `findings`, `tier_summary` present |
 | Finding fields | Every finding has `id`, `source`, `pass`, `severity`, `confidence`, `file`, `line`, `summary` |
 | Confidence gating | No AI findings with `confidence < 0.65` in final output |
 | Evidence gating | All `high`/`critical` findings have `failure_mode` populated |

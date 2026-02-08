@@ -3,7 +3,7 @@
   "title": "Code Review Findings",
   "description": "Output schema for the codereview skill. Contains envelope metadata and an array of findings from deterministic and AI review passes.",
   "type": "object",
-  "required": ["run_id", "timestamp", "scope", "base_ref", "head_ref", "verdict", "tool_status", "findings"],
+  "required": ["run_id", "timestamp", "scope", "base_ref", "head_ref", "verdict", "verdict_reason", "strengths", "files_reviewed", "tool_status", "findings", "tier_summary"],
   "properties": {
     "run_id": {
       "type": "string",
@@ -142,7 +142,7 @@
           "action_tier": {
             "type": "string",
             "enum": ["must_fix", "should_fix", "consider"],
-            "description": "Action tier: must_fix (critical/high, conf>=0.80), should_fix (medium or high 0.65-0.79), consider (low or conf 0.65-0.74)"
+            "description": "Action tier: must_fix (critical/high, conf>=0.80), should_fix (medium or high 0.65-0.79), consider (everything else above confidence floor)"
           }
         }
       }

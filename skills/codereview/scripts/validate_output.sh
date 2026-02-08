@@ -4,7 +4,7 @@
 #
 # Checks:
 #  1.  findings.json is valid JSON
-#  2.  Required envelope fields (run_id, timestamp, scope, base_ref, head_ref, verdict, tool_status, findings)
+#  2.  Required envelope fields (run_id, timestamp, scope, base_ref, head_ref, verdict, verdict_reason, strengths, files_reviewed, tool_status, findings, tier_summary)
 #  2b. Verdict value is PASS/WARN/FAIL
 #  2c. Strengths is an array (if present)
 #  2d. Spec gaps is an array (if present)
@@ -13,8 +13,10 @@
 #  5.  Evidence gating: high/critical findings have failure_mode populated
 #  6.  Valid severity values
 #  7.  Valid source values
+#  7b. Valid pass values
 #  8.  Tool status present and non-empty
 #  9.  Action tier classification on every finding
+#  9b. Valid action_tier values
 #  10. Tier summary consistency
 #  11. Report markdown: verdict, strengths, tier sections, summary
 
@@ -55,13 +57,17 @@ fi
 echo "PASS: Valid JSON"
 
 # 2. Required envelope fields
-for field in run_id timestamp scope base_ref head_ref verdict tool_status findings; do
+ENVELOPE_ERRORS=0
+for field in run_id timestamp scope base_ref head_ref verdict verdict_reason strengths files_reviewed tool_status findings tier_summary; do
   if [ "$(jq "has(\"$field\")" "$FINDINGS")" != "true" ]; then
     echo "FAIL: Missing required envelope field: $field"
+    ENVELOPE_ERRORS=$((ENVELOPE_ERRORS + 1))
     ERRORS=$((ERRORS + 1))
   fi
 done
-echo "PASS: Envelope fields present"
+if [ "$ENVELOPE_ERRORS" -eq 0 ]; then
+  echo "PASS: Envelope fields present"
+fi
 
 # 2b. Verdict value validation
 VERDICT=$(jq -r '.verdict // empty' "$FINDINGS" 2>/dev/null)
@@ -149,6 +155,15 @@ else
   echo "PASS: Source values valid"
 fi
 
+# 7b. Valid pass values
+BAD_PASS=$(jq '[.findings[] | select(.pass | IN("correctness","security","reliability","performance","testing","maintainability") | not)] | length' "$FINDINGS")
+if [ "$BAD_PASS" -gt 0 ]; then
+  echo "FAIL: $BAD_PASS findings with invalid pass value"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "PASS: Pass values valid"
+fi
+
 # 8. Tool status present and non-empty
 TOOL_COUNT=$(jq '.tool_status | keys | length' "$FINDINGS")
 if [ "$TOOL_COUNT" -eq 0 ]; then
@@ -165,6 +180,15 @@ if [ "$MISSING_TIER" -gt 0 ]; then
   ERRORS=$((ERRORS + 1))
 else
   echo "PASS: All findings have action_tier"
+fi
+
+# 9b. Valid action_tier values
+BAD_TIER=$(jq '[.findings[] | select(.action_tier != null and (.action_tier | IN("must_fix","should_fix","consider") | not))] | length' "$FINDINGS")
+if [ "$BAD_TIER" -gt 0 ]; then
+  echo "FAIL: $BAD_TIER findings with invalid action_tier value"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "PASS: Action tier values valid"
 fi
 
 # 10. Tier summary consistency (if present)
