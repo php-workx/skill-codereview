@@ -12,3 +12,7 @@ prompts/
 ```
 
 These are read at runtime by the skill during Step 4 (explorer sub-agents and review judge).
+
+Also in this directory:
+
+- `design.md` — Architecture diagram, design rationale table, and future v2 plans (not needed at runtime)

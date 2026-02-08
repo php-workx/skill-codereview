@@ -1,6 +1,6 @@
 ---
 name: codereview
-description: 'AI-powered multi-pass code review for PRs and local diffs. Triggers: "code review", "review PR", "review this diff", "review my changes", "review this PR", "/codereview".'
+description: 'Use when reviewing code changes before merge — PRs, staged files, branches, or commit ranges. Also for pre-merge checks, finding bugs, security audits, or checking implementation against a spec. Triggers: "code review", "review PR", "review this diff", "review my changes", "check for bugs", "security review", "/codereview".'
 ---
 
 # Code Review Skill
@@ -20,6 +20,16 @@ description: 'AI-powered multi-pass code review for PRs and local diffs. Trigger
 /codereview src/auth/                   # review changes in specific path
 /codereview --base main --spec plan.md  # branch review with spec check
 ```
+
+---
+
+## When NOT to Use
+
+- **Single-line typo fixes** — just fix it, no review needed
+- **Documentation-only changes** — markdown/comment edits don't need multi-pass review
+- **Generated code** (protobuf, OpenAPI stubs) — review the generator config, not the output
+- **Reverts** — if reverting a known-bad commit, skip the review
+- **Empty diffs** — the skill detects this and exits, but don't invoke it if you already know there's nothing to review
 
 ---
 
@@ -729,87 +739,22 @@ Reviews changes against `main` and checks if the spec requirements are addressed
 
 ---
 
-## Architecture: Explorer-Judge Pattern
+## Common Mistakes
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  Step 2: Context Gathering                                    │
-│  - Diff analysis, callers/callees, dead code check            │
-│  - Complexity analysis (radon/gocyclo)                        │
-│  - Spec/plan loading                                          │
-│  → Produces context packet                                    │
-└──────────────────────────────────────────────────────────────┘
-                              │
-┌──────────────────────────────────────────────────────────────┐
-│  Step 3: Deterministic Scans                                  │
-│  semgrep, trivy, osv-scanner, shellcheck, pre-commit          │
-│  → Produces deterministic findings                            │
-└──────────────────────────────────────────────────────────────┘
-                              │
-            ┌─────────────────┼─────────────────┐
-            ▼                 ▼                 ▼
-┌───────────────┐ ┌───────────────┐ ┌───────────────┐
-│ Explorer:     │ │ Explorer:     │ │ Explorer:     │  ... (4 total)
-│ Correctness   │ │ Security      │ │ Reliability   │
-│               │ │               │ │               │
-│ Uses Grep,    │ │ Uses Grep,    │ │ Uses Grep,    │
-│ Read, Glob    │ │ Read, Glob    │ │ Read, Glob    │
-│ to investigate│ │ to investigate│ │ to investigate│
-│               │ │               │ │               │
-│ Returns JSON  │ │ Returns JSON  │ │ Returns JSON  │
-│ findings      │ │ findings      │ │ findings      │
-└───────┬───────┘ └───────┬───────┘ └───────┬───────┘
-        │                 │                 │
-        └─────────────────┼─────────────────┘
-                          ▼
-┌──────────────────────────────────────────────────────────────┐
-│  Review Judge                                                 │
-│  - Deduplicates explorer findings                             │
-│  - Validates claims against codebase (Grep/Read)              │
-│  - Assesses strengths                                         │
-│  - Checks spec completeness                                   │
-│  - Produces verdict: PASS / WARN / FAIL                       │
-│  → Returns validated findings + verdict + strengths            │
-└──────────────────────────────────────────────────────────────┘
-                          │
-┌──────────────────────────────────────────────────────────────┐
-│  Step 5: Classify into tiers                                  │
-│  Step 6: Format report with Next Steps                        │
-│  Step 7: Save artifacts (.md + .json)                         │
-└──────────────────────────────────────────────────────────────┘
-```
-
-**Why explorer-judge instead of independent passes:**
-- Explorers use `sonnet` (fast, good at search) — cheaper and faster for investigation
-- The judge uses the default model (thorough) — better for synthesis and verdict
-- Explorers can use tools (Grep/Read/Glob) to deeply investigate their area
-- The judge sees all findings together, resolving conflicts and removing duplicates
-- Total context pressure is lower: each explorer only handles one specialty
+| Mistake | What Goes Wrong | Fix |
+|---------|----------------|-----|
+| Launching explorers without reading prompt files first | Explorers get no global contract or pass-specific instructions, produce unstructured output | Always `Read` the prompt files in Step 4 before constructing explorer prompts |
+| Launching judge before all 4 explorers finish | Judge has incomplete findings, misses cross-cutting issues | Wait for all 4 Task results before launching the judge |
+| Posting PR comments without user confirmation | Unwanted noise on the PR, user didn't consent | Always ask "Would you like me to post these as inline PR comments?" first |
+| Forgetting to include deterministic scan results in explorer prompts | Explorers restate what semgrep/trivy already found, creating duplicates | Pass scan summaries to each explorer with "do not restate" instruction |
+| Skipping context gathering (Step 2) | Explorers can't trace callers/callees, miss integration bugs | Step 2 is critical — don't jump straight to Step 3/4 |
+| Not extracting `CHANGED_FILES` in Step 1 | Steps 2d, 2f, and 3 can't scope to changed files, run on entire repo | Every diff mode must set `CHANGED_FILES` via `--name-only` |
 
 ---
 
-## Design Rationale
+## Architecture & Design Rationale
 
-| Decision | Why | Source |
-|----------|-----|--------|
-| Explorer-judge architecture | Specialized sub-agents investigate deeply, judge synthesizes and validates | Vibe/council explorer pattern, context window management |
-| Complexity analysis in context | Feed radon/gocyclo scores to AI so it flags high-complexity functions | Vibe skill complexity step |
-| Language standards (optional) | Give explorers concrete language-specific rules; graceful degradation if not installed | Vibe/standards skill two-tier system |
-| Dead code / YAGNI check | Avoid reviewing and fixing unused code — waste of agent time | receiving-code-review YAGNI pattern |
-| Spec/plan comparison | Check implementation completeness against requirements | requesting-code-review plan comparison |
-| Merge verdict (PASS/WARN/FAIL) | Clear ship/no-ship signal for humans and downstream agents | Vibe/council verdict pattern, requesting-code-review assessment |
-| Strengths section | Acknowledge good patterns — review isn't just finding faults | requesting-code-review strengths output |
-| Configurable pushback level | fix-all for agent workflows, cautious for human review | User feedback: agents should fix most issues, but not rabbit-hole |
-| Configurable review cadence | pre-commit for quality-critical, wave-end for throughput | User request: some projects need every-commit review |
-| Next Steps with fix ordering | Guide downstream agents on what to fix and in what order | receiving-code-review implementation ordering |
-| Deterministic scans before AI | Run semgrep/trivy/osv-scanner first so AI skips restating their findings | Previous plan, playbook 4-stage pipeline |
-| Comprehensive findings (no hard cap) | Code agents fix fast — surface everything actionable, let tiers prioritize | Agent-assisted workflow reality |
-| Action tiers (Must/Should/Consider) | Structured prioritization without losing lower-severity findings | Replaces rigid comment budget |
-| Confidence floor (0.65) | Dramatically reduces false positives | Playbook signal controls |
-| Structured JSON + Markdown output | JSON for machine consumption and validation; Markdown for humans | Global contract schema |
-| Envelope metadata in artifacts | run_id/timestamp/scope/tool_status/verdict make reviews traceable | Previous plan |
-| Best-effort degradation | Skip unavailable tools with explicit status rather than failing | Previous plan |
-| Repo-level config file | Teams customize passes, cadence, pushback, paths, thresholds | CodeRabbit `.coderabbit.yaml`, Gemini `config.yaml` |
+See `references/design.md` for the full architecture diagram, explorer-judge rationale, design decision table, and future v2 plans. Not needed at runtime.
 
 ---
 
@@ -868,19 +813,10 @@ bash skills/codereview/scripts/validate_output.sh \
 
 ---
 
-## Future: Multi-Model Consensus (v2)
-
-Running the same review across multiple models (e.g., Claude + Codex) and comparing their findings could significantly improve review quality. When two models independently flag the same issue, confidence is very high. When they disagree, the disagreement itself is a signal worth human attention.
-
-Adversarial debate (where models review each other's findings and must steel-man opposing views before revising) is another promising direction — the council/vibe skills demonstrate this pattern works well.
-
-These are areas to explore once the core single-model review is battle-tested.
-
----
-
 ## See Also
 
 - `findings-schema.json` — JSON Schema for the findings artifact
 - `scripts/validate_output.sh` — Output validation script
+- `references/design.md` — Architecture diagram, design rationale, and future plans
 - `docs/tooling-ai-code-review-playbook-2026-02-08.md` — Full playbook and reference architecture
 - `templates/review-tooling-scorecard.csv` — Evaluation scorecard for comparing tools
