@@ -9,12 +9,14 @@
 #  2c. Strengths is an array (if present)
 #  2d. Spec gaps is an array (if present)
 #  3.  Each finding has required fields (id, source, pass, severity, confidence, file, line, summary)
+#  3b. Optional sources field (if present) is an array
 #  4.  Confidence gating: no AI findings below 0.65
 #  5.  Evidence gating: high/critical findings have failure_mode populated
 #  6.  Valid severity values
 #  7.  Valid source values
 #  7b. Valid pass values
 #  8.  Tool status present and non-empty
+#  8b. Tool status values valid (ran/skipped/failed/not_installed/sandbox_blocked)
 #  9.  Action tier classification on every finding
 #  9b. Valid action_tier values
 #  10. Tier summary consistency
@@ -119,6 +121,15 @@ else
   echo "PASS: All findings have required fields"
 fi
 
+# 3b. Optional sources field type validation
+BAD_SOURCES=$(jq '[.findings[] | select(has("sources") and (.sources | type != "array"))] | length' "$FINDINGS")
+if [ "$BAD_SOURCES" -gt 0 ]; then
+  echo "FAIL: $BAD_SOURCES findings have non-array sources field"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "PASS: Optional sources field type valid"
+fi
+
 # 4. Confidence gating — no AI findings below 0.65
 LOW_CONF=$(jq '[.findings[] | select(.source == "ai" and .confidence < 0.65)] | length' "$FINDINGS")
 if [ "$LOW_CONF" -gt 0 ]; then
@@ -171,6 +182,15 @@ if [ "$TOOL_COUNT" -eq 0 ]; then
   ERRORS=$((ERRORS + 1))
 else
   echo "PASS: tool_status has $TOOL_COUNT entries"
+fi
+
+# 8b. Tool status values valid
+BAD_TOOL_STATUS=$(jq '[.tool_status[]? | select((.status // "") | IN("ran","skipped","failed","not_installed","sandbox_blocked") | not)] | length' "$FINDINGS")
+if [ "$BAD_TOOL_STATUS" -gt 0 ]; then
+  echo "FAIL: $BAD_TOOL_STATUS tool_status entries with invalid status value"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "PASS: Tool status values valid"
 fi
 
 # 9. Action tier classification — every finding should have an action_tier

@@ -238,12 +238,95 @@ Before AI review, run available deterministic tools. Their output serves two pur
 
 **Check tool availability and run each.** Scope scans to `CHANGED_FILES` where the tool supports it — this is faster and avoids noise from unrelated files.
 
+**Permission strategy (sandboxed runners):** request elevated permissions **before** starting the Step 3 scan bundle (single escalation for the whole bundle), instead of waiting for fail-then-retry. This avoids repeated sandbox failures for tools that need host caches or Docker access.
+
+Use a one-line justification like:
+- `Run deterministic code-review scanners with host cache/docker access to avoid sandbox permission failures and collect complete tool_status output.`
+
 **Note on file paths:** `CHANGED_FILES` is newline-delimited. When passing to tools, use `xargs` or quote-safe expansion to handle paths with spaces: `echo "$CHANGED_FILES" | xargs -I{} ...` or convert to an array first.
+
+**Bash compatibility (macOS):** avoid `mapfile`/`readarray` because default macOS Bash is 3.2 and does not support them.
+
+```bash
+# Bash 3-safe way to convert CHANGED_FILES (newline-delimited) into an array
+FILES=()
+while IFS= read -r f; do
+  [ -n "$f" ] && FILES+=("$f")
+done <<EOF
+$CHANGED_FILES
+EOF
+
+# Safe expansion preserves spaces in paths
+semgrep scan --json --quiet "${FILES[@]}"
+```
+
+**Parallel policy:** when both are available, run `semgrep` and `sonarqube` in parallel, then wait for both before normalization/deduplication.
+
+**Sandbox/cache setup:** initialize writable cache dirs before scans so tools do not fail on default cache locations in sandboxed runs.
+
+```bash
+export TRIVY_CACHE_DIR="${TRIVY_CACHE_DIR:-/tmp/trivy-cache}"
+export PRE_COMMIT_HOME="${PRE_COMMIT_HOME:-/tmp/pre-commit-cache}"
+export SEMGREP_HOME="${SEMGREP_HOME:-/tmp/semgrep-home}"
+export GOCACHE="${GOCACHE:-/tmp/go-build-cache}"
+export GOMODCACHE="${GOMODCACHE:-/tmp/go-mod-cache}"
+export GOPATH="${GOPATH:-/tmp/go}"
+mkdir -p "$TRIVY_CACHE_DIR" "$PRE_COMMIT_HOME" "$SEMGREP_HOME" "$GOCACHE" "$GOMODCACHE" "$GOPATH"
+```
+
+**Execution safety:** If your runner shell is `zsh` (common in agent environments), do **not** embed a multiline script in a single-quoted `bash -lc '...'` string. Inner single-quoted jq/rg patterns (for example `jq '.results | length'`) will terminate the outer quote and trigger parse errors like `bad pattern` or `no matches found`. For multiline logic, write a temp script with a quoted heredoc and run it with bash.
+
+```bash
+cat > /tmp/codereview_tools.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Safe: inner single quotes stay intact because this is a real script file.
+count=$(jq '.results | length' /tmp/codereview/semgrep.json 2>/dev/null || echo 0)
+echo "semgrep findings: $count"
+EOF
+
+chmod +x /tmp/codereview_tools.sh
+/tmp/codereview_tools.sh
+```
+
+```bash
+# Parallel semgrep + sonarqube pattern (preferred when both tools are present)
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+SONAR_OUT_DIR=".sonarqube/${RUN_ID}"
+mkdir -p /tmp/codereview "$SONAR_OUT_DIR"
+SONAR_SCRIPT="$HOME/.claude/skills/sonarqube/scripts/sonarqube.py"
+[ ! -f "$SONAR_SCRIPT" ] && SONAR_SCRIPT="$HOME/.codex/skills/sonarqube/scripts/sonarqube.py"
+
+SEM_PID=""
+SONAR_PID=""
+SEM_RC=0
+SONAR_RC=0
+
+if command -v semgrep &>/dev/null; then
+  HOME="$SEMGREP_HOME" semgrep scan --json --quiet $CHANGED_FILES > "/tmp/codereview/semgrep-${RUN_ID}.json" 2>"/tmp/codereview/semgrep-${RUN_ID}.err" &
+  SEM_PID=$!
+fi
+
+if [ -f "$SONAR_SCRIPT" ] && command -v python3 &>/dev/null; then
+  python3 "$SONAR_SCRIPT" scan --mode local --severity medium --scope new \
+    --base-ref "${BASE_REF:-HEAD~1}" --list-only --output-dir "$SONAR_OUT_DIR" \
+    > "/tmp/codereview/sonarqube-${RUN_ID}.out" 2>"/tmp/codereview/sonarqube-${RUN_ID}.err" &
+  SONAR_PID=$!
+fi
+
+if [ -n "$SEM_PID" ]; then
+  wait "$SEM_PID"; SEM_RC=$?
+fi
+if [ -n "$SONAR_PID" ]; then
+  wait "$SONAR_PID"; SONAR_RC=$?
+fi
+```
 
 ```bash
 # semgrep — static analysis / custom rules (scoped to changed files)
 if command -v semgrep &>/dev/null; then
-  semgrep scan --json --quiet $CHANGED_FILES 2>/dev/null | head -500
+  HOME="$SEMGREP_HOME" semgrep scan --json --quiet $CHANGED_FILES 2>/dev/null | head -500
 else
   echo "semgrep not installed (pip install semgrep)"
 fi
@@ -252,7 +335,7 @@ fi
 # trivy fs scans the whole project for dependency vulns — scoping to individual
 # files would miss manifest-level findings, so scan the repo root
 if command -v trivy &>/dev/null; then
-  trivy fs . --format json --quiet 2>/dev/null | head -500
+  trivy fs . --cache-dir "$TRIVY_CACHE_DIR" --format json --quiet 2>/dev/null | head -500
 else
   echo "trivy not installed (brew install trivy)"
 fi
@@ -276,6 +359,10 @@ fi
 
 # pre-commit — repo-configured hooks (scoped to changed files)
 if [ -f .pre-commit-config.yaml ] && command -v pre-commit &>/dev/null; then
+  PRE_COMMIT_HOME="$PRE_COMMIT_HOME" \
+  GOCACHE="$GOCACHE" \
+  GOMODCACHE="$GOMODCACHE" \
+  GOPATH="$GOPATH" \
   pre-commit run --files $CHANGED_FILES 2>&1 | head -200
 fi
 
@@ -283,9 +370,9 @@ fi
 # Requires: python3 + sonarqube.py from skill-sonarqube (local mode needs Docker + sonar-scanner)
 # The script auto-starts a local SonarQube container if none is running.
 # Output: .sonarqube/findings.json with structured findings per file.
-SONAR_SCRIPT="$HOME/.claude/skills/sonarqube/sonarqube.py"
+SONAR_SCRIPT="$HOME/.claude/skills/sonarqube/scripts/sonarqube.py"
 if [ ! -f "$SONAR_SCRIPT" ]; then
-  SONAR_SCRIPT="$HOME/.codex/skills/sonarqube/sonarqube.py"
+  SONAR_SCRIPT="$HOME/.codex/skills/sonarqube/scripts/sonarqube.py"
 fi
 if [ -f "$SONAR_SCRIPT" ] && command -v python3 &>/dev/null; then
   python3 "$SONAR_SCRIPT" scan --mode local --severity medium --scope new \
@@ -299,7 +386,16 @@ else
 fi
 ```
 
-**Record `tool_status`** for each tool (ran / skipped / not_installed / failed) with version and finding count. Use these standard keys:
+**Normalize and deduplicate deterministic findings before AI merge:**
+- Normalize each deterministic tool output into the standard finding shape (`pass`, `file`, `line`, `summary`, `severity`, `confidence=1.0`, `evidence`).
+- Build a deterministic dedupe key: `file + ":" + line + ":" + normalize(summary)`.
+- On key collision (e.g., semgrep + sonarqube same issue), keep one finding with:
+  - highest severity,
+  - unioned provenance in `sources` (e.g., `["semgrep","sonarqube"]`),
+  - merged evidence/note text.
+- Feed this deduplicated deterministic set to explorers and final merge.
+
+**Record `tool_status`** for each tool (`ran` / `skipped` / `not_installed` / `sandbox_blocked` / `failed`) with version and finding count. Use these standard keys:
 
 | Key | Tool |
 |-----|------|
@@ -318,6 +414,13 @@ fi
 | `ai_test_adequacy` | Explorer: test adequacy |
 
 This goes into the final JSON artifact envelope.
+
+**Tool status classification rules:**
+- `not_installed`: command not found on PATH.
+- `sandbox_blocked`: stderr indicates permission/sandbox denial (for example `permission denied`, `operation not permitted`, read-only fs/cache path denied).
+- `failed`: command executed but failed for non-sandbox reasons.
+- `skipped`: intentionally not run (for example no matching files, missing config, optional mode).
+- `ran`: completed successfully (with or without findings).
 
 **Convert deterministic findings** into the standard finding schema with `"source": "deterministic"` and `"confidence": 1.0`.
 
@@ -442,7 +545,7 @@ The orchestrator (the agent executing this skill) adds fields that explorers and
 2. **Assign `id`** — generate a stable ID for each finding: `<pass>-<file-hash>-<line>` (e.g., `security-a3f1-42`)
 3. **Combine** deterministic findings (confidence 1.0) with judge's findings into one list
 4. **Confidence floor** — drop any AI finding with `confidence < 0.65`
-5. **Deduplicate** — merge findings that share the same `file` + `line` or describe the same root cause; keep the higher-severity version and note all sources
+5. **Deduplicate** — merge findings that share the same dedupe key (`file + line + normalized summary`) or clearly describe the same root cause; keep the higher-severity version and preserve provenance in `sources` (for example `["semgrep","sonarqube"]`)
 6. **No linter restatement** — remove findings about formatting, naming conventions, or import ordering that linters/formatters already handle
 7. **Evidence check** — for `high` or `critical` severity, verify `failure_mode` is populated; if not, downgrade to `medium`
 
@@ -479,20 +582,20 @@ Output the review in this format:
 **Reviewed:** <N files> | **Total findings:** <N> (from <total pre-filter> raw)
 
 ### Tool Status
-| Tool | Key | Status | Findings |
-|------|-----|--------|----------|
-| semgrep | semgrep | ran | 3 |
-| trivy | trivy | not_installed | — |
-| osv-scanner | osv_scanner | not_installed | — |
-| shellcheck | shellcheck | ran | 1 |
-| pre-commit | pre_commit | skipped | — |
-| sonarqube | sonarqube | not_installed | — |
-| radon | radon | ran | 2 hotspots |
-| standards | standards | ran | python, go |
-| AI: correctness | ai_correctness | ran | 4 |
-| AI: security | ai_security | ran | 2 |
-| AI: reliability | ai_reliability | ran | 1 |
-| AI: test adequacy | ai_test_adequacy | ran | 3 |
+| Tool | Key | Status | Findings | Note |
+|------|-----|--------|----------|------|
+| semgrep | semgrep | ran | 3 | — |
+| trivy | trivy | sandbox_blocked | 0 | cache path permission denied |
+| osv-scanner | osv_scanner | not_installed | — | go install github.com/google/osv-scanner/cmd/osv-scanner@latest |
+| shellcheck | shellcheck | ran | 1 | — |
+| pre-commit | pre_commit | skipped | — | no .pre-commit-config.yaml |
+| sonarqube | sonarqube | not_installed | — | see skill-sonarqube README |
+| radon | radon | ran | 2 hotspots | functions with complexity C or worse |
+| standards | standards | ran | 0 | loaded: python, go |
+| AI: correctness | ai_correctness | ran | 4 | — |
+| AI: security | ai_security | ran | 2 | — |
+| AI: reliability | ai_reliability | ran | 1 | — |
+| AI: test adequacy | ai_test_adequacy | ran | 3 | — |
 
 ---
 
@@ -575,6 +678,17 @@ may have missed something. Use your judgment.
 
 **Source column format:** The report's Source column combines the `source` and `pass` fields for readability. AI findings show as `AI:<pass>` (e.g., `AI:security` means `source=ai, pass=security`). Deterministic findings show the tool name (e.g., `semgrep`, `shellcheck`).
 
+**Tool-status prose rule:** when summarizing deterministic tooling in prose, separate categories so readers can tell what happened:
+- Missing tools: list only `not_installed` tools, and state explicitly that all listed tools were unavailable.
+- Sandbox-blocked tools: list only `sandbox_blocked` tools with the denied path/action.
+- Failed tools: list only `failed` tools (non-sandbox runtime errors).
+- Never merge these into a single mixed sentence.
+
+Example:
+- `Missing tools (all unavailable): semgrep, osv-scanner, sonarqube, radon, gocyclo.`
+- `Sandbox-blocked: trivy (cache path permission denied).`
+- `Failed: pre-commit (hook runtime error).`
+
 **For PR mode with inline comments:**
 
 Ask the user: "Would you like me to post these findings as inline PR comments?"
@@ -619,7 +733,7 @@ Must conform to `findings-schema.json`. Contains the full envelope:
   "spec_gaps": [],
   "tool_status": {
     "semgrep": { "status": "ran", "version": "1.56.0", "finding_count": 3, "note": null },
-    "trivy": { "status": "not_installed", "version": null, "finding_count": 0, "note": "brew install trivy" },
+    "trivy": { "status": "sandbox_blocked", "version": "0.56.0", "finding_count": 0, "note": "cache path permission denied; set TRIVY_CACHE_DIR=/tmp/trivy-cache" },
     "osv_scanner": { "status": "not_installed", "version": null, "finding_count": 0, "note": "go install github.com/google/osv-scanner/cmd/osv-scanner@latest" },
     "shellcheck": { "status": "ran", "version": "0.10.0", "finding_count": 1, "note": null },
     "pre_commit": { "status": "skipped", "version": null, "finding_count": 0, "note": "no .pre-commit-config.yaml" },

@@ -64,7 +64,7 @@
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["ran", "skipped", "failed", "not_installed"]
+            "enum": ["ran", "skipped", "failed", "not_installed", "sandbox_blocked"]
           },
           "version": {
             "type": ["string", "null"]
@@ -121,6 +121,11 @@
           "summary": {
             "type": "string",
             "description": "One-line issue statement"
+          },
+          "sources": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional provenance list for deduplicated findings (e.g., [\"semgrep\", \"sonarqube\"])."
           },
           "evidence": {
             "type": ["string", "null"],
