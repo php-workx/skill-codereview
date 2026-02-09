@@ -1,6 +1,6 @@
 {
   "name": "@php-workx/skill-codereview",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "AI-powered multi-pass code review skill for Claude, Codex, and Cursor. Deterministic scans + parallel explorer-judge AI review with structured findings.",
   "keywords": [
     "skill",

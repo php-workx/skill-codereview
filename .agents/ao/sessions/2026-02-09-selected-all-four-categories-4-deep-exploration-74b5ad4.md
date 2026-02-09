@@ -48,6 +48,20 @@ tags:
 The current order is fine (staged first, then PR, then branch), but add an introductory sentence:
 ```markdown
 ##...
+- till check git state and versions).
+
+In `--check` mode, run all checks and output a summary table:
+
+```
+Release Readiness: NO-GO
+
+  [PASS] Git repo
+  [PASS] CHANGELOG.md exists
+  [PASS] Working tree...
+- till needs: commit classification (Step 4), version suggestion (Step 5), changelog entry generation (Step 6), version bump detection (Step 7), and dry-run output presentation (Step 8).
+
+   Current...
+- til the tag is pushed. That's expected — I won't push without your explicit go-ahead. Let me write the release notes to a local file and the audit trail.
 
 ## Files Changed
 - `/Users/runger/workspaces/skill-codereview/skill/prompts/reviewer-global-contract.md`
@@ -79,6 +93,9 @@ The current order is fine (staged first, then PR, then branch), but add an intro
 - `/Users/runger/workspaces/skill-codereview/skill/references/deterministic-scans.md`
 - `/Users/runger/workspaces/skill-codereview/skill/references/report-template.md`
 - `/Users/runger/workspaces/skill-codereview/skill/references/acceptance-criteria.md`
+- `/Users/runger/workspaces/skill-codereview/package.json`
+- `/Users/runger/workspaces/skill-codereview/.agents/releases/2026-02-09-v1.1.0-notes.md`
+- `/Users/runger/workspaces/skill-codereview/.agents/releases/2026-02-09-v1.1.0.md`
 
 ## Issues
 - `sub-agents`
@@ -95,25 +112,40 @@ The current order is fine (staged first, then PR, then branch), but add an intro
 - `of-scope`
 - `sub-steps`
 - `pre-merge`
+- `re-applied`
+- `dry-run`
+- `gh-release`
+- `pre-flight`
+- `rev-parse`
+- `git-dir`
+- `rev-list`
+- `max-parents`
+- `no-merges`
+- `em-dash`
+- `by-file`
+- `opt-out`
+- `pre-spec-verification`
+- `pre-edit`
+- `go-ahead`
 
 ## Tool Usage
 
 | Tool | Count |
 |------|-------|
-| AskUserQuestion | 2 |
-| Bash | 35 |
-| Edit | 57 |
-| ExitPlanMode | 2 |
-| Glob | 6 |
+| AskUserQuestion | 3 |
+| Bash | 63 |
+| Edit | 59 |
+| ExitPlanMode | 3 |
+| Glob | 8 |
 | Grep | 8 |
-| Read | 64 |
+| Read | 72 |
 | Task | 5 |
 | TaskCreate | 8 |
 | TaskUpdate | 16 |
-| Write | 24 |
+| Write | 27 |
 
 ## Tokens
 
 - **Input:** 0
 - **Output:** 0
-- **Total:** ~1567192 (estimated)
+- **Total:** ~1674585 (estimated)

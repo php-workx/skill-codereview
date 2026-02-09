@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-02-09
+
 ### Added
 - **Spec verification explorer pass** (`reviewer-spec-verification-pass.md`):
   - Per-requirement traceability: extracts requirements from spec, traces to implementation, maps to tests
