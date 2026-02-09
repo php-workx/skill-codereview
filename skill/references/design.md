@@ -28,24 +28,25 @@ This document contains background context for the codereview skill. It is not ne
 │  - Skip concurrency pass if no concurrency primitives         │
 │  - Skip api-contract pass if no public API changes            │
 │  - Skip error-handling pass if test/docs/config only          │
+│  - Skip spec-verification pass if no spec loaded              │
 │  - Core passes (correctness, security, reliability, tests)    │
 │    are never skipped                                          │
 └──────────────────────────────────────────────────────────────┘
                               │
-    ┌────────┬────────┬───────┼───────┬────────┬────────┐
-    ▼        ▼        ▼       ▼       ▼        ▼        ▼
-┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐
-│Correct-││Secur-  ││Reliab- ││Test    ││Error   ││API/    ││Concur- │
-│ness    ││ity     ││ility   ││Adequacy││Handling││Contract││rency   │
-│        ││        ││        ││        ││        ││        ││        │
-│ core   ││ core   ││ core   ││ core   ││extended││extended││extended│
-│        ││        ││        ││        ││        ││        ││        │
-│ Each explorer: chain-of-thought investigation,              │
-│ calibration examples, false positive suppression,           │
-│ Grep/Read/Glob to verify findings                           │
-└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘
-    │         │         │         │         │         │         │
-    └─────────┴─────────┴────┬────┴─────────┴─────────┴─────────┘
+    ┌────────┬────────┬───────┼───────┬────────┬────────┬────────┐
+    ▼        ▼        ▼       ▼       ▼        ▼        ▼        ▼
+┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐
+│Correct-││Secur-  ││Reliab- ││Test    ││Error   ││API/    ││Concur- ││Spec    │
+│ness    ││ity     ││ility   ││Adequacy││Handling││Contract││rency   ││Verif.  │
+│        ││        ││        ││        ││        ││        ││        ││        │
+│ core   ││ core   ││ core   ││ core   ││extended││extended││extended││extended│
+│        ││        ││        ││+ test  ││        ││        ││        ││req→impl│
+│        ││        ││        ││category││        ││        ││        ││→tests  │
+│ Each explorer: chain-of-thought investigation, calibration            │
+│ examples, false positive suppression, Grep/Read/Glob to verify        │
+└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘
+    │         │         │         │         │         │         │         │
+    └─────────┴─────────┴────┬────┴─────────┴─────────┴─────────┴─────────┘
                              ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  Review Judge (prompts/reviewer-judge.md)                     │
@@ -54,9 +55,10 @@ This document contains background context for the codereview skill. It is not ne
 │  2. Root cause grouping (merge related findings)              │
 │  3. Cross-explorer synthesis (catch gaps across explorers)    │
 │  4. Strengths assessment (specific, not generic)              │
-│  5. Spec compliance check                                     │
+│  5. Spec compliance: merge spec-verification explorer data,    │
+│     validate impl/test claims, produce spec_requirements       │
 │  6. Verdict: PASS / WARN / FAIL                               │
-│  → Returns validated findings + verdict + strengths           │
+│  → Returns findings + verdict + strengths + spec_requirements │
 └──────────────────────────────────────────────────────────────┘
                               │
 ┌──────────────────────────────────────────────────────────────┐
@@ -110,6 +112,10 @@ This document contains background context for the codereview skill. It is not ne
 | Language standards (optional) | Give explorers concrete language-specific rules; graceful degradation if not installed | Vibe/standards skill two-tier system |
 | Dead code / YAGNI check | Avoid reviewing and fixing unused code — waste of agent time | receiving-code-review YAGNI pattern |
 | Spec/plan comparison | Check implementation completeness against requirements | requesting-code-review plan comparison |
+| Dedicated spec-verification pass | Requirement extraction, implementation tracing, and test category classification need deep investigation that doesn't fit in the judge's synthesis role | v1 gap: judge did shallow keyword matching, no test category awareness |
+| Test category classification (unit/integration/e2e) | Knowing a test exists is not enough — knowing what *kind* of test it is determines if the right failure modes are caught | User need: DB interaction tested only with mocks misses schema drift |
+| Per-requirement traceability (spec_requirements) | Flat spec_gaps list says what's missing but not what's covered or how — structured output enables downstream tooling and tracking | User need: verify spec section-by-section with evidence |
+| --spec-scope flag | Large specs cover many features; scoping avoids context pollution and irrelevant "not implemented" noise | User need: verify specific milestone or section against diff |
 | Merge verdict (PASS/WARN/FAIL) | Clear ship/no-ship signal for humans and downstream agents | Vibe/council verdict pattern, requesting-code-review assessment |
 | Strengths section | Acknowledge good patterns — review isn't just finding faults | requesting-code-review strengths output |
 | Configurable pushback level | fix-all for agent workflows, cautious for human review | User feedback: agents should fix most issues, but not rabbit-hole |

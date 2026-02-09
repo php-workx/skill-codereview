@@ -58,6 +58,7 @@ Output each finding as a JSON object in an array. Set `pass` to the category tha
 | `performance` | N+1, algorithmic complexity, memory growth |
 | `testing` | Missing tests, stale tests, mock-heavy tests |
 | `maintainability` | Dead code, complexity, readability |
+| `spec_verification` | Spec requirements tracing, test category adequacy |
 
 ```json
 [
@@ -71,7 +72,8 @@ Output each finding as a JSON object in an array. Set `pass` to the category tha
     "evidence": "Code snippet, tool output, or trace showing the issue",
     "failure_mode": "What breaks and when (required for high/critical)",
     "fix": "Smallest safe remediation",
-    "tests_to_add": ["Test scenario descriptions"]
+    "tests_to_add": ["Test scenario descriptions"],
+    "test_category_needed": ["unit", "integration", "e2e"]
   }
 ]
 ```

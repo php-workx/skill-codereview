@@ -21,6 +21,12 @@
 #  9b. Valid action_tier values
 #  10. Tier summary consistency
 #  11. Report markdown: verdict, strengths, tier sections, summary
+#  12. spec_requirements array validation (if present)
+#  12a. Required fields (id, text, source_section, impl_status)
+#  12b. Valid impl_status values
+#  12c. Valid priority values (if present)
+#  12d. Valid test_coverage.status (if present)
+#  12e. Valid test category values (if present)
 
 set -euo pipefail
 
@@ -167,7 +173,7 @@ else
 fi
 
 # 7b. Valid pass values
-BAD_PASS=$(jq '[.findings[] | select(.pass | IN("correctness","security","reliability","performance","testing","maintainability") | not)] | length' "$FINDINGS")
+BAD_PASS=$(jq '[.findings[] | select(.pass | IN("correctness","security","reliability","performance","testing","maintainability","spec_verification") | not)] | length' "$FINDINGS")
 if [ "$BAD_PASS" -gt 0 ]; then
   echo "FAIL: $BAD_PASS findings with invalid pass value"
   ERRORS=$((ERRORS + 1))
@@ -221,6 +227,62 @@ if [ "$(jq 'has("tier_summary")' "$FINDINGS")" = "true" ]; then
     echo "WARN: tier_summary counts ($TOTAL) don't match findings count ($FINDING_COUNT)"
   else
     echo "PASS: tier_summary consistent (must_fix=$MUST, should_fix=$SHOULD, consider=$CONSIDER)"
+  fi
+fi
+
+# 12. spec_requirements validation (if present)
+if [ "$(jq 'has("spec_requirements")' "$FINDINGS")" = "true" ]; then
+  if [ "$(jq '.spec_requirements | type' "$FINDINGS")" != '"array"' ]; then
+    echo "FAIL: spec_requirements must be an array"
+    ERRORS=$((ERRORS + 1))
+  else
+    SPEC_REQ_COUNT=$(jq '.spec_requirements | length' "$FINDINGS")
+    echo "INFO: $SPEC_REQ_COUNT spec requirements"
+
+    # 12a. Required fields in each spec requirement
+    BAD_SPEC_REQ=$(jq '[.spec_requirements[] | select(.id == null or .text == null or .source_section == null or .impl_status == null)] | length' "$FINDINGS")
+    if [ "$BAD_SPEC_REQ" -gt 0 ]; then
+      echo "FAIL: $BAD_SPEC_REQ spec requirements missing required fields (id, text, source_section, impl_status)"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS: All spec requirements have required fields"
+    fi
+
+    # 12b. Valid impl_status values
+    BAD_IMPL=$(jq '[.spec_requirements[] | select(.impl_status | IN("implemented","partial","not_implemented","cannot_determine") | not)] | length' "$FINDINGS")
+    if [ "$BAD_IMPL" -gt 0 ]; then
+      echo "FAIL: $BAD_IMPL spec requirements with invalid impl_status"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS: impl_status values valid"
+    fi
+
+    # 12c. Valid priority values (if present)
+    BAD_PRIORITY=$(jq '[.spec_requirements[] | select(has("priority") and (.priority | IN("must","should","could","informational") | not))] | length' "$FINDINGS")
+    if [ "$BAD_PRIORITY" -gt 0 ]; then
+      echo "FAIL: $BAD_PRIORITY spec requirements with invalid priority"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS: Priority values valid"
+    fi
+
+    # 12d. Valid test_coverage.status (if present)
+    BAD_COV=$(jq '[.spec_requirements[] | select(has("test_coverage") and (.test_coverage.status | IN("covered","partial","missing","not_applicable") | not))] | length' "$FINDINGS")
+    if [ "$BAD_COV" -gt 0 ]; then
+      echo "FAIL: $BAD_COV spec requirements with invalid test_coverage.status"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS: test_coverage.status values valid"
+    fi
+
+    # 12e. Valid test category values (if present)
+    BAD_CAT=$(jq '[.spec_requirements[] | select(has("test_coverage")) | .test_coverage.tests[]? | select(.category | IN("unit","integration","e2e","unknown") | not)] | length' "$FINDINGS")
+    if [ "$BAD_CAT" -gt 0 ]; then
+      echo "FAIL: $BAD_CAT tests with invalid category"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS: Test category values valid"
+    fi
   fi
 fi
 

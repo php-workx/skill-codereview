@@ -3,7 +3,7 @@
   "title": "Code Review Findings",
   "description": "Output schema for the codereview skill. Contains envelope metadata and an array of findings from deterministic and AI review passes.",
   "type": "object",
-  "required": ["run_id", "timestamp", "scope", "base_ref", "head_ref", "verdict", "verdict_reason", "strengths", "files_reviewed", "tool_status", "findings", "tier_summary"],
+  "required": ["run_id", "timestamp", "scope", "base_ref", "head_ref", "verdict", "verdict_reason", "strengths", "files_reviewed", "tool_status", "findings", "tier_summary", "spec_requirements"],
   "properties": {
     "run_id": {
       "type": "string",
@@ -53,7 +53,87 @@
     "spec_gaps": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Requirements from the spec not addressed by the diff. Empty array if no spec was provided."
+      "description": "Requirements from the spec not addressed by the diff. Empty array if no spec was provided. Derived from spec_requirements for backward compatibility."
+    },
+    "spec_requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "text", "source_section", "impl_status"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable requirement ID: REQ-001, REQ-002, etc."
+          },
+          "text": {
+            "type": "string",
+            "description": "The requirement text as extracted from the spec"
+          },
+          "source_section": {
+            "type": "string",
+            "description": "The spec section/heading this requirement was found in"
+          },
+          "priority": {
+            "type": "string",
+            "enum": ["must", "should", "could", "informational"],
+            "description": "Priority inferred from language: must/shall=must, should=should, could/may=could, else informational"
+          },
+          "impl_status": {
+            "type": "string",
+            "enum": ["implemented", "partial", "not_implemented", "cannot_determine"],
+            "description": "Whether the diff addresses this requirement"
+          },
+          "impl_evidence": {
+            "type": ["string", "null"],
+            "description": "File:line references showing where the requirement is implemented, or why it is not"
+          },
+          "impl_files": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Files in the diff that implement this requirement"
+          },
+          "test_coverage": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["covered", "partial", "missing", "not_applicable"],
+                "description": "Overall test coverage status for this requirement"
+              },
+              "tests": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "file": { "type": "string" },
+                    "name": { "type": "string", "description": "Test function/method name" },
+                    "category": {
+                      "type": "string",
+                      "enum": ["unit", "integration", "e2e", "unknown"],
+                      "description": "Classified test category"
+                    },
+                    "category_evidence": {
+                      "type": "string",
+                      "description": "Why this test was classified in this category"
+                    }
+                  }
+                },
+                "description": "Tests that cover this requirement"
+              },
+              "needed_categories": {
+                "type": "array",
+                "items": { "type": "string", "enum": ["unit", "integration", "e2e"] },
+                "description": "Test categories that should exist for this requirement but are missing"
+              },
+              "category_gap_reason": {
+                "type": ["string", "null"],
+                "description": "Why specific test categories are needed (e.g., 'Crosses service boundary, needs integration test')"
+              }
+            }
+          }
+        }
+      },
+      "description": "Per-requirement implementation and test coverage traceability. Populated when --spec is provided, empty array otherwise."
     },
     "tool_status": {
       "type": "object",
@@ -96,7 +176,7 @@
           },
           "pass": {
             "type": "string",
-            "enum": ["correctness", "security", "reliability", "performance", "testing", "maintainability"],
+            "enum": ["correctness", "security", "reliability", "performance", "testing", "maintainability", "spec_verification"],
             "description": "Which review pass produced this finding"
           },
           "severity": {
@@ -143,6 +223,11 @@
             "type": "array",
             "items": { "type": "string" },
             "description": "Suggested test scenarios to cover this finding"
+          },
+          "test_category_needed": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["unit", "integration", "e2e"] },
+            "description": "Which categories of tests are needed for this finding"
           },
           "action_tier": {
             "type": "string",

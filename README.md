@@ -1,22 +1,26 @@
-# skill-codereview
+# codereview
 
-AI-powered multi-pass code review skill for Claude, Codex, and Cursor.
+Local AI code review for Claude Code and Codex. Review your changes *before* they become a PR — catch bugs, security issues, and test gaps while you're still writing code, not after.
 
-This repository provides:
+## Why Use This?
 
-- `codereview` skill definitions for Claude and Codex
-- `/codereview` prompt command for Codex
-- Installer script to copy skill files into user skill directories
+- **Faster feedback loop**: Review locally in seconds, not waiting for CI/PR review bots
+- **Deeper than linters**: AI explorers trace call paths, check callers, verify test coverage — things no linter catches
+- **Spec verification**: Pass a spec file and verify every requirement is implemented and tested (with correct test categories: unit/integration/e2e)
+- **Works offline**: Only needs your local git repo and whatever tools you have installed
+- **Agent-friendly**: Findings include fix suggestions that Claude/Codex can execute immediately
 
 ## Features
 
-- **Explorer-judge architecture**: 4 specialized explorer sub-agents (correctness, security, reliability, test adequacy) investigate in parallel, then a review judge synthesizes findings
+- **Explorer-judge architecture**: 8 specialized explorer sub-agents (correctness, security, reliability, test adequacy + 4 extended passes) investigate in parallel, then a review judge synthesizes findings with adversarial validation
 - **Deterministic scans first**: semgrep, trivy, osv-scanner, shellcheck, pre-commit, sonarqube run before AI review
-- **Multiple review modes**: staged changes, last commit, full branch (`--base`), commit range (`--range`), PR, or specific path
-- **Spec comparison**: check implementation against a plan/spec with `--spec`
+- **Local-first review modes**: staged changes, last commit, full branch (`--base`), commit range (`--range`), specific path — also works on PRs
+- **Spec verification with traceability**: check implementation against a plan/spec with `--spec`, scope to sections with `--spec-scope`, get per-requirement traceability with test category coverage
+- **Test category classification**: classifies tests as unit/integration/e2e and flags when the wrong category is used
+- **Adaptive pass selection**: extended passes (error handling, API/contract, concurrency, spec verification) auto-skip when irrelevant to the diff
 - **Structured output**: JSON findings conforming to `findings-schema.json` + markdown report
 - **Action tiers**: Must Fix / Should Fix / Consider with mechanical classification
-- **Configurable**: review cadence, pushback level, confidence floor, focus/ignore paths via `.codereview.yaml`
+- **Configurable**: review cadence, pushback level, confidence floor, model per pass, focus/ignore paths via `.codereview.yaml`
 
 ## Prerequisites
 
@@ -66,14 +70,16 @@ After install, restart Claude/Codex so the new skill is loaded.
 
 ## Usage
 
-Codex slash command:
+Review local changes before they leave your machine:
 
 ```text
-/codereview
-/codereview 42
-/codereview --base main
-/codereview --range HEAD~5..HEAD
-/codereview --spec docs/plan.md --base main
+/codereview                                                  # staged changes or HEAD~1
+/codereview --base main                                      # entire feature branch
+/codereview --range HEAD~5..HEAD                             # specific commits
+/codereview src/auth/                                        # specific path
+/codereview --spec docs/plan.md --base main                  # verify against spec
+/codereview --spec docs/plan.md --spec-scope "Auth" --base main  # one section of spec
+/codereview 42                                               # PR #42 (also supported)
 ```
 
 Natural language also works when the `codereview` skill is selected by intent.
@@ -86,24 +92,28 @@ Optional repo-level config via `.codereview.yaml`:
 cadence: manual          # manual | pre-commit | pre-push | wave-end
 pushback_level: fix-all  # fix-all | selective | cautious
 confidence_floor: 0.65
+pass_models:
+  security: "opus"       # use stronger model where precision matters
 ignore_paths:
   - "vendor/"
   - "*.generated.*"
 ```
 
-See `docs/CONFIGURATION.md` for details.
+See `docs/CONFIGURATION.md` for the full schema reference.
 
 ## Repository Layout
 
-- `skill/` — canonical skill source (SKILL.md, prompts, scripts, schema, agents config)
+- `skill/` — canonical skill source (SKILL.md, prompts, scripts, schema, references)
 - `prompts/codereview.md` — Codex slash command dispatcher
 - `scripts/install-codereview-skill.sh` — copies skill to Claude and Codex directories
+- `docs/` — configuration reference, release process
 
 ## Troubleshooting
 
-- **No tools available**: The skill still works — AI passes run without deterministic scans. Install tools for better coverage.
+- **No tools available**: The skill still works — AI passes run without deterministic scans. Install `semgrep` and `shellcheck` at minimum for best results.
 - **Empty diff**: The skill exits cleanly with "No changes found to review."
 - **`jq` not installed**: Output validation is skipped. Install with `brew install jq`.
+- **`gh` not authenticated**: PR mode requires `gh auth status` to work. Run `gh auth login` first.
 
 ## Release Process
 

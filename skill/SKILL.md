@@ -1,6 +1,6 @@
 ---
 name: codereview
-description: 'Use when reviewing code changes before merge — PRs, staged files, branches, or commit ranges. Also for pre-merge checks, finding bugs, security audits, or checking implementation against a spec. Triggers: "code review", "review PR", "review this diff", "review my changes", "check for bugs", "security review", "/codereview".'
+description: 'Use when reviewing local code changes — staged files, branches, commit ranges, or paths — before they become a PR. Runs deterministic scans (semgrep, trivy, shellcheck) and parallel AI explorer-judge passes to find bugs, security issues, missing tests, and spec gaps. Also works on PRs but optimized for pre-merge local review.'
 ---
 
 # Code Review Skill
@@ -20,6 +20,30 @@ description: 'Use when reviewing code changes before merge — PRs, staged files
 /codereview src/auth/                   # review changes in specific path
 /codereview --base main --spec plan.md  # branch review with spec check
 ```
+
+---
+
+## When to Use
+
+- **Before creating a PR** — review your work locally first, catch issues before review roundtrips
+- **After implementing a feature** — verify nothing was missed before sharing
+- **Before merging a feature branch** — wave-end review with `--base main`
+- **After writing code against a spec** — verify requirements with `--spec docs/plan.md`
+- **When you want deeper analysis than linters** — AI explorers trace call paths, check callers, verify test coverage
+- **Agent-assisted workflows** — findings include fix suggestions agents can execute immediately
+
+### Which Mode to Use
+
+| You want to review... | Command |
+|----------------------|---------|
+| Staged changes | `/codereview` (no args) |
+| Last commit (nothing staged) | `/codereview` (no args) |
+| Entire feature branch | `/codereview --base main` |
+| Specific commits | `/codereview --range abc..def` |
+| Specific files/paths | `/codereview src/auth/` |
+| A pull request | `/codereview 42` |
+| Changes against a spec | `/codereview --spec docs/plan.md --base main` |
+| One section of a spec | `/codereview --spec docs/plan.md --spec-scope "Auth" --base main` |
 
 ---
 
@@ -88,9 +112,11 @@ else
 fi
 ```
 
-**Flags can be combined:** `/codereview --spec docs/plan.md --base main` applies both `--base` (for the diff target) and `--spec` (for requirements checking). Parse all flags before selecting the diff mode.
+**Flags can be combined:** `/codereview --spec docs/plan.md --spec-scope "Authentication" --base main` applies `--base` (for the diff target), `--spec` (for requirements checking), and `--spec-scope` (to restrict to a section of the spec). Parse all flags before selecting the diff mode.
 
-**If `--spec <path>` provided:** Read the spec/plan file. It will be included in the context packet so AI passes can check implementation completeness.
+**If `--spec <path>` provided:** Read the spec/plan file. It will be included in the context packet so AI passes can check implementation completeness. This also enables the spec-verification explorer pass.
+
+**If `--spec-scope <text>` provided:** Store the scope text for use by the spec-verification explorer. The explorer will filter requirements to the matching section/milestone of the spec. Requires `--spec` — if given without `--spec`, warn the user and ignore.
 
 **Pre-flight check:** If the diff is empty, tell the user "No changes found to review" and stop.
 
@@ -100,6 +126,8 @@ fi
 - `SCOPE` — one of `branch`, `range`, `staged`, `commit`, `pr`, `path`
 - `BASE_REF` / `HEAD_REF` — the base and head references
 - `PR_NUMBER` — the PR number in PR mode, `null` otherwise
+- `SPEC_CONTENT` — the spec/plan file content, if `--spec` was provided
+- `SPEC_SCOPE` — the scope filter text from `--spec-scope`, if provided
 
 These variables are referenced throughout subsequent steps.
 
@@ -234,201 +262,19 @@ If a spec is found, include it in the context packet for requirements completene
 
 ### Step 3: Run Deterministic Scans (Best-Effort)
 
-Before AI review, run available deterministic tools. Their output serves two purposes: (1) findings with `"source": "deterministic"` go directly into the final report, and (2) AI passes receive the scan results so they skip restating what tools already caught.
+Run available deterministic tools (semgrep, trivy, osv-scanner, shellcheck, pre-commit, sonarqube). Their output serves two purposes: (1) deterministic findings go directly into the final report, and (2) AI passes receive scan results so they skip restating what tools already caught.
 
-**Check tool availability and run each.** Scope scans to `CHANGED_FILES` where the tool supports it — this is faster and avoids noise from unrelated files.
+**See `references/deterministic-scans.md`** for full tool scripts, cache setup, parallel execution patterns, zsh safety workarounds, and tool status keys.
 
-**Permission strategy (sandboxed runners):** request elevated permissions **before** starting the Step 3 scan bundle (single escalation for the whole bundle), instead of waiting for fail-then-retry. This avoids repeated sandbox failures for tools that need host caches or Docker access.
+**Summary of what to do:**
+1. Request elevated permissions before the scan bundle (single escalation)
+2. Initialize sandbox/cache dirs (TRIVY_CACHE_DIR, SEMGREP_HOME, etc.)
+3. Run each tool scoped to `CHANGED_FILES` where supported; run semgrep + sonarqube in parallel when both available
+4. Normalize findings into standard schema (`source: "deterministic"`, `confidence: 1.0`)
+5. Deduplicate: on `file:line:summary` collision, keep highest severity, union provenance in `sources`
+6. Record `tool_status` for every tool (`ran` / `skipped` / `not_installed` / `sandbox_blocked` / `failed`)
 
-Use a one-line justification like:
-- `Run deterministic code-review scanners with host cache/docker access to avoid sandbox permission failures and collect complete tool_status output.`
-
-**Note on file paths:** `CHANGED_FILES` is newline-delimited. When passing to tools, use `xargs` or quote-safe expansion to handle paths with spaces: `echo "$CHANGED_FILES" | xargs -I{} ...` or convert to an array first.
-
-**Bash compatibility (macOS):** avoid `mapfile`/`readarray` because default macOS Bash is 3.2 and does not support them.
-
-```bash
-# Bash 3-safe way to convert CHANGED_FILES (newline-delimited) into an array
-FILES=()
-while IFS= read -r f; do
-  [ -n "$f" ] && FILES+=("$f")
-done <<EOF
-$CHANGED_FILES
-EOF
-
-# Safe expansion preserves spaces in paths
-semgrep scan --json --quiet "${FILES[@]}"
-```
-
-**Parallel policy:** when both are available, run `semgrep` and `sonarqube` in parallel, then wait for both before normalization/deduplication.
-
-**Sandbox/cache setup:** initialize writable cache dirs before scans so tools do not fail on default cache locations in sandboxed runs.
-
-```bash
-export TRIVY_CACHE_DIR="${TRIVY_CACHE_DIR:-/tmp/trivy-cache}"
-export PRE_COMMIT_HOME="${PRE_COMMIT_HOME:-/tmp/pre-commit-cache}"
-export SEMGREP_HOME="${SEMGREP_HOME:-/tmp/semgrep-home}"
-export GOCACHE="${GOCACHE:-/tmp/go-build-cache}"
-export GOMODCACHE="${GOMODCACHE:-/tmp/go-mod-cache}"
-export GOPATH="${GOPATH:-/tmp/go}"
-mkdir -p "$TRIVY_CACHE_DIR" "$PRE_COMMIT_HOME" "$SEMGREP_HOME" "$GOCACHE" "$GOMODCACHE" "$GOPATH"
-```
-
-**Execution safety:** If your runner shell is `zsh` (common in agent environments), do **not** embed a multiline script in a single-quoted `bash -lc '...'` string. Inner single-quoted jq/rg patterns (for example `jq '.results | length'`) will terminate the outer quote and trigger parse errors like `bad pattern` or `no matches found`. For multiline logic, write a temp script with a quoted heredoc and run it with bash.
-
-```bash
-cat > /tmp/codereview_tools.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-# Safe: inner single quotes stay intact because this is a real script file.
-count=$(jq '.results | length' /tmp/codereview/semgrep.json 2>/dev/null || echo 0)
-echo "semgrep findings: $count"
-EOF
-
-chmod +x /tmp/codereview_tools.sh
-/tmp/codereview_tools.sh
-```
-
-```bash
-# Parallel semgrep + sonarqube pattern (preferred when both tools are present)
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-SONAR_OUT_DIR=".sonarqube/${RUN_ID}"
-mkdir -p /tmp/codereview "$SONAR_OUT_DIR"
-SONAR_SCRIPT="$HOME/.claude/skills/sonarqube/scripts/sonarqube.py"
-[ ! -f "$SONAR_SCRIPT" ] && SONAR_SCRIPT="$HOME/.codex/skills/sonarqube/scripts/sonarqube.py"
-
-SEM_PID=""
-SONAR_PID=""
-SEM_RC=0
-SONAR_RC=0
-
-if command -v semgrep &>/dev/null; then
-  HOME="$SEMGREP_HOME" semgrep scan --json --quiet $CHANGED_FILES > "/tmp/codereview/semgrep-${RUN_ID}.json" 2>"/tmp/codereview/semgrep-${RUN_ID}.err" &
-  SEM_PID=$!
-fi
-
-if [ -f "$SONAR_SCRIPT" ] && command -v python3 &>/dev/null; then
-  python3 "$SONAR_SCRIPT" scan --mode local --severity medium --scope new \
-    --base-ref "${BASE_REF:-HEAD~1}" --list-only --output-dir "$SONAR_OUT_DIR" \
-    > "/tmp/codereview/sonarqube-${RUN_ID}.out" 2>"/tmp/codereview/sonarqube-${RUN_ID}.err" &
-  SONAR_PID=$!
-fi
-
-if [ -n "$SEM_PID" ]; then
-  wait "$SEM_PID"; SEM_RC=$?
-fi
-if [ -n "$SONAR_PID" ]; then
-  wait "$SONAR_PID"; SONAR_RC=$?
-fi
-```
-
-```bash
-# semgrep — static analysis / custom rules (scoped to changed files)
-if command -v semgrep &>/dev/null; then
-  HOME="$SEMGREP_HOME" semgrep scan --json --quiet $CHANGED_FILES 2>/dev/null | head -500
-else
-  echo "semgrep not installed (pip install semgrep)"
-fi
-
-# trivy — vulnerability / misconfiguration scanner
-# trivy fs scans the whole project for dependency vulns — scoping to individual
-# files would miss manifest-level findings, so scan the repo root
-if command -v trivy &>/dev/null; then
-  trivy fs . --cache-dir "$TRIVY_CACHE_DIR" --format json --quiet 2>/dev/null | head -500
-else
-  echo "trivy not installed (brew install trivy)"
-fi
-
-# osv-scanner — dependency vulnerability scanner (repo-level scan)
-if command -v osv-scanner &>/dev/null; then
-  osv-scanner scan -r . --format json 2>/dev/null | head -500
-else
-  echo "osv-scanner not installed (go install github.com/google/osv-scanner/cmd/osv-scanner@latest)"
-fi
-
-# shellcheck — shell script linter (scoped to .sh files in diff)
-SH_FILES=$(echo "$CHANGED_FILES" | grep -E '\.sh$' || true)
-if [ -n "$SH_FILES" ] && command -v shellcheck &>/dev/null; then
-  shellcheck --format=json $SH_FILES 2>/dev/null | head -500
-else
-  if [ -n "$SH_FILES" ]; then
-    echo "shellcheck not installed (brew install shellcheck)"
-  fi
-fi
-
-# pre-commit — repo-configured hooks (scoped to changed files)
-if [ -f .pre-commit-config.yaml ] && command -v pre-commit &>/dev/null; then
-  PRE_COMMIT_HOME="$PRE_COMMIT_HOME" \
-  GOCACHE="$GOCACHE" \
-  GOMODCACHE="$GOMODCACHE" \
-  GOPATH="$GOPATH" \
-  pre-commit run --files $CHANGED_FILES 2>&1 | head -200
-fi
-
-# sonarqube — deep static analysis via the sonarqube skill's Python scanner
-# Requires: python3 + sonarqube.py from skill-sonarqube (local mode needs Docker + sonar-scanner)
-# The script auto-starts a local SonarQube container if none is running.
-# Output: .sonarqube/findings.json with structured findings per file.
-SONAR_SCRIPT="$HOME/.claude/skills/sonarqube/scripts/sonarqube.py"
-if [ ! -f "$SONAR_SCRIPT" ]; then
-  SONAR_SCRIPT="$HOME/.codex/skills/sonarqube/scripts/sonarqube.py"
-fi
-if [ -f "$SONAR_SCRIPT" ] && command -v python3 &>/dev/null; then
-  python3 "$SONAR_SCRIPT" scan --mode local --severity medium --scope new \
-    --base-ref "${BASE_REF:-HEAD~1}" --list-only --output-dir .sonarqube 2>/dev/null
-  # Read findings if scan succeeded
-  if [ -f .sonarqube/findings.json ]; then
-    cat .sonarqube/findings.json | head -500
-  fi
-else
-  echo "sonarqube skill not installed (see skill-sonarqube README)"
-fi
-```
-
-**Normalize and deduplicate deterministic findings before AI merge:**
-- Normalize each deterministic tool output into the standard finding shape (`pass`, `file`, `line`, `summary`, `severity`, `confidence=1.0`, `evidence`).
-- Build a deterministic dedupe key: `file + ":" + line + ":" + normalize(summary)`.
-- On key collision (e.g., semgrep + sonarqube same issue), keep one finding with:
-  - highest severity,
-  - unioned provenance in `sources` (e.g., `["semgrep","sonarqube"]`),
-  - merged evidence/note text.
-- Feed this deduplicated deterministic set to explorers and final merge.
-
-**Record `tool_status`** for each tool (`ran` / `skipped` / `not_installed` / `sandbox_blocked` / `failed`) with version and finding count. Use these standard keys:
-
-| Key | Tool |
-|-----|------|
-| `semgrep` | semgrep |
-| `trivy` | trivy |
-| `osv_scanner` | osv-scanner |
-| `shellcheck` | shellcheck (shell files only) |
-| `pre_commit` | pre-commit |
-| `sonarqube` | sonarqube (local or cloud, via skill-sonarqube) |
-| `radon` | radon (Step 2d) |
-| `gocyclo` | gocyclo (Step 2d) |
-| `standards` | Language standards (Step 2f) |
-| `ai_correctness` | Explorer: correctness |
-| `ai_security` | Explorer: security |
-| `ai_reliability` | Explorer: reliability/performance |
-| `ai_test_adequacy` | Explorer: test adequacy |
-| `ai_error_handling` | Explorer: error handling (extended) |
-| `ai_api_contract` | Explorer: API/contract (extended) |
-| `ai_concurrency` | Explorer: concurrency (extended) |
-| `ai_judge` | Review judge |
-
-This goes into the final JSON artifact envelope.
-
-**Tool status classification rules:**
-- `not_installed`: command not found on PATH.
-- `sandbox_blocked`: stderr indicates permission/sandbox denial (for example `permission denied`, `operation not permitted`, read-only fs/cache path denied).
-- `failed`: command executed but failed for non-sandbox reasons.
-- `skipped`: intentionally not run (for example no matching files, missing config, optional mode).
-- `ran`: completed successfully (with or without findings).
-
-**Convert deterministic findings** into the standard finding schema with `"source": "deterministic"` and `"confidence": 1.0`.
-
-If no tools are available, continue — the AI passes still run. Log which tools were missing in the final report.
+If no tools are available, continue — the AI passes still run. Log missing tools in the final report.
 
 ### Step 4: Run AI Review (Explorer Sub-Agents → Review Judge)
 
@@ -452,6 +298,7 @@ TEST_PASS="prompts/reviewer-test-adequacy-pass.md"
 ERROR_HANDLING_PASS="prompts/reviewer-error-handling-pass.md"
 API_CONTRACT_PASS="prompts/reviewer-api-contract-pass.md"
 CONCURRENCY_PASS="prompts/reviewer-concurrency-pass.md"
+SPEC_VERIFICATION_PASS="prompts/reviewer-spec-verification-pass.md"
 ```
 
 Read `prompts/reviewer-global-contract.md` first — it defines the shared rules, chain-of-thought protocol, and JSON output schema.
@@ -472,6 +319,7 @@ Read `prompts/reviewer-global-contract.md` first — it defines the shared rules
 | 5 | Error Handling | `reviewer-error-handling-pass.md` | sonnet (or `pass_models.error-handling`) | `reliability` | Skip if diff is test/docs/config only |
 | 6 | API/Contract | `reviewer-api-contract-pass.md` | sonnet (or `pass_models.api-contract`) | `correctness` | Skip if no public API surface changes in diff |
 | 7 | Concurrency | `reviewer-concurrency-pass.md` | sonnet (or `pass_models.concurrency`) | `reliability` | Skip if no concurrency primitives in diff |
+| 8 | Spec Verification | `reviewer-spec-verification-pass.md` | sonnet (or `pass_models.spec-verification`) | `spec_verification` | Skip if no spec loaded |
 
 **Adaptive pass selection:** Before launching extended explorers, check skip signals (see Step 3.5 below). If `force_all_passes: true` in config, skip this check and launch all configured passes.
 
@@ -497,6 +345,9 @@ Parameters:
 
     ## Spec/Plan (if available)
     <spec content, or "No spec provided">
+
+    ## Spec Scope (if provided)
+    Restrict spec analysis to section matching: "<SPEC_SCOPE value, or omit if not provided>"
 
     You are an explorer sub-agent. Investigate thoroughly using
     Grep, Glob, and Read to trace code paths and verify your findings.
@@ -529,6 +380,12 @@ fi
 CONCURRENCY_SKIP=true
 if echo "$DIFF" | grep -qiE 'goroutine|go func|threading|Thread|async def|asyncio|\.lock\(|mutex|chan |channel|atomic|sync\.|Promise\.all|Worker\(|spawn|tokio'; then
   CONCURRENCY_SKIP=false
+fi
+
+# Spec verification: skip if no spec was loaded
+SPEC_VERIFICATION_SKIP=true
+if [ -n "$SPEC_CONTENT" ]; then
+  SPEC_VERIFICATION_SKIP=false
 fi
 ```
 
@@ -564,10 +421,12 @@ The judge will:
 2. **Group root causes** (merge related findings, eliminate causal chains)
 3. **Cross-synthesize** (catch gaps no single explorer flagged)
 4. **Assess strengths** (2-3 specific observations)
-5. **Check spec compliance** (if spec provided)
+5. **Check spec compliance** (if spec provided) — merge spec-verification explorer's `requirements` array with other explorers' findings, validate implementation/test claims, produce final `spec_requirements` and derive `spec_gaps`
 6. **Produce verdict** (PASS/WARN/FAIL with reason)
 
-The judge returns a JSON object with `verdict`, `verdict_reason`, `strengths`, `spec_gaps`, and validated `findings` array.
+The judge returns a JSON object with `verdict`, `verdict_reason`, `strengths`, `spec_gaps`, `spec_requirements`, and validated `findings` array.
+
+**Note on spec-verification explorer output:** The spec-verification explorer returns a JSON object with two keys: `requirements` (the traceability data) and `findings` (standard findings with `pass: "spec_verification"`). Pass both the `requirements` array and the `findings` array to the judge. The judge merges `requirements` into its `spec_requirements` output and validates the `findings` alongside other explorers' findings.
 
 ### Step 5: Merge, Deduplicate, and Classify
 
@@ -608,187 +467,24 @@ Evaluate in order — a `high`/0.85 finding matches "Must Fix" and stops there; 
 
 ### Step 6: Format and Present Review
 
-Output the review in this format:
+**See `references/report-template.md`** for the full markdown template and JSON envelope format.
 
-```markdown
-# Code Review: <target description>
+Output the review with these sections (in order): verdict header, tool status table, strengths, Must Fix / Should Fix / Consider tiered findings, spec verification (if spec provided), test gaps, next steps, summary.
 
-**Verdict: PASS / WARN / FAIL** — <verdict reason>
-**Scope:** <branch|staged|commit|pr> | **Base:** <base_ref> | **Head:** <head_ref>
-**Reviewed:** <N files> | **Total findings:** <N> (from <total pre-filter> raw)
-
-### Tool Status
-| Tool | Key | Status | Findings | Note |
-|------|-----|--------|----------|------|
-| semgrep | semgrep | ran | 3 | — |
-| trivy | trivy | sandbox_blocked | 0 | cache path permission denied |
-| osv-scanner | osv_scanner | not_installed | — | go install github.com/google/osv-scanner/cmd/osv-scanner@latest |
-| shellcheck | shellcheck | ran | 1 | — |
-| pre-commit | pre_commit | skipped | — | no .pre-commit-config.yaml |
-| sonarqube | sonarqube | not_installed | — | see skill-sonarqube README |
-| radon | radon | ran | 2 hotspots | functions with complexity C or worse |
-| standards | standards | ran | 0 | loaded: python, go |
-| AI: correctness | ai_correctness | ran | 4 | — |
-| AI: security | ai_security | ran | 2 | — |
-| AI: reliability | ai_reliability | ran | 1 | — |
-| AI: test adequacy | ai_test_adequacy | ran | 3 | — |
-| AI: error handling | ai_error_handling | ran | 2 | — |
-| AI: API/contract | ai_api_contract | skipped | — | No public API surface changes in diff |
-| AI: concurrency | ai_concurrency | skipped | — | No concurrency primitives in diff |
-| AI: judge | ai_judge | ran | 8 | 4 findings removed by adversarial validation |
-
----
-
-## Strengths
-
-- <what's done well — architecture, patterns, testing>
-- <another positive observation>
-
----
-
-## Must Fix (N findings)
-
-Issues that should block merge or be fixed immediately.
-
-| # | Sev | Source | File | Line | Summary | Fix |
-|---|-----|--------|------|------|---------|-----|
-| 1 | critical | AI:security | path/file.py | 42 | SQL injection | Use parameterized query |
-
-### Finding 1: <summary>
-**Category:** security | **Confidence:** 0.92 | **Source:** AI:security
-**Failure mode:** <what breaks and when>
-**Fix:** <smallest safe remediation>
-
----
-
-## Should Fix (N findings)
-
-Worth addressing in this PR — fast for code agents.
-
-| # | Sev | Source | File | Line | Summary | Fix |
-|---|-----|--------|------|------|---------|-----|
-| ... |
-
----
-
-## Consider (N findings)
-
-Fix if convenient, or defer to a follow-up.
-
-| # | Sev | Source | File | Line | Summary |
-|---|-----|--------|------|------|---------|
-| ... |
-
----
-
-## Spec Gaps (if spec provided)
-
-Requirements from the spec not addressed by this diff:
-- [ ] <missing requirement 1>
-- [ ] <missing requirement 2>
-
----
-
-## Test Gaps
-
-- [ ] <test scenario 1> — `path/to/file:line`
-- [ ] <test scenario 2> — `path/to/file:line`
-
----
-
-## Next Steps
-
-Suggested fix order for code agents:
-1. Must Fix items (blocking) — fix in order listed
-2. Should Fix items — address in this PR
-3. Test gaps — add tests for uncovered paths
-4. Consider items — fix if time permits
-
-**Pushback hints:** Findings marked with confidence < 0.75 may warrant
-verification before fixing. Check the codebase context — the reviewer
-may have missed something. Use your judgment.
-
----
-
-## Summary
-
-<1-2 sentence overall risk assessment>
-**Verdict:** PASS/WARN/FAIL | **Must Fix:** N | **Should Fix:** N | **Consider:** N
-```
-
-**Source column format:** The report's Source column combines the `source` and `pass` fields for readability. AI findings show as `AI:<pass>` (e.g., `AI:security` means `source=ai, pass=security`). Deterministic findings show the tool name (e.g., `semgrep`, `shellcheck`).
-
-**Tool-status prose rule:** when summarizing deterministic tooling in prose, separate categories so readers can tell what happened:
-- Missing tools: list only `not_installed` tools, and state explicitly that all listed tools were unavailable.
-- Sandbox-blocked tools: list only `sandbox_blocked` tools with the denied path/action.
-- Failed tools: list only `failed` tools (non-sandbox runtime errors).
-- Never merge these into a single mixed sentence.
-
-Example:
-- `Missing tools (all unavailable): semgrep, osv-scanner, sonarqube, radon, gocyclo.`
-- `Sandbox-blocked: trivy (cache path permission denied).`
-- `Failed: pre-commit (hook runtime error).`
-
-**For PR mode with inline comments:**
-
-Ask the user: "Would you like me to post these findings as inline PR comments?"
-
-If confirmed, use `gh api` to post review comments:
-```bash
-gh api repos/{owner}/{repo}/pulls/{number}/reviews \
-  --method POST \
-  --field body="AI Code Review — <N> findings" \
-  --field event="COMMENT" \
-  --field comments="[{\"path\":\"...\",\"line\":...,\"body\":\"...\"}]"
-```
+**Key formatting rules:**
+- Source column: AI findings show as `AI:<pass>` (e.g., `AI:security`). Deterministic findings show the tool name.
+- Tool-status prose: separate `not_installed`, `sandbox_blocked`, and `failed` into distinct sentences — never merge into one mixed sentence.
+- For PR mode: ask user "Would you like me to post these as inline PR comments?" before posting via `gh api`.
 
 ### Step 7: Save Review Artifacts
-
-Write two artifacts to the workspace:
 
 ```bash
 mkdir -p .agents/reviews
 ```
 
-**7a. Markdown report** — `.agents/reviews/YYYY-MM-DD-<target>.md`
+**7a. Markdown report** — `.agents/reviews/YYYY-MM-DD-<target>.md` (formatted review + raw findings appendix)
 
-Contains the formatted review from Step 6 plus a `## Raw Findings (Pre-Filter)` appendix.
-
-**7b. JSON findings** — `.agents/reviews/YYYY-MM-DD-<target>.json`
-
-Must conform to `findings-schema.json`. Contains the full envelope:
-
-```json
-{
-  "run_id": "2026-02-08T14-30-00-a1b2c3",
-  "timestamp": "2026-02-08T14:30:00Z",
-  "scope": "branch",
-  "base_ref": "main",
-  "head_ref": "feature/auth-fix",
-  "pr_number": null,
-  "files_reviewed": ["src/auth.py", "src/middleware.py"],
-  "verdict": "WARN",
-  "verdict_reason": "Has should-fix issues but no blockers",
-  "strengths": ["Clean separation of auth concerns", "Good test coverage for happy path"],
-  "spec_gaps": [],
-  "tool_status": {
-    "semgrep": { "status": "ran", "version": "1.56.0", "finding_count": 3, "note": null },
-    "trivy": { "status": "sandbox_blocked", "version": "0.56.0", "finding_count": 0, "note": "cache path permission denied; set TRIVY_CACHE_DIR=/tmp/trivy-cache" },
-    "osv_scanner": { "status": "not_installed", "version": null, "finding_count": 0, "note": "go install github.com/google/osv-scanner/cmd/osv-scanner@latest" },
-    "shellcheck": { "status": "ran", "version": "0.10.0", "finding_count": 1, "note": null },
-    "pre_commit": { "status": "skipped", "version": null, "finding_count": 0, "note": "no .pre-commit-config.yaml" },
-    "sonarqube": { "status": "not_installed", "version": null, "finding_count": 0, "note": "see skill-sonarqube README" },
-    "radon": { "status": "ran", "version": "6.0.1", "finding_count": 2, "note": "2 functions with complexity C or worse" },
-    "standards": { "status": "ran", "version": null, "finding_count": 0, "note": "loaded: python, go" },
-    "ai_correctness": { "status": "ran", "version": null, "finding_count": 4, "note": null },
-    "ai_security": { "status": "ran", "version": null, "finding_count": 2, "note": null },
-    "ai_reliability": { "status": "ran", "version": null, "finding_count": 1, "note": null },
-    "ai_test_adequacy": { "status": "ran", "version": null, "finding_count": 3, "note": null }
-  },
-  "findings": [ ... ],
-  "tier_summary": { "must_fix": 1, "should_fix": 5, "consider": 4 }
-}
-```
+**7b. JSON findings** — `.agents/reviews/YYYY-MM-DD-<target>.json` (must conform to `findings-schema.json`; see `references/report-template.md` for envelope format)
 
 **7c. Validate output** (optional, if `jq` available):
 ```bash
@@ -801,88 +497,25 @@ bash scripts/validate_output.sh \
 
 ## Configuration
 
-The skill respects optional repo-level configuration. If a `.codereview.yaml` file exists in the repo root, read it for:
+Optional repo-level config via `.codereview.yaml`. See `docs/CONFIGURATION.md` for the full schema reference.
 
-```yaml
-# .codereview.yaml (optional)
-passes:
-  # Core passes (always run unless removed from this list)
-  - correctness
-  - security
-  - reliability
-  - test-adequacy
-  # Extended passes (subject to adaptive skip signals)
-  - error-handling
-  - api-contract
-  - concurrency
+**Defaults** (no config file needed): 8 passes (4 core + 4 extended), 0.65 confidence floor, manual cadence, fix-all pushback, sonnet model for explorers, adaptive skip enabled. The spec-verification pass only runs when `--spec` is provided.
 
-confidence_floor: 0.65
+**Key settings:**
 
-# Review cadence — controls when /codereview runs automatically
-# Options:
-#   manual     — only when explicitly invoked (default)
-#   pre-commit — run before every commit (use with git hooks or agent workflow)
-#   pre-push   — run before push
-#   wave-end   — run after a batch of implementation steps completes
-cadence: manual
+| Setting | Default | Options |
+|---------|---------|---------|
+| `passes` | All 8 | List of pass names to enable |
+| `cadence` | `manual` | `manual`, `pre-commit`, `pre-push`, `wave-end` |
+| `pushback_level` | `fix-all` | `fix-all`, `selective`, `cautious` |
+| `confidence_floor` | `0.65` | `0.0` – `1.0` |
+| `pass_models` | sonnet for all | Override model per pass (e.g., `security: "opus"`) |
+| `force_all_passes` | `false` | Disable adaptive skip for extended passes |
+| `ignore_paths` | none | Glob patterns to exclude |
+| `focus_paths` | none | Glob patterns to prioritize |
+| `custom_instructions` | none | Free-text repo-specific rules |
 
-# Pushback level — controls how aggressively findings are surfaced
-# Options:
-#   fix-all    — surface everything, expect agents to fix most issues (default)
-#   selective  — surface must-fix and should-fix, mark consider items as optional
-#   cautious   — only surface must-fix, everything else is informational
-pushback_level: fix-all
-
-# Model override per pass (optional)
-# Default: all explorers use "sonnet", judge uses session default model
-# Use stronger models for passes where precision matters most
-pass_models:
-  # security: "opus"       # use stronger model for security analysis
-  # concurrency: "opus"    # use stronger model for concurrency analysis
-  # judge: null            # null means use session default model
-
-# Force all configured passes to run even if adaptive skip signals trigger
-# Default: false (adaptive skip is enabled)
-force_all_passes: false
-
-ignore_paths:
-  - "*.generated.*"
-  - "vendor/"
-  - "node_modules/"
-
-focus_paths:
-  - "src/auth/"
-  - "src/payments/"
-
-custom_instructions: |
-  This repo uses Django ORM. Flag any raw SQL queries.
-  All API endpoints must have rate limiting.
-```
-
-If no config file exists, use defaults (4 core passes + 3 extended passes, 0.65 confidence, manual cadence, fix-all pushback, sonnet model for explorers, adaptive skip enabled).
-
-### Cadence Modes
-
-| Mode | When It Runs | Use Case |
-|------|-------------|----------|
-| `manual` | Only when user invokes `/codereview` | Default, on-demand |
-| `pre-commit` | Before every commit in agent workflows | Catch issues early, prevent accumulation |
-| `pre-push` | Before push (agent checks before sharing) | Balance between speed and quality |
-| `wave-end` | After a batch of tasks completes | Efficient for multi-task agent sessions |
-
-For `pre-commit` and `pre-push` modes, the calling agent should invoke `/codereview` at the appropriate point in its workflow. The cadence setting is advisory — it tells the agent *when* to call the skill, not a git hook.
-
-For `wave-end` mode, the agent should track implementation steps and invoke `/codereview --base main` (or `--range <start>..HEAD`) after completing a logical batch (e.g., after implementing 3-5 related tasks). This reviews all committed changes in the wave.
-
-### Pushback Levels
-
-| Level | Must Fix | Should Fix | Consider |
-|-------|----------|------------|----------|
-| `fix-all` | Fix immediately | Fix in this PR | Fix if time permits |
-| `selective` | Fix immediately | Fix in this PR | Informational only — agent's discretion |
-| `cautious` | Fix immediately | Informational — agent's discretion | Informational only |
-
-The pushback level affects the **Next Steps** section in the report. At `fix-all`, the report tells agents to address everything. At `cautious`, only must-fix items are listed as action items.
+Cadence is advisory — it tells the agent *when* to invoke the skill, not a git hook. For `wave-end`, invoke with `--base main` after completing a batch of tasks.
 
 ---
 
@@ -901,6 +534,7 @@ The review prompts live in the `prompts/` directory alongside this SKILL.md:
 | `prompts/reviewer-error-handling-pass.md` | Error handling quality review (extended) |
 | `prompts/reviewer-api-contract-pass.md` | API/contract breaking changes (extended) |
 | `prompts/reviewer-concurrency-pass.md` | Concurrency issues and race conditions (extended) |
+| `prompts/reviewer-spec-verification-pass.md` | Spec requirement tracing and test category adequacy (extended) |
 
 ---
 
@@ -934,20 +568,38 @@ Reviews the last 5 commits. Useful for reviewing a specific wave of work within 
 ```bash
 /codereview --spec docs/plan.md --base main
 ```
-Reviews changes against `main` and checks if the spec requirements are addressed.
+Reviews changes against `main` and checks if the spec requirements are implemented and tested. Produces a per-requirement traceability report with implementation status and test category coverage.
+
+### Review a Specific Section of a Spec
+```bash
+/codereview --spec docs/plan.md --spec-scope "Authentication" --base main
+```
+Same as above, but restricts spec verification to the "Authentication" section of the spec. Use `--spec-scope` with any heading text, milestone label, or keyword to scope verification.
 
 ---
 
 ## Common Mistakes
 
+**Execution mistakes (for the agent running the skill):**
+
 | Mistake | What Goes Wrong | Fix |
 |---------|----------------|-----|
 | Launching explorers without reading prompt files first | Explorers get no global contract or pass-specific instructions, produce unstructured output | Always `Read` the prompt files in Step 4 before constructing explorer prompts |
-| Launching judge before all 4 explorers finish | Judge has incomplete findings, misses cross-cutting issues | Wait for all 4 Task results before launching the judge |
+| Launching judge before all explorers finish | Judge has incomplete findings, misses cross-cutting issues | Wait for all Task results before launching the judge |
 | Posting PR comments without user confirmation | Unwanted noise on the PR, user didn't consent | Always ask "Would you like me to post these as inline PR comments?" first |
 | Forgetting to include deterministic scan results in explorer prompts | Explorers restate what semgrep/trivy/sonarqube already found, creating duplicates | Pass scan summaries to each explorer with "do not restate" instruction |
 | Skipping context gathering (Step 2) | Explorers can't trace callers/callees, miss integration bugs | Step 2 is critical — don't jump straight to Step 3/4 |
 | Not extracting `CHANGED_FILES` in Step 1 | Steps 2d, 2f, and 3 can't scope to changed files, run on entire repo | Every diff mode must set `CHANGED_FILES` via `--name-only` |
+
+**User-facing mistakes:**
+
+| Mistake | Fix |
+|---------|-----|
+| Running on a huge diff (1000+ files) | Use `--base` with a recent merge-base, or scope to specific paths |
+| No deterministic tools installed | Install `semgrep` and `shellcheck` at minimum for best results |
+| Expecting PR comment posting without `gh` auth | Ensure `gh auth status` works before using PR mode |
+| Using `--spec` with a vague spec | Spec works best with concrete, testable requirements — acceptance criteria format |
+| Using `--spec-scope` without `--spec` | `--spec-scope` requires `--spec`; it's ignored without it |
 
 ---
 
@@ -959,58 +611,7 @@ See `references/design.md` for the full architecture diagram, explorer-judge rat
 
 ## Acceptance Criteria
 
-### Functional
-
-| Scenario | Expected Behavior |
-|----------|-------------------|
-| No-diff repo | Exits cleanly: "No changes found to review" |
-| Branch diff (`--base`) | Computes merge-base, reviews all commits since divergence, produces findings |
-| Commit range (`--range`) | Reviews specific commit range, scope=range |
-| PR mode | Fetches PR diff via `gh`, includes PR title/body in context |
-| Spec provided | Loads spec, checks requirements completeness, includes spec gaps in report |
-| No spec | Skips spec check, report omits "Spec Gaps" section |
-| Missing tools | Scans skipped with explicit status, AI passes still run, report notes gaps |
-| Shell files in diff | shellcheck runs if installed, scoped to .sh files only |
-| sonarqube skill installed | Runs `sonarqube.py scan --list-only`, findings merged as deterministic source |
-| sonarqube not installed | Skipped with tool_status note, other scans and AI passes still run |
-| radon/gocyclo available | Complexity scores included in context, hotspots noted in tool status |
-| Standards skill installed | Language-specific rules loaded and included in explorer context |
-| All tools available | Deterministic + AI findings merged, deduplicated, tiered |
-| Empty findings | Valid JSON with `"findings": []`, verdict PASS, report with "No issues found" |
-| Dead code detected | YAGNI findings flagged in report |
-| Cadence: pre-commit | Skill can be invoked before each commit in agent workflow |
-| Cadence: wave-end | Skill invoked with `--base` or `--range` after batch of implementation steps |
-
-### Output Validation
-
-| Check | Requirement |
-|-------|-------------|
-| JSON structure | `findings.json` validates against `findings-schema.json` |
-| Envelope fields | `run_id`, `timestamp`, `scope`, `base_ref`, `head_ref`, `verdict`, `verdict_reason`, `strengths`, `files_reviewed`, `tool_status`, `findings`, `tier_summary` present |
-| Finding fields | Every finding has `id`, `source`, `pass`, `severity`, `confidence`, `file`, `line`, `summary` |
-| Confidence gating | No AI findings with `confidence < 0.65` in final output |
-| Evidence gating | All `high`/`critical` findings have `failure_mode` populated |
-| Action tiers | Every finding classified as Must Fix / Should Fix / Consider |
-| Verdict | Report contains PASS/WARN/FAIL with reason |
-| Strengths | Report contains at least 1 strength (or "No specific strengths noted") |
-| Markdown report | Contains verdict, scope, tool status, strengths, tiered findings, next steps, summary |
-
-### Policy
-
-| Rule | Enforcement |
-|------|-------------|
-| Review-only | No code files modified by the skill |
-| No external API calls | Uses only the active CLI model, no separate model runtime |
-| Deterministic before AI | Deterministic scans always run first when tools are available |
-| Comprehensive output | All findings above confidence floor are reported (no hard cap) |
-| Graceful degradation | Missing tools never cause failure — always noted in tool_status |
-
-Run the validation script to verify:
-```bash
-bash scripts/validate_output.sh \
-  --findings .agents/reviews/<latest>.json \
-  --report .agents/reviews/<latest>.md
-```
+See `references/acceptance-criteria.md` for full functional scenarios, output validation checks, and policy rules. Not needed at runtime.
 
 ---
 
@@ -1019,4 +620,7 @@ bash scripts/validate_output.sh \
 - `findings-schema.json` — JSON Schema for the findings artifact
 - `scripts/validate_output.sh` — Output validation script
 - `references/design.md` — Architecture diagram, design rationale, and future plans
-- `prompts/` — Explorer sub-agent prompt files (global contract + 4 passes)
+- `references/deterministic-scans.md` — Full tool scripts, cache setup, parallel patterns
+- `references/report-template.md` — Full markdown report template and JSON envelope format
+- `references/acceptance-criteria.md` — Functional scenarios and output validation checks
+- `prompts/` — Explorer sub-agent prompt files (global contract + judge + 8 explorer passes)
