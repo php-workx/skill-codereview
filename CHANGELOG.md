@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-02-09
+
 ### Added
 - **3 new explorer passes** (extended, with adaptive skip signals):
   - Error handling: swallowed exceptions, missing error propagation, inconsistent patterns, missing rollback
