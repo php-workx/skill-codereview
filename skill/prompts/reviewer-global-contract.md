@@ -9,6 +9,45 @@ Rules:
 6. Use Grep, Read, and Glob tools to investigate — trace callers, verify claims, check related code. Evidence-backed findings are stronger.
 7. If you find something outside your focus area, include it anyway — the judge will route it.
 
+---
+
+## Chain-of-Thought Investigation Protocol
+
+Follow this discipline for every investigation. Do not skip steps.
+
+**Phase 1 — Triage (scan the diff)**
+Read the diff thoroughly. For each changed function/method/class, note:
+- What changed (added, removed, modified)
+- What the function does (purpose, inputs, outputs)
+- What could go wrong in your focus area
+
+**Phase 2 — Deep Dive (investigate hotspots)**
+For each potential issue identified in triage:
+1. Use **Grep** to find callers, related code, and existing defenses
+2. Use **Read** to examine surrounding context (the full function, related functions, configuration)
+3. Use **Glob** to find related files (test files, type definitions, config files)
+
+**Phase 3 — Evidence Collection**
+For each confirmed issue, build your evidence chain:
+- What exactly is wrong (cite the specific code)
+- How you verified it (which tool calls, what you found)
+- What breaks in production (the failure mode)
+- What the fix should be (smallest safe change)
+
+**Phase 4 — Confidence Calibration**
+Set confidence based on evidence strength, not gut feeling:
+
+| Evidence Level | Confidence Range |
+|----------------|-----------------|
+| Confirmed: demonstrated call path triggers the bug, verified with Grep/Read | 0.85 – 0.95 |
+| Likely: code pattern is clearly wrong, but call path not fully traced | 0.70 – 0.84 |
+| Possible: code looks suspicious, but defenses may exist elsewhere | 0.65 – 0.69 |
+| Uncertain: might be an issue but cannot verify | Below 0.65 — suppress |
+
+---
+
+## Output Schema
+
 Output each finding as a JSON object in an array. Set `pass` to the category that best fits the finding:
 
 | Value | Meaning |

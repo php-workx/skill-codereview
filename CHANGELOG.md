@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Added
+- **3 new explorer passes** (extended, with adaptive skip signals):
+  - Error handling: swallowed exceptions, missing error propagation, inconsistent patterns, missing rollback
+  - API/contract: breaking changes, backward compatibility, convention consistency, documentation sync
+  - Concurrency: shared mutable state, lock ordering, TOCTOU races, goroutine/thread/task leaks
+- **Extracted judge prompt** (`reviewer-judge.md`) with adversarial validation protocol:
+  - Existence check: verify cited code exists at stated file and line
+  - Contradiction check: actively search for defenses that disprove findings
+  - Severity calibration: downgrade theoretical findings without demonstrated call paths
+  - Root cause grouping: merge related findings, eliminate causal chain duplicates
+  - Cross-explorer synthesis: catch gaps no single explorer flagged
+- **Chain-of-thought investigation protocol** in global contract — structured phased investigation for all explorers
+- **Calibration examples** in every explorer prompt (3 per pass: high-confidence true positive, medium-confidence true positive, false positive to suppress)
+- **False positive suppression lists** per pass (7-8 specific patterns each)
+- **`pass_models` config** — override model per pass (e.g., use opus for security, sonnet for others)
+- **`force_all_passes` config** — disable adaptive skip signals for extended passes
+- **Adaptive pass selection** — extended passes auto-skip when irrelevant (e.g., concurrency pass skipped when no concurrency primitives in diff)
+
+### Changed
+- Explorer prompts expanded from ~16 lines to ~120-140 lines each with structured investigation phases
+- Global contract updated with confidence calibration table and chain-of-thought protocol
+- SKILL.md Step 4a updated to support up to 7 explorers with configurable models
+- SKILL.md Step 4b now references external judge prompt file instead of inline prompt
+- Tool status table expanded with keys for new passes and judge
+- Default config now includes all 7 passes (4 core + 3 extended)
+
 ## [1.0.0] - 2026-02-08
 
 ### Added

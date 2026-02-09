@@ -412,6 +412,10 @@ fi
 | `ai_security` | Explorer: security |
 | `ai_reliability` | Explorer: reliability/performance |
 | `ai_test_adequacy` | Explorer: test adequacy |
+| `ai_error_handling` | Explorer: error handling (extended) |
+| `ai_api_contract` | Explorer: API/contract (extended) |
+| `ai_concurrency` | Explorer: concurrency (extended) |
+| `ai_judge` | Review judge |
 
 This goes into the final JSON artifact envelope.
 
@@ -433,31 +437,54 @@ The AI review uses an **explorer-judge architecture**: specialized explorer sub-
 - The judge sees all findings together, enabling cross-cutting analysis and deduplication
 - The judge can assess overall quality and produce a coherent verdict
 
-**4a. Launch 4 explorer sub-agents in parallel** (single message, all at once):
+**4a. Launch explorer sub-agents in parallel** (single message, all at once):
 
 ```bash
 # Paths to prompt files (relative to skill directory)
 # When installed, these live alongside SKILL.md in the skill's prompts/ subdirectory.
 # The executing agent should locate them relative to this SKILL.md file.
 GLOBAL_CONTRACT="prompts/reviewer-global-contract.md"
+JUDGE_PROMPT="prompts/reviewer-judge.md"
 CORRECTNESS_PASS="prompts/reviewer-correctness-pass.md"
 SECURITY_PASS="prompts/reviewer-security-pass.md"
 RELIABILITY_PASS="prompts/reviewer-reliability-performance-pass.md"
 TEST_PASS="prompts/reviewer-test-adequacy-pass.md"
+ERROR_HANDLING_PASS="prompts/reviewer-error-handling-pass.md"
+API_CONTRACT_PASS="prompts/reviewer-api-contract-pass.md"
+CONCURRENCY_PASS="prompts/reviewer-concurrency-pass.md"
 ```
 
-Read `prompts/reviewer-global-contract.md` first — it defines the shared rules and JSON output schema.
+Read `prompts/reviewer-global-contract.md` first — it defines the shared rules, chain-of-thought protocol, and JSON output schema.
 
-**Explorer 1 — Correctness:**
+**Core explorers (always run):**
+
+| # | Explorer | Prompt File | Model | `pass` value |
+|---|----------|------------|-------|-------------|
+| 1 | Correctness | `reviewer-correctness-pass.md` | sonnet (or `pass_models.correctness`) | `correctness` |
+| 2 | Security | `reviewer-security-pass.md` | sonnet (or `pass_models.security`) | `security` |
+| 3 | Reliability/Performance | `reviewer-reliability-performance-pass.md` | sonnet (or `pass_models.reliability`) | `reliability` / `performance` |
+| 4 | Test Adequacy | `reviewer-test-adequacy-pass.md` | sonnet (or `pass_models.test-adequacy`) | `testing` |
+
+**Extended explorers (run if configured in `passes` and not adaptively skipped):**
+
+| # | Explorer | Prompt File | Model | `pass` value | Adaptive skip signal |
+|---|----------|------------|-------|-------------|---------------------|
+| 5 | Error Handling | `reviewer-error-handling-pass.md` | sonnet (or `pass_models.error-handling`) | `reliability` | Skip if diff is test/docs/config only |
+| 6 | API/Contract | `reviewer-api-contract-pass.md` | sonnet (or `pass_models.api-contract`) | `correctness` | Skip if no public API surface changes in diff |
+| 7 | Concurrency | `reviewer-concurrency-pass.md` | sonnet (or `pass_models.concurrency`) | `reliability` | Skip if no concurrency primitives in diff |
+
+**Adaptive pass selection:** Before launching extended explorers, check skip signals (see Step 3.5 below). If `force_all_passes: true` in config, skip this check and launch all configured passes.
+
+**Explorer prompt template (same for all explorers):**
 ```
 Tool: Task
 Parameters:
   subagent_type: "general-purpose"
-  model: "sonnet"
-  description: "Review explorer: correctness"
+  model: <pass_models[pass_name] from config, default "sonnet">
+  description: "Review explorer: <pass name>"
   prompt: |
     <global contract content>
-    <correctness pass prompt>
+    <pass-specific prompt>
 
     ## Diff to Review
     <diff content>
@@ -477,17 +504,39 @@ Parameters:
     Do not self-censor low or medium issues. If no issues found, return [].
 ```
 
-**Explorer 2 — Security:** (same structure, security pass prompt)
+Launch all applicable explorers in a **single message** (parallel execution). Collect all explorer result sets before proceeding to the judge.
 
-**Explorer 3 — Reliability/Performance:** (same structure, reliability pass prompt)
+**Step 3.5: Adaptive Pass Selection**
 
-**Explorer 4 — Test Adequacy:** (same structure, test adequacy pass prompt)
+Before launching extended explorers, evaluate skip signals. Core passes (correctness, security, reliability, test-adequacy) are never skipped. Extended passes are skipped when their skip signal triggers:
 
-Collect all 4 explorer result sets.
+```bash
+# Error handling: skip if diff is test-only, docs-only, or config-only
+ERROR_HANDLING_SKIP=false
+if echo "$CHANGED_FILES" | grep -qvE '\.(test|spec)\.|_test\.|test_|\.md$|\.ya?ml$|\.json$|\.toml$'; then
+  ERROR_HANDLING_SKIP=false  # has non-test/doc/config files
+else
+  ERROR_HANDLING_SKIP=true
+fi
+
+# API/Contract: skip if no public API surface changes
+API_CONTRACT_SKIP=true
+if echo "$DIFF" | grep -qE 'route|endpoint|handler|@app\.|@api\.|@router\.|export (function|class|interface)|func [A-Z]|pub fn|public .* class|\.proto|\.graphql|openapi|swagger'; then
+  API_CONTRACT_SKIP=false
+fi
+
+# Concurrency: skip if no concurrency primitives
+CONCURRENCY_SKIP=true
+if echo "$DIFF" | grep -qiE 'goroutine|go func|threading|Thread|async def|asyncio|\.lock\(|mutex|chan |channel|atomic|sync\.|Promise\.all|Worker\(|spawn|tokio'; then
+  CONCURRENCY_SKIP=false
+fi
+```
+
+Skipped passes get `tool_status` with `status: "skipped"` and a note explaining why (e.g., "No concurrency primitives detected in diff"). If `force_all_passes: true` in config, all configured passes run regardless of skip signals.
 
 **4b. Review Judge — synthesize and verdict:**
 
-Launch a single review judge that receives all explorer findings plus the context:
+Read `prompts/reviewer-judge.md` for the full judge protocol. Launch a single review judge that receives all explorer findings plus the context:
 
 ```
 Tool: Task
@@ -495,11 +544,10 @@ Parameters:
   subagent_type: "general-purpose"
   description: "Review judge: synthesize findings"
   prompt: |
-    You are the review judge. You have received findings from 4 specialized
-    explorer sub-agents (correctness, security, reliability, test adequacy).
+    <judge prompt from prompts/reviewer-judge.md>
 
     ## Explorer Findings
-    <JSON arrays from all 4 explorers>
+    <JSON arrays from all explorers>
 
     ## Context
     <context packet from Step 2>
@@ -509,29 +557,17 @@ Parameters:
 
     ## Spec/Plan (if available)
     <spec content>
-
-    Your tasks:
-    1. DEDUPLICATE: Merge overlapping findings across explorers
-    2. VALIDATE: Check each finding against the codebase — use Grep/Read
-       to verify claims. Downgrade or remove findings that don't hold up.
-    3. ENRICH: Add failure_mode and evidence where missing
-    4. ASSESS STRENGTHS: Note 2-3 things done well in this change
-    5. SPEC CHECK: If a spec was provided, check requirements completeness.
-       Flag any spec requirements not addressed by the diff.
-    6. VERDICT: Produce an overall merge readiness verdict:
-       - PASS: No must-fix issues, code is ready to merge
-       - WARN: Has should-fix issues but no blockers
-       - FAIL: Has must-fix issues that block merge
-
-    Return a JSON object:
-    {
-      "verdict": "PASS|WARN|FAIL",
-      "verdict_reason": "1-2 sentence explanation",
-      "strengths": ["strength 1", "strength 2"],
-      "spec_gaps": ["missing requirement 1"],  // empty if no spec
-      "findings": [ ... all validated findings as JSON array ... ]
-    }
 ```
+
+The judge will:
+1. **Adversarially validate** each finding (existence check, contradiction check, severity calibration)
+2. **Group root causes** (merge related findings, eliminate causal chains)
+3. **Cross-synthesize** (catch gaps no single explorer flagged)
+4. **Assess strengths** (2-3 specific observations)
+5. **Check spec compliance** (if spec provided)
+6. **Produce verdict** (PASS/WARN/FAIL with reason)
+
+The judge returns a JSON object with `verdict`, `verdict_reason`, `strengths`, `spec_gaps`, and validated `findings` array.
 
 ### Step 5: Merge, Deduplicate, and Classify
 
@@ -596,6 +632,10 @@ Output the review in this format:
 | AI: security | ai_security | ran | 2 | — |
 | AI: reliability | ai_reliability | ran | 1 | — |
 | AI: test adequacy | ai_test_adequacy | ran | 3 | — |
+| AI: error handling | ai_error_handling | ran | 2 | — |
+| AI: API/contract | ai_api_contract | skipped | — | No public API surface changes in diff |
+| AI: concurrency | ai_concurrency | skipped | — | No concurrency primitives in diff |
+| AI: judge | ai_judge | ran | 8 | 4 findings removed by adversarial validation |
 
 ---
 
@@ -766,10 +806,15 @@ The skill respects optional repo-level configuration. If a `.codereview.yaml` fi
 ```yaml
 # .codereview.yaml (optional)
 passes:
+  # Core passes (always run unless removed from this list)
   - correctness
   - security
   - reliability
   - test-adequacy
+  # Extended passes (subject to adaptive skip signals)
+  - error-handling
+  - api-contract
+  - concurrency
 
 confidence_floor: 0.65
 
@@ -788,6 +833,18 @@ cadence: manual
 #   cautious   — only surface must-fix, everything else is informational
 pushback_level: fix-all
 
+# Model override per pass (optional)
+# Default: all explorers use "sonnet", judge uses session default model
+# Use stronger models for passes where precision matters most
+pass_models:
+  # security: "opus"       # use stronger model for security analysis
+  # concurrency: "opus"    # use stronger model for concurrency analysis
+  # judge: null            # null means use session default model
+
+# Force all configured passes to run even if adaptive skip signals trigger
+# Default: false (adaptive skip is enabled)
+force_all_passes: false
+
 ignore_paths:
   - "*.generated.*"
   - "vendor/"
@@ -802,7 +859,7 @@ custom_instructions: |
   All API endpoints must have rate limiting.
 ```
 
-If no config file exists, use defaults (all 4 passes, 0.65 confidence, manual cadence, fix-all pushback).
+If no config file exists, use defaults (4 core passes + 3 extended passes, 0.65 confidence, manual cadence, fix-all pushback, sonnet model for explorers, adaptive skip enabled).
 
 ### Cadence Modes
 
@@ -835,11 +892,15 @@ The review prompts live in the `prompts/` directory alongside this SKILL.md:
 
 | File | Purpose |
 |------|---------|
-| `prompts/reviewer-global-contract.md` | Shared rules and JSON output schema |
-| `prompts/reviewer-correctness-pass.md` | Functional correctness review |
-| `prompts/reviewer-security-pass.md` | Security risk review |
-| `prompts/reviewer-reliability-performance-pass.md` | Reliability and performance review |
-| `prompts/reviewer-test-adequacy-pass.md` | Test adequacy gap analysis |
+| `prompts/reviewer-global-contract.md` | Shared rules, chain-of-thought protocol, and JSON output schema |
+| `prompts/reviewer-judge.md` | Review judge: adversarial validation, deduplication, verdict |
+| `prompts/reviewer-correctness-pass.md` | Functional correctness review (core) |
+| `prompts/reviewer-security-pass.md` | Security risk review (core) |
+| `prompts/reviewer-reliability-performance-pass.md` | Reliability and performance review (core) |
+| `prompts/reviewer-test-adequacy-pass.md` | Test adequacy gap analysis (core) |
+| `prompts/reviewer-error-handling-pass.md` | Error handling quality review (extended) |
+| `prompts/reviewer-api-contract-pass.md` | API/contract breaking changes (extended) |
+| `prompts/reviewer-concurrency-pass.md` | Concurrency issues and race conditions (extended) |
 
 ---
 

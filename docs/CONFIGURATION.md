@@ -7,12 +7,17 @@ The codereview skill supports optional repo-level configuration via `.codereview
 ```yaml
 # .codereview.yaml (optional)
 
-# Which review passes to run (default: all 4)
+# Which review passes to run (default: all 7)
 passes:
+  # Core passes (always run unless removed)
   - correctness
   - security
   - reliability
   - test-adequacy
+  # Extended passes (subject to adaptive skip signals)
+  - error-handling
+  - api-contract
+  - concurrency
 
 # Minimum confidence for AI findings (default: 0.65)
 confidence_floor: 0.65
@@ -24,6 +29,17 @@ cadence: manual
 # Pushback level — controls how aggressively findings are surfaced
 # Options: fix-all (default), selective, cautious
 pushback_level: fix-all
+
+# Model override per pass (optional)
+# Default: "sonnet" for all explorers, session default for judge
+pass_models:
+  # security: "opus"
+  # concurrency: "opus"
+  # judge: null
+
+# Force all configured passes to run (disable adaptive skip)
+# Default: false
+force_all_passes: false
 
 # Paths to ignore (glob patterns)
 ignore_paths:
@@ -46,7 +62,9 @@ custom_instructions: |
 
 ### `passes`
 
-Which AI review passes to run. Default: all 4.
+Which AI review passes to run. Default: all 7 (4 core + 3 extended).
+
+**Core passes** — always run when listed:
 
 | Pass | Focus |
 |------|-------|
@@ -54,6 +72,16 @@ Which AI review passes to run. Default: all 4.
 | `security` | Auth, injection, secrets, trust boundaries |
 | `reliability` | Timeouts, retries, resource leaks, performance |
 | `test-adequacy` | Missing tests, stale tests, mock-heavy tests |
+
+**Extended passes** — run when listed, subject to adaptive skip signals:
+
+| Pass | Focus | Skip Signal |
+|------|-------|-------------|
+| `error-handling` | Swallowed exceptions, missing error propagation, inconsistent patterns | Diff is test/docs/config only |
+| `api-contract` | Breaking API changes, missing backward compatibility, contract violations | No public API surface changes in diff |
+| `concurrency` | Race conditions, deadlocks, shared mutable state, goroutine/thread leaks | No concurrency primitives in diff |
+
+Extended passes are automatically skipped when their skip signal triggers. Use `force_all_passes: true` to override.
 
 ### `confidence_floor`
 
@@ -84,6 +112,27 @@ Controls how aggressively findings are surfaced. Default: `fix-all`.
 | `selective` | Fix immediately | Fix in this PR | Informational only |
 | `cautious` | Fix immediately | Informational | Informational only |
 
+### `pass_models`
+
+Override the model used for specific explorer passes or the judge. Default: `"sonnet"` for all explorers, session default model for the judge.
+
+```yaml
+pass_models:
+  security: "opus"       # use stronger model for security analysis
+  concurrency: "opus"    # use stronger model for concurrency
+  judge: null            # null = session default model
+```
+
+Valid model values: `"sonnet"`, `"opus"`, `"haiku"`, or `null` (session default).
+
+Use stronger models for passes where precision matters most (security, concurrency). Use faster models for passes where recall is more important than precision (test-adequacy).
+
+### `force_all_passes`
+
+Disable adaptive skip signals for extended passes. Default: `false`.
+
+When `true`, all passes listed in `passes` will run regardless of skip signals. When `false`, extended passes are automatically skipped when their skip signal triggers (e.g., concurrency pass skipped when no concurrency primitives detected in the diff).
+
 ### `ignore_paths`
 
 Glob patterns for files to exclude from review. These files are filtered out of `CHANGED_FILES` before deterministic scans and AI review.
@@ -107,8 +156,10 @@ If multiple configuration sources exist:
 ## No Config Required
 
 If no `.codereview.yaml` exists, the skill uses defaults:
-- All 4 passes enabled
+- All 7 passes enabled (4 core + 3 extended)
 - 0.65 confidence floor
 - Manual cadence
 - fix-all pushback
+- sonnet model for all explorers
+- Adaptive skip enabled
 - No ignored or focused paths

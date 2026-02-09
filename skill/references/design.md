@@ -22,32 +22,43 @@ This document contains background context for the codereview skill. It is not ne
 │  → Produces deterministic findings                            │
 └──────────────────────────────────────────────────────────────┘
                               │
-            ┌─────────────────┼─────────────────┐
-            ▼                 ▼                 ▼
-┌───────────────┐ ┌───────────────┐ ┌───────────────┐
-│ Explorer:     │ │ Explorer:     │ │ Explorer:     │  ... (4 total)
-│ Correctness   │ │ Security      │ │ Reliability   │
-│               │ │               │ │               │
-│ Uses Grep,    │ │ Uses Grep,    │ │ Uses Grep,    │
-│ Read, Glob    │ │ Read, Glob    │ │ Read, Glob    │
-│ to investigate│ │ to investigate│ │ to investigate│
-│               │ │               │ │               │
-│ Returns JSON  │ │ Returns JSON  │ │ Returns JSON  │
-│ findings      │ │ findings      │ │ findings      │
-└───────┬───────┘ └───────┬───────┘ └───────┬───────┘
-        │                 │                 │
-        └─────────────────┼─────────────────┘
-                          ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  Review Judge                                                 │
-│  - Deduplicates explorer findings                             │
-│  - Validates claims against codebase (Grep/Read)              │
-│  - Assesses strengths                                         │
-│  - Checks spec completeness                                   │
-│  - Produces verdict: PASS / WARN / FAIL                       │
-│  → Returns validated findings + verdict + strengths            │
+│  Step 3.5: Adaptive Pass Selection                            │
+│  - Evaluate skip signals for extended passes                  │
+│  - Skip concurrency pass if no concurrency primitives         │
+│  - Skip api-contract pass if no public API changes            │
+│  - Skip error-handling pass if test/docs/config only          │
+│  - Core passes (correctness, security, reliability, tests)    │
+│    are never skipped                                          │
 └──────────────────────────────────────────────────────────────┘
-                          │
+                              │
+    ┌────────┬────────┬───────┼───────┬────────┬────────┐
+    ▼        ▼        ▼       ▼       ▼        ▼        ▼
+┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐
+│Correct-││Secur-  ││Reliab- ││Test    ││Error   ││API/    ││Concur- │
+│ness    ││ity     ││ility   ││Adequacy││Handling││Contract││rency   │
+│        ││        ││        ││        ││        ││        ││        │
+│ core   ││ core   ││ core   ││ core   ││extended││extended││extended│
+│        ││        ││        ││        ││        ││        ││        │
+│ Each explorer: chain-of-thought investigation,              │
+│ calibration examples, false positive suppression,           │
+│ Grep/Read/Glob to verify findings                           │
+└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘
+    │         │         │         │         │         │         │
+    └─────────┴─────────┴────┬────┴─────────┴─────────┴─────────┘
+                             ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Review Judge (prompts/reviewer-judge.md)                     │
+│  1. Adversarial validation (existence, contradiction,         │
+│     severity calibration)                                     │
+│  2. Root cause grouping (merge related findings)              │
+│  3. Cross-explorer synthesis (catch gaps across explorers)    │
+│  4. Strengths assessment (specific, not generic)              │
+│  5. Spec compliance check                                     │
+│  6. Verdict: PASS / WARN / FAIL                               │
+│  → Returns validated findings + verdict + strengths           │
+└──────────────────────────────────────────────────────────────┘
+                              │
 ┌──────────────────────────────────────────────────────────────┐
 │  Step 5: Classify into tiers                                  │
 │  Step 6: Format report with Next Steps                        │
@@ -62,6 +73,24 @@ This document contains background context for the codereview skill. It is not ne
 - The judge sees all findings together, resolving conflicts and removing duplicates
 - Total context pressure is lower: each explorer only handles one specialty
 
+**Why enriched prompts with calibration examples:**
+- Thin prompts produce thin findings — explorers need concrete examples of what "good" looks like
+- Calibration examples anchor severity and confidence scores to specific evidence levels
+- False positive suppression lists dramatically reduce noise from common non-issues
+- Chain-of-thought investigation phases ensure explorers investigate systematically instead of pattern-matching
+
+**Why adversarial validation in the judge:**
+- Explorers over-report by design (optimizing for recall)
+- The judge optimizes for precision — every finding that survives should be real
+- Contradiction checks catch the most common false positives: "missing null check" when a guard exists upstream, "N+1 query" when the ORM eager-loads, etc.
+- Root cause grouping prevents the same issue from being reported 3 times by different explorers
+
+**Why adaptive pass selection:**
+- Running a concurrency pass on a CSS change wastes time and produces noise
+- Running an API/contract pass on internal refactoring wastes time
+- Core passes always run because correctness, security, reliability, and test coverage are always relevant
+- Extended passes are specialized enough that skip signals can reliably determine relevance
+
 ---
 
 ## Design Rationale
@@ -69,6 +98,14 @@ This document contains background context for the codereview skill. It is not ne
 | Decision | Why | Source |
 |----------|-----|--------|
 | Explorer-judge architecture | Specialized sub-agents investigate deeply, judge synthesizes and validates | Vibe/council explorer pattern, context window management |
+| Enriched prompts with CoT phases | Thin prompts produce thin findings; structured investigation ensures depth | v1 experience: shallow findings with 16-line prompts |
+| Calibration examples in each prompt | Anchor severity/confidence to specific evidence levels | v1 experience: inconsistent severity calibration |
+| False positive suppression lists | Dramatically reduces noise from common non-issues | v1 experience: frequent false alarms on parameterized SQL, auto-escaped HTML, etc. |
+| Adversarial judge validation | Explorers optimize for recall, judge optimizes for precision | Council/debate pattern: disagreement reveals signal |
+| Root cause grouping in judge | Prevent duplicate reports when multiple explorers flag symptoms of the same issue | v1 experience: 3 explorers reporting the same null check bug |
+| Extended passes (error-handling, api-contract, concurrency) | These are distinct concern areas that deserve specialized investigation | v1 gap: error swallowing buried in reliability pass, API contracts buried in correctness |
+| Adaptive pass selection | Avoid running irrelevant passes — saves time and reduces noise | Skip signals based on diff content: no concurrency primitives → skip concurrency pass |
+| Configurable model per pass | Security and concurrency benefit from stronger models; test adequacy is fine with faster models | Model cost/quality tradeoff differs by pass complexity |
 | Complexity analysis in context | Feed radon/gocyclo scores to AI so it flags high-complexity functions | Vibe skill complexity step |
 | Language standards (optional) | Give explorers concrete language-specific rules; graceful degradation if not installed | Vibe/standards skill two-tier system |
 | Dead code / YAGNI check | Avoid reviewing and fixing unused code — waste of agent time | receiving-code-review YAGNI pattern |
@@ -95,4 +132,4 @@ Running the same review across multiple models (e.g., Claude + Codex) and compar
 
 Adversarial debate (where models review each other's findings and must steel-man opposing views before revising) is another promising direction — the council/vibe skills demonstrate this pattern works well.
 
-These are areas to explore once the core single-model review is battle-tested.
+These are areas to explore once the enriched single-model review is battle-tested.
