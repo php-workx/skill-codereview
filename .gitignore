@@ -16,3 +16,5 @@ node_modules/
 
 # Build artifacts
 download.log
+/firebase-debug.log
+/download_reviews.sh
