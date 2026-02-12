@@ -127,17 +127,19 @@ Release Readiness: NO-GO
 - `pre-spec-verification`
 - `pre-edit`
 - `go-ahead`
+- `per-repo`
+- `one-off`
 
 ## Tool Usage
 
 | Tool | Count |
 |------|-------|
 | AskUserQuestion | 3 |
-| Bash | 63 |
+| Bash | 64 |
 | Edit | 59 |
 | ExitPlanMode | 3 |
 | Glob | 8 |
-| Grep | 8 |
+| Grep | 10 |
 | Read | 72 |
 | Task | 5 |
 | TaskCreate | 8 |
@@ -148,4 +150,4 @@ Release Readiness: NO-GO
 
 - **Input:** 0
 - **Output:** 0
-- **Total:** ~1674585 (estimated)
+- **Total:** ~1685932 (estimated)
