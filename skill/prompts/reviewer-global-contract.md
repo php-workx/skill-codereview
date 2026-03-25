@@ -63,7 +63,7 @@ Output each finding as a JSON object in an array. Set `pass` to the category tha
 ```json
 [
   {
-    "pass": "correctness|security|reliability|performance|testing|maintainability",
+    "pass": "correctness|security|reliability|performance|testing|maintainability|spec_verification",
     "severity": "low|medium|high|critical",
     "confidence": 0.65,
     "file": "path/to/file",

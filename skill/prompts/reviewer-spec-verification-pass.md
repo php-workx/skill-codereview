@@ -234,4 +234,22 @@ Return a JSON object with two keys:
 }
 ```
 
-Return `{ "requirements": [], "findings": [] }` if no spec was provided or if no requirements could be extracted.
+Return `{ "requirements": [], "findings": [] }` if no spec content is present in the context.
+
+If a spec WAS provided but no requirements could be extracted (zero matches from all extraction methods), do NOT return empty. Instead, emit a single finding:
+```json
+{
+  "pass": "spec_verification",
+  "severity": "medium",
+  "confidence": 0.90,
+  "file": "",
+  "line": 0,
+  "summary": "Spec provided but no extractable requirements found — spec may use non-standard format",
+  "evidence": "Applied all extraction methods (structural markers, keyword markers, acceptance criteria, section headings) to the provided spec. Zero requirements matched. The spec may use a format not covered by the extraction heuristics.",
+  "failure_mode": "Spec verification silently skipped — requirements exist but are not being validated against the implementation.",
+  "fix": "Restructure the spec to use numbered requirements, checkboxes, or must/shall/should language. Alternatively, add an explicit 'Acceptance Criteria' section.",
+  "tests_to_add": [],
+  "test_category_needed": []
+}
+```
+This ensures the judge is aware that spec verification was attempted but inconclusive, rather than silently returning empty.

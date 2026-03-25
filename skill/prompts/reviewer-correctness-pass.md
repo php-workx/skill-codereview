@@ -121,14 +121,14 @@ When the diff contains code that marshals or unmarshals data (JSON, protobuf, gR
   "confidence": 0.90,
   "file": "internal/daemon/workflow_handlers.go",
   "line": 262,
-  "summary": "Flags field is []string on sender but map[string]string on receiver — JSON unmarshal silently fails",
-  "evidence": "workflow_handlers.go:262: analysisResult.Flags is []string. json.Marshal produces [\"flag1\",\"flag2\"]. transport.go:105: client unmarshals into AnalysisResult.Flags typed map[string]string. A JSON array cannot unmarshal into a Go map — json.Unmarshal silently leaves Flags as nil (no error returned with default decoder). Verified: both struct definitions read with Read tool.",
-  "failure_mode": "All analysis flags are silently dropped when using the daemon RPC path. Features depending on flags (like retry logic, human-review triggers) silently degrade.",
+  "summary": "Flags field is []string on sender but map[string]string on receiver — JSON unmarshal returns error that callers commonly discard",
+  "evidence": "workflow_handlers.go:262: analysisResult.Flags is []string. json.Marshal produces [\"flag1\",\"flag2\"]. transport.go:105: client unmarshals into AnalysisResult.Flags typed map[string]string. A JSON array cannot unmarshal into a Go map — json.Unmarshal returns an UnmarshalTypeError. However, the caller at transport.go:110 discards the error (common in fire-and-forget deserialization), so Flags silently remains nil. Verified: both struct definitions and error handling read with Read tool.",
+  "failure_mode": "All analysis flags are silently dropped when using the daemon RPC path. The type mismatch error is returned by json.Unmarshal but discarded by the caller. Features depending on flags (like retry logic, human-review triggers) silently degrade.",
   "fix": "Align the type: either both sides use []string or both use map[string]string. If flags need key-value semantics, change the sender to map[string]string.",
   "tests_to_add": ["Integration test: round-trip flags through daemon RPC, verify they survive"]
 }
 ```
-**Why this is strong:** Both sides verified by reading the actual struct definitions. The JSON marshal/unmarshal behavior for array→map is well-defined (silent failure). Confidence 0.90 because both types were confirmed.
+**Why this is strong:** Both sides verified by reading the actual struct definitions. The JSON marshal/unmarshal behavior for array→map returns an UnmarshalTypeError, but the caller discards it — making the practical failure silent. Confidence 0.90 because both types and the error-handling path were confirmed.
 
 ### False Positive — Do NOT Report
 **Scenario:** A function uses `dict['key']` instead of `dict.get('key')`.

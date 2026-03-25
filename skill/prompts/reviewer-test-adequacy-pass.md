@@ -78,10 +78,22 @@ For each test file you examine during Phases 1-5, classify the tests into catego
 3. **Mock density**: All deps mocked → unit, some mocked → integration, none mocked → integration or e2e
 4. **Infrastructure**: Test containers → integration, browser driver → e2e, in-memory only → unit
 
-When reporting test gaps, include a `test_category_needed` field specifying which category of test is missing and why:
-- "Missing integration test — current unit test mocks the database, cannot catch schema drift"
-- "Missing e2e test — user-facing flow should be verified through the UI"
-- "Missing unit test — new error handling branch has no test coverage at all"
+When reporting test gaps, include a `test_category_needed` field as an enum array (values: `"unit"`, `"integration"`, `"e2e"`). Put the rationale for why that category is needed in the `summary` or `evidence` fields, not in `test_category_needed` itself.
+
+**Correct:**
+```json
+{
+  "summary": "Order persistence has only unit tests with mocked DB — missing integration test to catch schema drift",
+  "test_category_needed": ["integration"]
+}
+```
+
+**Incorrect:**
+```json
+{
+  "test_category_needed": ["Missing integration test — current unit test mocks the database"]
+}
+```
 
 ---
 

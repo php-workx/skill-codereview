@@ -128,7 +128,7 @@ When the diff sets environment variables from dynamic sources (user config, matr
   "summary": "Matrix parameter keys become env var names without validation — allows PATH/LD_PRELOAD hijacking",
   "evidence": "Line 56: for k, v := range matrix { os.Setenv(k, v) }. Matrix keys come from the workflow YAML definition (matrix.go:23). No allowlist or prefix applied to key names. A workflow author (or compromised workflow file) can set matrix key 'LD_PRELOAD' or 'PATH' to hijack subprocess execution. Grepped for key validation: none found.",
   "failure_mode": "Malicious workflow definition sets matrix key LD_PRELOAD=/tmp/evil.so, hijacking all subprocesses spawned by the runner. Alternatively, PATH= redirects command resolution to attacker-controlled directory.",
-  "fix": "Either prefix all matrix env vars (e.g., MATRIX_<key>) or validate keys against a blocklist of dangerous env var names (PATH, LD_PRELOAD, LD_LIBRARY_PATH, DYLD_INSERT_LIBRARIES, NODE_OPTIONS, etc.).",
+  "fix": "Prefix all matrix env vars (e.g., MATRIX_<key>) or enforce a strict allowlist of permitted key names before exporting them.",
   "tests_to_add": ["Test that matrix keys matching dangerous env var names are rejected or prefixed"]
 }
 ```
