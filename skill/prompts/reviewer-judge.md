@@ -118,8 +118,10 @@ If no spec-verification explorer ran but a spec is in the context, fall back to 
 
 For each requirement the spec-verification explorer marked as `implemented`:
 - Spot-check 2-3 with **Read** to verify the `impl_evidence` is real.
+- **Behavioral verification**: Don't just confirm the code exists — verify its **behavior** matches the spec. For requirements that define decision rules, matrices, state machines, or conditional logic: read the actual code and check that each rule/cell/transition matches the spec's definition. A function existing with the right name and having tests does NOT mean it implements the spec correctly.
 - If another explorer found a bug in the same implementation file, note the requirement as `partial` with the bug reference, even if the code exists.
 - If `impl_evidence` references code that doesn't exist, mark as `cannot_determine`.
+- If the behavior deviates from the spec (even if the function exists and has tests), mark as `partial` and describe the deviation.
 
 ### 5c. Validate Test Category Claims
 

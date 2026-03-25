@@ -52,7 +52,14 @@ For each extracted requirement:
    - Does the code implement the core behavior described in the requirement?
    - Is the implementation complete or partial?
    - What specific file:line ranges implement this requirement?
-4. **Classification**:
+4. **Behavioral verification** (critical — do not skip):
+   Finding the right function is NOT enough. For each requirement, verify that the implementation's **behavior** matches the spec:
+   - **Decision rules**: If the spec defines a decision matrix, state machine, or conditional logic table, read the code and verify each cell/transition/branch matches. Check every combination, not just the happy path.
+   - **Parameter constraints**: If the spec defines format, range, enum values, or type constraints, verify the code enforces them with the same values.
+   - **Return values and side effects**: Verify the code produces the outcomes the spec describes — not just "a result" but the *correct* result for each case.
+   - **Error/edge cases**: If the spec explicitly defines error behavior or edge cases, verify the code handles them as specified.
+   - **Common trap**: Marking a requirement as `implemented` because a function with the right name exists and has tests. Tests prove the function works *as coded*, not that the code *matches the spec*. You must compare the code's behavior against the spec's behavioral requirements directly.
+5. **Classification**:
    - `implemented` — Clear code in the diff addresses this requirement fully
    - `partial` — Some aspects are implemented but key parts are missing. Explain what's missing in `impl_evidence`.
    - `not_implemented` — No evidence of implementation in the diff for files related to this requirement
