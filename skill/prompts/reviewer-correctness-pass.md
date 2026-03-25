@@ -40,6 +40,24 @@ If a function signature, return type, error behavior, or public API contract cha
 2. Check if all consumers are updated in the same diff.
 3. If consumers exist outside the diff, flag the breaking change.
 
+### Phase 6 — Default/Skip Path Analysis
+For each new struct, object, or data structure construction in the diff:
+1. Check what fields are left at **zero value** (nil map, nil slice, empty string, 0, false). Use **Read** to examine the full constructor or factory function.
+2. Trace **downstream consumers** — do they assume non-nil? Use **Grep** for accesses like `obj.Field[key]`, `obj.Field.Method()`, or range loops over the field. A nil map read returns zero value (safe), but a nil map write panics. A nil slice is safe for range but not for index access.
+3. Pay special attention to **conditional construction** — if/else branches, skip logic, early returns, error paths — where one branch initializes a field and another doesn't. The skip/error path often constructs a partial object.
+4. Check **evaluation lifecycle**: when code builds data structures consumed by later stages (expression engines, template renderers, configuration builders), verify inputs are fully resolved before consumption. Look for self-referential or circular resolution where a field's value depends on another field that hasn't been populated yet.
+
+### Phase 7 — Serialization Boundary Tracing
+When the diff contains code that marshals or unmarshals data (JSON, protobuf, gRPC, RPC, IPC, database rows):
+1. **Identify both sides** of the serialization boundary — the sender/writer and the receiver/reader. Use **Grep** to find the corresponding marshal/unmarshal calls.
+2. **Compare types**: verify that `json.Marshal` / `proto.Marshal` / `encode` output matches what `json.Unmarshal` / `proto.Unmarshal` / `decode` expects on the receiving end. Common mismatches:
+   - Array (`[]T`) marshaled, but receiver expects map (`map[K]V`) — JSON array cannot unmarshal into a map
+   - String field on one side, integer on the other — silent zero value or error
+   - Nested struct vs flat fields — fields silently dropped
+   - Optional/pointer field on one side, required/value on the other — nil vs zero value confusion
+3. **Check both directions**: if the diff changes the sending side, find the receiving side and verify compatibility (and vice versa). The receiving side may be in a different package, service, or even repository.
+4. If the two sides are in different files, use **Read** on both to verify the struct/type definitions match.
+
 ---
 
 ## Calibration Examples
@@ -77,6 +95,40 @@ If a function signature, return type, error behavior, or public API contract cha
 }
 ```
 **Why medium confidence:** The bug is real but the charge-path impact could not be fully confirmed — there may be a separate rounding step downstream.
+
+### True Positive — Nil Map on Skip Path (High Confidence)
+```json
+{
+  "pass": "correctness",
+  "severity": "high",
+  "confidence": 0.88,
+  "file": "internal/runner/runner.go",
+  "line": 105,
+  "summary": "Skipped steps create StepResult without initializing Outputs map — downstream map access panics",
+  "evidence": "Line 105: result := StepResult{Status: StatusSkipped}. The Outputs field (type map[string]string) is nil. At runner.go:220, resolveStepOutputs() does `val := result.Outputs[key]` which is safe (nil map read returns zero). But at runner.go:238, setStepOutput() does `result.Outputs[key] = val` — nil map WRITE panics. Grepped for setStepOutput callers: expression engine calls it when evaluating ${{ steps.X.outputs.Y }} for skipped steps.",
+  "failure_mode": "Panic when any workflow expression references an output of a skipped step. Crashes the workflow runner.",
+  "fix": "Initialize Outputs in the skip path: result := StepResult{Status: StatusSkipped, Outputs: make(map[string]string)}",
+  "tests_to_add": ["Test expression referencing output of a skipped step does not panic"]
+}
+```
+**Why this is strong:** Traced the nil map from construction (skip path) through to a write operation (setStepOutput), verified the call chain via Grep. Confidence 0.88 because the trigger path is concrete.
+
+### True Positive — Serialization Type Mismatch (High Confidence)
+```json
+{
+  "pass": "correctness",
+  "severity": "high",
+  "confidence": 0.90,
+  "file": "internal/daemon/workflow_handlers.go",
+  "line": 262,
+  "summary": "Flags field is []string on sender but map[string]string on receiver — JSON unmarshal silently fails",
+  "evidence": "workflow_handlers.go:262: analysisResult.Flags is []string. json.Marshal produces [\"flag1\",\"flag2\"]. transport.go:105: client unmarshals into AnalysisResult.Flags typed map[string]string. A JSON array cannot unmarshal into a Go map — json.Unmarshal silently leaves Flags as nil (no error returned with default decoder). Verified: both struct definitions read with Read tool.",
+  "failure_mode": "All analysis flags are silently dropped when using the daemon RPC path. Features depending on flags (like retry logic, human-review triggers) silently degrade.",
+  "fix": "Align the type: either both sides use []string or both use map[string]string. If flags need key-value semantics, change the sender to map[string]string.",
+  "tests_to_add": ["Integration test: round-trip flags through daemon RPC, verify they survive"]
+}
+```
+**Why this is strong:** Both sides verified by reading the actual struct definitions. The JSON marshal/unmarshal behavior for array→map is well-defined (silent failure). Confidence 0.90 because both types were confirmed.
 
 ### False Positive — Do NOT Report
 **Scenario:** A function uses `dict['key']` instead of `dict.get('key')`.

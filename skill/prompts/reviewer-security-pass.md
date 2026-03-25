@@ -45,6 +45,23 @@ For new imports or dependency additions:
 2. Look for known vulnerability patterns in the version added.
 3. Check if the dependency is used in a security-sensitive context (crypto, auth, serialization).
 
+### Phase 6 — Non-User-Input Injection
+Don't limit injection analysis to user input. Any dynamic value that flows into a dangerous sink is an injection vector:
+1. **Identify non-user dynamic values** in the diff: inter-component data (step outputs, RPC responses, queue messages, webhook payloads), configuration values (matrix parameters, template variables, feature flags), file contents read at runtime, values from other stages of a pipeline.
+2. **Trace these values to sinks**: shell commands (`exec`, `system`, `popen`, backticks, `$()` in shell scripts), SQL queries, file paths, `eval`/`Function()` contexts, template rendering, HTTP headers.
+3. **Check for escaping/sanitization** at the boundary where the value enters the sink. Framework-level or language-level protections (parameterized queries, subprocess list args) count. String interpolation into shell or SQL does not.
+4. For **pipeline/workflow systems**: trace output from one step that becomes input to another. Step outputs, environment variables set by previous steps, and output files are all potential injection vectors if consumed by shell commands or expression engines in later steps.
+
+### Phase 7 — Environment Variable Namespace Pollution
+When the diff sets environment variables from dynamic sources (user config, matrix parameters, template variables, key-value stores):
+1. Check whether the **env var key names** are validated or constrained. Use **Read** to examine the code that constructs the env var name.
+2. Flag if unrestricted key names allow overwriting dangerous system env vars:
+   - Execution hijacking: `PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`
+   - Runtime hijacking: `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`, `PERL5OPT`
+   - Credential theft: `HTTP_PROXY`, `HTTPS_PROXY`, `SSL_CERT_FILE`, `AWS_ACCESS_KEY_ID`
+3. Look for **allowlists** (only permitted names), **prefix-scoping** (all user-defined vars get a prefix like `CUSTOM_` or `MATRIX_`), or **blocklists** (reject known-dangerous names). Allowlists and prefix-scoping are strong defenses. Blocklists are weak (incomplete by nature).
+4. If no validation exists, report with the worst-case exploit: an attacker who controls the key name can hijack process execution via `LD_PRELOAD` or `PATH`.
+
 ---
 
 ## Calibration Examples
@@ -82,6 +99,40 @@ For new imports or dependency additions:
 }
 ```
 **Why medium confidence:** The missing rate limit is confirmed, but the actual exploitability depends on session management details not fully explored.
+
+### True Positive — Non-User-Input Shell Injection (Medium Confidence)
+```json
+{
+  "pass": "security",
+  "severity": "medium",
+  "confidence": 0.78,
+  "file": "internal/runner/runner.go",
+  "line": 189,
+  "summary": "Step output values injected into shell expression without escaping",
+  "evidence": "Line 189: shell command built with fmt.Sprintf(\"echo %s >> $CLAI_OUTPUT\", outputValue). The outputValue comes from parsing a previous step's $CLAI_OUTPUT file (runner.go:145), not from direct user input. However, a malicious or buggy step could write output containing shell metacharacters (;, |, $(), backticks). No escaping or quoting applied before shell interpolation.",
+  "failure_mode": "A compromised or buggy workflow step can inject arbitrary shell commands into subsequent steps via crafted output values. Attacker who controls one step's output gains code execution in the next step's shell context.",
+  "fix": "Use shellescape/shlex.quote on outputValue before interpolation, or pass as an environment variable instead of inline shell interpolation.",
+  "tests_to_add": ["Test step output containing shell metacharacters does not execute as commands"]
+}
+```
+**Why medium confidence:** The injection path is confirmed, but exploitability requires a previous step to produce malicious output — this may be constrained by the workflow definition.
+
+### True Positive — Env Var Namespace Pollution (High Confidence)
+```json
+{
+  "pass": "security",
+  "severity": "medium",
+  "confidence": 0.85,
+  "file": "internal/runner/matrix.go",
+  "line": 56,
+  "summary": "Matrix parameter keys become env var names without validation — allows PATH/LD_PRELOAD hijacking",
+  "evidence": "Line 56: for k, v := range matrix { os.Setenv(k, v) }. Matrix keys come from the workflow YAML definition (matrix.go:23). No allowlist or prefix applied to key names. A workflow author (or compromised workflow file) can set matrix key 'LD_PRELOAD' or 'PATH' to hijack subprocess execution. Grepped for key validation: none found.",
+  "failure_mode": "Malicious workflow definition sets matrix key LD_PRELOAD=/tmp/evil.so, hijacking all subprocesses spawned by the runner. Alternatively, PATH= redirects command resolution to attacker-controlled directory.",
+  "fix": "Either prefix all matrix env vars (e.g., MATRIX_<key>) or validate keys against a blocklist of dangerous env var names (PATH, LD_PRELOAD, LD_LIBRARY_PATH, DYLD_INSERT_LIBRARIES, NODE_OPTIONS, etc.).",
+  "tests_to_add": ["Test that matrix keys matching dangerous env var names are rejected or prefixed"]
+}
+```
+**Why high confidence:** The code path is direct — matrix keys are used as env var names with zero validation. The dangerous env vars (PATH, LD_PRELOAD) are well-documented attack vectors.
 
 ### False Positive — Do NOT Report
 **Scenario:** Code uses `subprocess.run(["git", "status", "--porcelain"])` with a literal argument list.
