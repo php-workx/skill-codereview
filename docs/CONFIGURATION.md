@@ -165,6 +165,56 @@ If multiple configuration sources exist:
 2. `.codereview.yaml` in repo root
 3. Built-in defaults (lowest priority)
 
+### `large_diff`
+
+Settings for large changeset (chunked) review mode. The skill automatically activates chunked mode when the diff exceeds file or line count thresholds. All settings have sensible defaults.
+
+```yaml
+large_diff:
+  # File count that triggers chunked mode (default: 80)
+  file_threshold: 80
+
+  # Diff line count that triggers chunked mode (default: 8000)
+  line_threshold: 8000
+
+  # Maximum files per review chunk (default: 15)
+  max_chunk_files: 15
+
+  # Maximum diff lines per review chunk (default: 2000)
+  max_chunk_lines: 2000
+
+  # Maximum parallel explorer sub-agents per wave (default: 12)
+  max_parallel_explorers: 12
+
+  # Model for cross-chunk synthesis agent (default: null = session default)
+  cross_chunk_model: null
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `file_threshold` | 80 | File count that triggers chunked mode |
+| `line_threshold` | 8000 | Diff line count that triggers chunked mode |
+| `max_chunk_files` | 15 | Maximum files per chunk |
+| `max_chunk_lines` | 2000 | Maximum diff lines per chunk |
+| `max_parallel_explorers` | 12 | Maximum parallel Task calls per wave |
+| `cross_chunk_model` | `null` | Model for cross-chunk synthesizer |
+
+### `--no-chunk` (CLI flag)
+
+Force standard (non-chunked) review mode even when the diff exceeds large-diff thresholds. Useful when you want the original single-explorer behavior and accept potential context truncation.
+
+```bash
+/codereview --base main --no-chunk
+```
+
+### `--force-chunk` (CLI flag)
+
+Force chunked review mode even when the diff is below thresholds. Useful for testing the chunked pipeline on small diffs.
+
+```bash
+/codereview --force-chunk
+```
+
 ## No Config Required
 
 If no `.codereview.yaml` exists, the skill uses defaults:
@@ -175,3 +225,4 @@ If no `.codereview.yaml` exists, the skill uses defaults:
 - sonnet model for all explorers
 - Adaptive skip enabled (spec-verification only runs with `--spec`)
 - No ignored or focused paths
+- Chunked mode auto-activates at 80 files or 8000 diff lines

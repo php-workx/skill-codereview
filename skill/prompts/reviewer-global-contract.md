@@ -81,3 +81,18 @@ Output each finding as a JSON object in an array. Set `pass` to the category tha
 **Note:** The orchestrator will assign `id`, `source`, and `action_tier` to your findings after collection. You do not need to include these fields.
 
 Return `[]` if no issues found in your focus area.
+
+---
+
+## Chunked Review Mode (Large Changesets)
+
+When reviewing a large changeset, you may be assigned a **chunk** — a subset of the total changed files. If your prompt includes a "Review Mode: Chunked" section, follow these additional rules:
+
+1. **Scope:** You are reviewing only the files in your assigned chunk. Do not attempt to review files outside your chunk.
+2. **Cross-chunk awareness:** Use the changeset manifest and cross-chunk interface summary to understand how your chunk connects to the broader change. The manifest lists all files in all chunks with their risk tiers.
+3. **Cross-chunk flagging:** If you discover a finding that depends on behavior in code outside your chunk, tag it clearly in the `evidence` field with the prefix: `CROSS-CHUNK: depends on <file>:<function>`. This tells the cross-chunk synthesizer to investigate the interaction. Example:
+   ```
+   "evidence": "CROSS-CHUNK: depends on src/auth/session.py:validate_token(). This function's return type may have changed (it's in Chunk 1). If validate_token() now returns Optional[Session] instead of Session, the unchecked access at line 45 will raise AttributeError."
+   ```
+4. **Investigation tools:** You still have full access to Grep, Read, and Glob across the entire codebase — not just your chunk's files. Use them to trace call paths into other chunks when needed, but report cross-chunk concerns with the CROSS-CHUNK tag rather than as standalone findings about other chunks' code.
+5. **Chunk context:** Your prompt includes chunk-scoped context (callers/callees for your chunk's functions). For cross-chunk references, use the cross-chunk interface summary or investigate with tools.

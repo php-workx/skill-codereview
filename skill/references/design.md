@@ -132,6 +132,75 @@ This document contains background context for the codereview skill. It is not ne
 
 ---
 
+## Large Changeset Support (Chunked Review Mode)
+
+For diffs exceeding 80 files or 8000 lines, the standard pipeline hits context window limits — each explorer receives the entire diff (~40-80k tokens) plus context, leaving insufficient room for investigation. The chunked review mode transparently scales the review by splitting files into groups and using a single final judge.
+
+### Architecture
+
+```
+Step 1:    Determine review target (unchanged)
+                │
+Step 1.5:  Mode selection + Diff triage + File clustering
+           ├─ Count files/lines → decide standard vs chunked mode
+           ├─ Build changeset manifest (risk tiers per file)
+           ├─ Cluster files into chunks (8-15 files, max 2000 diff lines)
+           └─ Write full diff to temp file (protect orchestrator context)
+                │
+Step 2-L:  Tiered context gathering
+           ├─ Phase A: lightweight global context (~5k tokens)
+           │   ├─ Import graph, dead code (new functions only)
+           │   └─ Complexity hotspots (C+ only), standards, spec
+           └─ Phase B: chunk-scoped deep context (per chunk, ~10-15k)
+               ├─ Callers/callees (top 5/3 per function)
+               └─ Types, test files
+                │
+Step 3:    Deterministic scans (unchanged, output scoped per chunk)
+                │
+Step 3.5:  Adaptive pass selection (per chunk, not global)
+                │
+Step 4-L:  Chunked AI review
+           │
+           ├─ 4-L.2: Chunked explorers (waves of 8-12 parallel Tasks)
+           │   ├─ Wave 1: All passes × Tier 1 (critical) chunks
+           │   ├─ Wave 2: Core passes × Tier 2 (standard) chunks
+           │   └─ Wave 3: Extended passes × Tier 2 + Tier 3 chunks
+           │   (Spec verification runs as single global pass with full diff)
+           │
+           ├─ 4-L.3: Cross-chunk synthesizer (single agent)
+           │   └─ Interface mismatches, data flow, consistency, shared resources
+           │   └─ Receives actual diff content at chunk boundaries
+           │
+           └─ 4-L.4: Final judge (full adversarial validation)
+               └─ Same rigor as standard mode, cross-chunk root cause grouping, verdict
+                │
+Steps 5-7: Merge, format (+ chunk summary table), save
+```
+
+### Key Design Decisions
+
+| Decision | Why |
+|----------|-----|
+| High activation thresholds (80 files / 8000 lines) | Modern models handle large contexts well. Only chunk when truly necessary to avoid information loss from context fragmentation. Raised from 30/3000 after testing showed chunking hurt quality on medium-sized diffs. |
+| Directory-based clustering | Deterministic, no AI required, strong proxy for file relatedness. |
+| Three-tier risk tiering (Critical / Standard / Low-risk) | Auth/payment files need deeper review than config files. Prioritizes explorer attention where risk is highest. |
+| Single final judge (no chunk judges) | Chunk judges created multi-level filtering that removed real findings. A single final judge with full adversarial validation preserves recall while maintaining precision. Explorers optimize for recall, judge optimizes for precision — one gate, not three. |
+| Cross-chunk synthesizer with actual diff content | Cross-file pattern detection needs its own context budget and tool access. Including actual diff at chunk boundaries (not just summaries) enables detection of type mismatches, interface changes, and data flow breaks. |
+| Spec verification runs globally with full diff | Requirements span the entire changeset — fragmenting per chunk loses traceability. Full diff available via temp file enables behavioral verification, not just existence checks. |
+| Wave batching (8-12 per wave) | Prevents spawning too many simultaneous sub-agents while maintaining parallelism. |
+| Diff offloading to temp files | Prevents the orchestrator's own context from being consumed by a 40-80k token diff. |
+
+### Tradeoffs
+
+| Risk | Mitigation | Residual |
+|------|-----------|----------|
+| Cross-chunk bugs missed | Cross-chunk synthesizer with actual diff at boundaries + full adversarial validation in final judge | Medium: subtle interactions through unchanged code may be missed |
+| Increased latency (~2-3x) | Highly parallel waves; serial overhead is only synthesizer + final judge | Acceptable: standard mode would fail on the same diff |
+| Increased token cost (~2-4x) | Each explorer handles less work; without chunking, review is truncated/superficial | Acceptable tradeoff for quality |
+| Final judge context pressure | All raw findings from all chunks sent to final judge | Mitigated by high activation thresholds (80/8000) limiting chunk count; judge can use tools to investigate |
+
+---
+
 ## Future: Multi-Model Consensus (v2)
 
 Running the same review across multiple models (e.g., Claude + Codex) and comparing their findings could significantly improve review quality. When two models independently flag the same issue, confidence is very high. When they disagree, the disagreement itself is a signal worth human attention.

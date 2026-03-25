@@ -20,6 +20,8 @@
 #  9.  Action tier classification on every finding
 #  9b. Valid action_tier values
 #  10. Tier summary consistency
+#  10b. review_mode field validation (standard/chunked)
+#  10c. Chunked mode: chunk metadata validation (chunk_count, chunks array, required fields, risk_tier)
 #  11. Report markdown: verdict, strengths, tier sections, summary
 #  12. spec_requirements array validation (if present)
 #  12a. Required fields (id, text, source_section, impl_status)
@@ -228,6 +230,56 @@ if [ "$(jq 'has("tier_summary")' "$FINDINGS")" = "true" ]; then
   else
     echo "PASS: tier_summary consistent (must_fix=$MUST, should_fix=$SHOULD, consider=$CONSIDER)"
   fi
+fi
+
+# 10b. review_mode field validation
+if [ "$(jq 'has("review_mode")' "$FINDINGS")" = "true" ]; then
+  REVIEW_MODE=$(jq -r '.review_mode' "$FINDINGS")
+  case "$REVIEW_MODE" in
+    standard|chunked) echo "PASS: review_mode valid ($REVIEW_MODE)" ;;
+    *) echo "FAIL: Invalid review_mode: $REVIEW_MODE (must be standard/chunked)"; ERRORS=$((ERRORS + 1)) ;;
+  esac
+
+  # 10c. Chunked mode: validate chunk metadata
+  if [ "$REVIEW_MODE" = "chunked" ]; then
+    if [ "$(jq 'has("chunk_count")' "$FINDINGS")" != "true" ]; then
+      echo "FAIL: chunked mode requires chunk_count field"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS: chunk_count present ($(jq '.chunk_count' "$FINDINGS"))"
+    fi
+
+    if [ "$(jq 'has("chunks")' "$FINDINGS")" != "true" ]; then
+      echo "FAIL: chunked mode requires chunks array"
+      ERRORS=$((ERRORS + 1))
+    elif [ "$(jq '.chunks | type' "$FINDINGS")" != '"array"' ]; then
+      echo "FAIL: chunks must be an array"
+      ERRORS=$((ERRORS + 1))
+    else
+      CHUNK_COUNT=$(jq '.chunks | length' "$FINDINGS")
+      echo "INFO: $CHUNK_COUNT chunks"
+
+      # Validate required fields in each chunk
+      BAD_CHUNKS=$(jq '[.chunks[] | select(.id == null or .description == null or .files == null or .file_count == null or .diff_lines == null or .risk_tier == null)] | length' "$FINDINGS")
+      if [ "$BAD_CHUNKS" -gt 0 ]; then
+        echo "FAIL: $BAD_CHUNKS chunks missing required fields (id, description, files, file_count, diff_lines, risk_tier)"
+        ERRORS=$((ERRORS + 1))
+      else
+        echo "PASS: All chunks have required fields"
+      fi
+
+      # Validate risk_tier values
+      BAD_RISK=$(jq '[.chunks[] | select(.risk_tier | IN("critical","standard","low-risk") | not)] | length' "$FINDINGS")
+      if [ "$BAD_RISK" -gt 0 ]; then
+        echo "FAIL: $BAD_RISK chunks with invalid risk_tier"
+        ERRORS=$((ERRORS + 1))
+      else
+        echo "PASS: Chunk risk_tier values valid"
+      fi
+    fi
+  fi
+else
+  echo "WARN: Missing review_mode field (should be 'standard' or 'chunked')"
 fi
 
 # 12. spec_requirements validation (if present)

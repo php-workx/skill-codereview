@@ -19,6 +19,8 @@ description: 'Use when reviewing local code changes — staged files, branches, 
 /codereview --spec docs/plan.md         # review against a spec/plan
 /codereview src/auth/                   # review changes in specific path
 /codereview --base main --spec plan.md  # branch review with spec check
+/codereview --base main --no-chunk     # force standard mode (skip chunking)
+/codereview --force-chunk              # force chunked mode for testing
 ```
 
 ---
@@ -131,9 +133,140 @@ fi
 
 These variables are referenced throughout subsequent steps.
 
+**If `--no-chunk` provided:** Force standard (non-chunked) review mode even if the diff exceeds large-diff thresholds. Useful when you want the original single-explorer behavior and accept context truncation risk.
+
+**If `--force-chunk` provided:** Force chunked review mode even if the diff is below thresholds. Useful for testing the chunked pipeline on small diffs.
+
+### Step 1.5: Mode Selection, Diff Triage & File Clustering
+
+After Step 1, determine whether to use standard mode or large-diff chunked mode.
+
+**1.5a. Mode selection:**
+
+```bash
+FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l | tr -d ' ')
+DIFF_LINES=$(echo "$DIFF" | wc -l | tr -d ' ')
+```
+
+| Condition | Mode |
+|-----------|------|
+| `--force-chunk` flag provided | Large-diff (chunked) mode |
+| `--no-chunk` flag provided | Standard mode |
+| `FILE_COUNT > 80` OR `DIFF_LINES > 8000` | Large-diff (chunked) mode |
+| Otherwise | Standard mode |
+
+Thresholds are configurable via `.codereview.yaml` (`large_diff.file_threshold` and `large_diff.line_threshold`). Defaults: 80 files, 8000 lines.
+
+If large-diff mode activates, emit:
+```
+Large changeset detected (<N> files, <N> lines changed). Activating chunked review mode.
+```
+
+If standard mode: skip the rest of Step 1.5 and proceed directly to Step 2 (the existing flow is unchanged).
+
+**1.5b. Build changeset manifest:**
+
+The manifest is a lightweight structured summary of the entire changeset (~3-5k tokens even for 200+ files). It replaces the full diff in contexts where space is constrained (cross-chunk synthesis, hierarchical judge prompts).
+
+```bash
+# Produce per-file change stats
+git diff $BASE_REF..$HEAD_REF --numstat
+```
+
+For each file in `CHANGED_FILES`, record:
+
+```
+<path> | <lines_added>+/<lines_removed>- | <file_type> | <change_category> | <risk_tier>
+```
+
+Where:
+- `file_type` — detected from extension (`.py` = python, `.go` = go, `.ts` = typescript, etc.)
+- `change_category` — one of `new_file`, `deleted_file`, `renamed`, `modified`
+- `risk_tier` — assigned per the rules below
+
+**1.5c. File risk tiering:**
+
+Assign each file a risk tier. Evaluate in order — first match wins:
+
+**Tier 1 (Critical)** — any of:
+- Path contains: `auth`, `security`, `crypto`, `payment`, `billing`, `secret`, `credential`, `session`, `token`
+- Path matches any `focus_paths` pattern from `.codereview.yaml`
+- `lines_added + lines_removed > 200`
+- Diff for this file contains new route/endpoint definitions (grep for `route|endpoint|handler|@app\.|@api\.|@router\.`)
+
+**Tier 3 (Low-risk)** — any of (unless already Tier 1):
+- Path matches any `ignore_paths` pattern from `.codereview.yaml`
+- File is a test file (matches `test_*.py`, `*_test.go`, `*.test.ts`, `*.spec.ts`, etc.)
+- File is documentation (`.md`, `.txt`, `.rst`)
+- File is config (`.yaml`, `.yml`, `.json`, `.toml`, `.env.example`)
+- File is a migration or schema file
+- File is generated (matches `*.generated.*`, `*.pb.go`, `*.g.dart`, etc.)
+- `lines_added + lines_removed < 20`
+
+**Tier 2 (Standard)** — everything else.
+
+Store: `MANIFEST` — the full manifest text, `TIER1_FILES`, `TIER2_FILES`, `TIER3_FILES` — file lists by tier.
+
+**1.5d. File clustering:**
+
+Group files into review chunks of 8-15 files each, with max 2000 diff lines per chunk.
+
+**Phase 1 — Directory-based grouping:**
+Group files by their top-level directory (or first two directory levels for deep trees):
+```
+src/auth/login.py         → cluster: src/auth
+src/auth/session.py       → cluster: src/auth
+src/api/orders.py         → cluster: src/api
+tests/test_auth.py        → cluster: tests (initially)
+```
+
+**Phase 2 — Test pairing:**
+Associate test files with their implementation cluster:
+- `tests/test_auth.py` → pairs with `src/auth/` cluster
+- `src/auth/login_test.go` → pairs with `src/auth/` cluster
+- Test files that cannot be paired stay in a "tests" cluster
+
+**Phase 3 — Size balancing:**
+
+| Constraint | Default | Config Key |
+|-----------|---------|-----------|
+| Max files per chunk | 15 | `large_diff.max_chunk_files` |
+| Max diff lines per chunk | 2000 | `large_diff.max_chunk_lines` |
+| Min files per chunk | 3 | — |
+
+- **Split** clusters that exceed max files or max diff lines. Keep closely related files together (same subdirectory, shared imports from the diff).
+- **Merge** clusters with fewer than 3 files and under 500 total diff lines into the most related neighboring cluster (same parent directory).
+
+Store: `CHUNKS` — an array of chunk definitions, each with:
+- `chunk_id` — sequential number (1, 2, 3, ...)
+- `description` — directory path(s) covered (e.g., "src/auth/*")
+- `files` — list of file paths in this chunk
+- `risk_tier` — highest tier of any file in the chunk (Tier 1 > Tier 2 > Tier 3)
+- `diff_lines` — total lines changed in this chunk
+- `cross_chunk_deps` — files in this chunk that import/reference files in other chunks
+
+Also store: `CHUNK_COUNT` — total number of chunks, `REVIEW_MODE` — `"chunked"`.
+
+**1.5e. Diff offloading for orchestrator context protection:**
+
+Write the full diff to a temp file instead of holding it in context:
+```bash
+git diff $BASE_REF..$HEAD_REF > /tmp/codereview-diff.patch
+```
+
+Extract chunk-specific diffs fresh from git when needed:
+```bash
+# For chunk N, extract diff for only its files
+git diff $BASE_REF..$HEAD_REF -- file1.py file2.py file3.py > /tmp/codereview-chunk-N.patch
+```
+
+This prevents the orchestrator's context window from being consumed by the full diff (~40-80k tokens for large changesets).
+
 ### Step 2: Gather Context (Agentic Exploration)
 
 Before reviewing, understand the surrounding code. This is critical for catching integration bugs.
+
+> **Large-diff mode:** If `REVIEW_MODE = "chunked"`, use the **tiered context gathering** described in Step 2-L below instead of Steps 2a–2h. In standard mode, continue with 2a–2h as written.
 
 **2a. Identify scope from the diff:**
 - Extract changed file paths, function names, class names
@@ -259,6 +392,53 @@ If a spec is found, include it in the context packet for requirements completene
 - Language standards (if loaded)
 - Spec/plan content (if available)
 - Any repo-level review instructions found
+
+#### Step 2-L: Tiered Context Gathering (Large-Diff Mode Only)
+
+When `REVIEW_MODE = "chunked"`, replace the monolithic context gathering (Steps 2a–2h) with a two-phase approach that controls context budget.
+
+**Phase A — Lightweight global context (~5k token budget, runs once):**
+
+1. **Import graph** — Use Grep to identify which changed files import/reference other changed files. Record as a dependency map: `file_A → [file_B, file_C]`. This powers the cross-chunk interface summary.
+2. **Dead code check (scoped)** — Only check *newly added* public functions (not modified functions — if they existed before, they presumably have callers). This dramatically reduces Grep calls for large diffs.
+3. **Complexity analysis (hotspots only)** — Run radon/gocyclo but only report functions rated **C or worse** (complexity >= 11). Skip A/B ratings to keep context compact.
+4. **Repo-level review instructions** — Same as Step 2e (fixed-size, regardless of diff size).
+5. **Language standards** — Same as Step 2f (fixed-size per language).
+6. **Spec/plan** — Same as Step 2g (fixed-size).
+
+Store as `GLOBAL_CONTEXT`.
+
+**Phase B — Chunk-scoped deep context (~10-15k token budget per chunk):**
+
+For each chunk in `CHUNKS`, gather deep context scoped to only that chunk's files:
+
+1. **Callers** of changed functions in the chunk — top 5 callers per function (with code snippets)
+2. **Callees** — top 3 callees per changed function
+3. **Type definitions and interfaces** referenced by the chunk's files
+4. **Related test files** — already paired during clustering, read their structure
+
+**Token enforcement:** The orchestrator estimates token count (~1 token per 4 characters). If chunk context exceeds 15k tokens, truncate progressively:
+1. Reduce callers per function from 5 → 3
+2. Reduce callees per function from 3 → 1
+3. Omit type definitions (explorers can look them up with Read)
+4. Summarize callers as count only: "N callers found (use Grep to investigate)"
+
+Store as `CHUNK_CONTEXT[chunk_id]` — one context packet per chunk.
+
+**Cross-chunk interface summary (built from Phase A import graph):**
+
+For each chunk, generate a cross-chunk interface summary listing how this chunk's files connect to files in other chunks:
+
+```
+## Cross-Chunk Interfaces for Chunk 3
+- src/api/users.py imports src/auth/session.py (Chunk 1) — calls: get_session(), validate_token()
+  - get_session() signature: def get_session(request: Request) -> Session
+  - validate_token() is ALSO MODIFIED in this changeset (Chunk 1)
+- src/api/users.py imports src/models/user.py (Chunk 4) — calls: User.get_by_id()
+  - User.get_by_id() is NOT modified in this changeset
+```
+
+This enables chunk explorers to flag cross-chunk interface risks. Store as `CROSS_CHUNK_SUMMARY[chunk_id]`.
 
 ### Step 3: Run Deterministic Scans (Best-Effort)
 
@@ -428,6 +608,239 @@ The judge returns a JSON object with `verdict`, `verdict_reason`, `strengths`, `
 
 **Note on spec-verification explorer output:** The spec-verification explorer returns a JSON object with two keys: `requirements` (the traceability data) and `findings` (standard findings with `pass: "spec_verification"`). Pass both the `requirements` array and the `findings` array to the judge. The judge merges `requirements` into its `spec_requirements` output and validates the `findings` alongside other explorers' findings.
 
+#### Step 4-L: Chunked AI Review (Large-Diff Mode Only)
+
+When `REVIEW_MODE = "chunked"`, replace the standard Step 4 (4a + 4b) with the following multi-phase pipeline.
+
+**4-L.1. Build execution matrix:**
+
+Not every pass needs to review every chunk. Build a matrix of `(pass, chunk)` pairs to run:
+
+- **Core passes** (correctness, security, reliability, test-adequacy): run on all chunks unless the chunk contains ONLY Tier 3 files AND the pass is security/reliability — in that case, skip.
+- **Extended passes**: apply adaptive skip signals (Step 3.5) **per-chunk** instead of globally. Evaluate each chunk's diff content separately:
+  - Concurrency pass: skip for chunks with no concurrency primitives
+  - API/Contract pass: skip for chunks with no public API surface changes
+  - Error handling pass: skip for chunks that are test/docs/config only
+- **Spec verification**: run as a **single global pass** (not chunked) — see the spec verification section below Step 4-L.4.
+
+**4-L.2. Launch chunked explorers in waves:**
+
+Batch explorer launches into waves of 8-12 parallel Task calls (configurable via `large_diff.max_parallel_explorers`):
+
+| Wave | Contents | Priority |
+|------|----------|----------|
+| Wave 1 | All enabled passes for Tier 1 (critical) chunks | Highest — critical files get reviewed first |
+| Wave 2 | Core passes for Tier 2 (standard) chunks | Normal |
+| Wave 3 | Extended passes for Tier 2 chunks + all passes for Tier 3 chunks | Lowest |
+
+If total Task count would exceed 24, collapse all Tier 3 chunks into a single "low-risk omnibus" explorer per pass. The omnibus explorer receives all Tier 3 files together with instructions to scan quickly.
+
+Wait for each wave to complete before launching the next wave.
+
+**Chunked explorer prompt template:**
+
+```
+Tool: Task
+Parameters:
+  subagent_type: "general-purpose"
+  model: <pass_models[pass_name] from config, default "sonnet">
+  description: "Review explorer: <pass name> — Chunk <N>/<total> (<chunk description>)"
+  prompt: |
+    <global contract content>
+    <pass-specific prompt>
+
+    ## Review Mode: Chunked (Large Changeset)
+    You are reviewing chunk <N> of <total> in a large changeset.
+    This chunk covers: <chunk description — directory names, file count, risk tier>
+    Chunk files: <list of file paths in this chunk>
+
+    ## Chunk Diff
+    <diff for ONLY the files in this chunk — extracted via:
+     git diff $BASE_REF..$HEAD_REF -- <chunk files>>
+
+    ## Chunk Context
+    <CHUNK_CONTEXT[chunk_id] from Step 2-L Phase B>
+
+    ## Cross-Chunk Interface Summary
+    <CROSS_CHUNK_SUMMARY[chunk_id] from Step 2-L>
+
+    ## Changeset Manifest (Full — for reference)
+    <MANIFEST from Step 1.5b — all files, all chunks, risk tiers>
+
+    ## Deterministic Scan Results (this chunk's files only)
+    <scan findings scoped to files in this chunk>
+
+    ## Spec/Plan (if available)
+    <spec content, or "No spec provided">
+
+    You are reviewing ONLY the files in this chunk. However, use the
+    changeset manifest and cross-chunk interface summary to understand
+    how your chunk connects to the broader change. If you discover a
+    finding that depends on behavior in another chunk, flag it with:
+    "CROSS-CHUNK: depends on <other file>:<function>".
+
+    Return ALL findings as a JSON array per the global contract schema.
+    Do not self-censor low or medium issues. If no issues found, return [].
+```
+
+**Token budget per chunked explorer:** Target prompt under 80k tokens, leaving 120k for investigation and output.
+
+| Component | Budget |
+|-----------|--------|
+| Global contract + pass prompt | ~5-7k |
+| Chunk diff (max 2000 lines) | ~8-10k |
+| Chunk context (callers/callees) | ~10-15k |
+| Cross-chunk interface summary | ~2-5k |
+| Changeset manifest | ~3-5k |
+| Deterministic scan results (chunk) | ~1-3k |
+| Spec content | ~0-10k |
+| **Total** | **~29-55k** |
+
+**4-L.3. Cross-chunk synthesizer:**
+
+After ALL explorer waves complete, launch a single cross-chunk synthesis agent. This agent finds patterns that span multiple chunks — issues that no single chunk explorer could catch alone.
+
+```
+Tool: Task
+Parameters:
+  subagent_type: "general-purpose"
+  description: "Cross-chunk synthesis: detect cross-file patterns"
+  prompt: |
+    ## Cross-Chunk Synthesis
+
+    You are analyzing a large changeset that was reviewed in <CHUNK_COUNT>
+    chunks. Your job is to find patterns that span multiple chunks — issues
+    that no single chunk explorer could catch alone.
+
+    ## Changeset Manifest
+    <MANIFEST — all files, chunks, risk tiers>
+
+    ## Import/Call Graph Across Chunks
+    <from Step 2-L Phase A: which functions in chunk X call functions in chunk Y,
+     and whether both sides were modified>
+
+    ## CROSS-CHUNK Flags from Explorers
+    <every finding tagged with "CROSS-CHUNK:", with full evidence>
+
+    ## Explorer Finding Summaries by Chunk
+    <for each chunk: list of finding summaries from explorer output,
+     ~50 tokens per finding — summary + file + line only>
+
+    ## Cross-Chunk Interface Diffs
+    For each function that is called from one chunk and defined in another
+    (identified from the import/call graph), include the actual diff for
+    both the definition and the call site:
+    <extract via: git diff $BASE_REF..$HEAD_REF -- <interface_file>
+     for each file at a chunk boundary, include ~50-100 lines of
+     relevant diff around the function definition and call sites>
+
+    ## Investigation Focus
+    Use Grep, Read, and Glob to investigate these cross-chunk patterns:
+
+    1. **Interface mismatches** — function signature changed in one chunk,
+       callers in another chunk not updated. Check every entry in the
+       import/call graph where both sides are modified.
+    2. **Data flow breaks** — input validation in one chunk, consumption
+       in another. Trace data from entry points to storage/output.
+    3. **Consistency violations** — different error handling, logging, or
+       retry patterns for similar operations across chunks.
+    4. **Shared resource conflicts** — multiple chunks modifying access
+       patterns for the same database table, cache, or external service.
+    5. **Missing cross-chunk test coverage** — new integrations between
+       chunks that lack integration tests.
+
+    Return findings as a JSON array per the global contract schema.
+    Set pass to the most appropriate category.
+    If no cross-chunk issues found, return [].
+```
+
+**4-L.4. Final judge:**
+
+Launch the final judge. In large-diff mode, the final judge receives all raw explorer findings (from all chunks) plus cross-chunk synthesizer findings. It performs the same full adversarial validation as in standard mode.
+
+```
+Tool: Task
+Parameters:
+  subagent_type: "general-purpose"
+  description: "Review judge: synthesize findings (chunked review)"
+  prompt: |
+    <judge prompt from prompts/reviewer-judge.md>
+
+    ## Review Mode: Chunked
+    This review was conducted in <CHUNK_COUNT> chunks. You are receiving
+    raw explorer findings from all chunks. Perform FULL adversarial
+    validation — same rigor as standard mode. The explorers had limited
+    per-chunk context, so findings may need additional verification.
+    Use Grep, Read, and Glob to investigate.
+
+    Focus areas:
+    - Full adversarial validation (existence, contradiction, severity)
+    - Cross-chunk root cause grouping
+    - Cross-explorer synthesis using cross-chunk synthesizer findings
+    - Strengths assessment
+    - Spec compliance (if spec provided)
+    - Verdict
+
+    ## Explorer Findings (All Chunks)
+    <raw findings from all chunk explorers, grouped by chunk>
+
+    ## Cross-Chunk Synthesizer Findings
+    <findings from Step 4-L.3>
+
+    ## Changeset Manifest
+    <MANIFEST — not the full diff>
+
+    ## Deterministic Scan Results
+    <all deterministic findings>
+
+    ## Spec/Plan (if available)
+    <spec content>
+```
+
+The final judge returns the same output format as in standard mode: `verdict`, `verdict_reason`, `strengths`, `spec_gaps`, `spec_requirements`, `findings`.
+
+**Spec verification in large-diff mode:** The spec-verification pass runs as a **single global pass** (not chunked), because requirements span the entire changeset. It receives the changeset manifest + spec content and uses Grep/Read to trace requirements across all files. Launch it in Wave 1 alongside the Tier 1 chunk explorers.
+
+```
+Tool: Task
+Parameters:
+  subagent_type: "general-purpose"
+  model: <pass_models.spec-verification from config, default "sonnet">
+  description: "Review explorer: spec verification (global)"
+  prompt: |
+    <global contract content>
+    <spec-verification pass prompt>
+
+    ## Review Mode: Large Changeset (Global Spec Verification)
+    This is a large changeset with <FILE_COUNT> files across <CHUNK_COUNT>
+    review chunks. You are running as a global pass — not chunked — because
+    requirement traceability spans the entire changeset.
+
+    ## Changeset Manifest
+    <MANIFEST — all files with risk tiers and change stats>
+
+    ## Full Diff
+    The full diff is available at /tmp/codereview-diff.patch. Use Read
+    to examine specific file diffs when verifying behavioral correctness
+    of requirements. The manifest tells you which files to look at; the
+    diff shows you the actual code changes.
+
+    ## Spec/Plan
+    <SPEC_CONTENT>
+
+    ## Spec Scope (if provided)
+    <SPEC_SCOPE>
+
+    Use the manifest to identify which files are likely to implement each
+    requirement. Use Read on /tmp/codereview-diff.patch to examine the
+    actual diff for those files — verify behavioral correctness, not just
+    existence. Also use Grep and Read on the codebase to verify
+    implementation and test coverage. You have access to the full
+    codebase via tools.
+
+    Return the standard spec-verification output: { requirements: [...], findings: [...] }
+```
+
 ### Step 5: Merge, Deduplicate, and Classify
 
 Combine deterministic findings (Step 3) with the judge's validated findings (Step 4b), then apply signal controls and classify into action tiers.
@@ -475,6 +888,44 @@ Output the review with these sections (in order): verdict header, tool status ta
 - Source column: AI findings show as `AI:<pass>` (e.g., `AI:security`). Deterministic findings show the tool name.
 - Tool-status prose: separate `not_installed`, `sandbox_blocked`, and `failed` into distinct sentences — never merge into one mixed sentence.
 - For PR mode: ask user "Would you like me to post these as inline PR comments?" before posting via `gh api`.
+
+**Large-diff mode report additions:**
+
+When `REVIEW_MODE = "chunked"`, add a chunk summary table between the verdict header and the findings sections:
+
+```markdown
+### Review Mode: Chunked
+
+| Chunk | Files | Lines | Risk | Passes Run | Findings |
+|-------|-------|-------|------|-----------|----------|
+| 1: src/auth/* | 12 | 1,800 | Critical | 6/6 | 14 |
+| 2: src/api/orders/* | 10 | 1,500 | Standard | 4/4 | 7 |
+| ... | | | | | |
+| Cross-chunk synthesis | — | — | — | 1 | 3 |
+| **Total** | **87** | **8,247** | — | **38** | **31** |
+```
+
+In the JSON envelope, add these fields:
+```json
+{
+  "review_mode": "chunked",
+  "chunk_count": 8,
+  "chunks": [
+    {
+      "id": 1,
+      "description": "src/auth/*",
+      "files": ["src/auth/login.py", "..."],
+      "file_count": 12,
+      "diff_lines": 1800,
+      "risk_tier": "critical",
+      "passes_run": 6,
+      "findings": 14
+    }
+  ]
+}
+```
+
+For standard mode reviews, set `"review_mode": "standard"` and omit `chunk_count` and `chunks`.
 
 ### Step 7: Save Review Artifacts
 

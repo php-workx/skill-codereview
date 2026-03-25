@@ -156,14 +156,37 @@ gh api repos/{owner}/{repo}/pulls/{number}/reviews \
   --field comments="[{\"path\":\"...\",\"line\":...,\"body\":\"...\"}]"
 ```
 
+## Large-Diff Mode Report Additions
+
+When `review_mode = "chunked"`, add a chunk summary table between the verdict header and the findings sections:
+
+```markdown
+### Review Mode: Chunked
+
+| Chunk | Files | Lines | Risk | Passes Run | Findings |
+|-------|-------|-------|------|-----------|----------|
+| 1: src/auth/* | 12 | 1,800 | Critical | 6/6 | 14 |
+| 2: src/api/orders/* | 10 | 1,500 | Standard | 4/4 | 7 |
+| 3: src/api/users/* | 11 | 1,200 | Standard | 4/4 | 5 |
+| Cross-chunk synthesis | — | — | — | 1 | 3 |
+| **Total** | **87** | **8,247** | — | **38** | **29** |
+```
+
+The chunk summary shows how the review was distributed and how many findings survived validation at each stage. This helps users understand which areas of the codebase received the most attention and where the highest finding density is.
+
+For standard mode reviews, omit this section entirely.
+
 ## JSON Envelope Format (Step 7)
 
 Save to `.agents/reviews/YYYY-MM-DD-<target>.json`. Must conform to `findings-schema.json`.
+
+**Standard mode example:**
 
 ```json
 {
   "run_id": "2026-02-08T14-30-00-a1b2c3",
   "timestamp": "2026-02-08T14:30:00Z",
+  "review_mode": "standard",
   "scope": "branch",
   "base_ref": "main",
   "head_ref": "feature/auth-fix",
@@ -182,6 +205,37 @@ Save to `.agents/reviews/YYYY-MM-DD-<target>.json`. Must conform to `findings-sc
   },
   "findings": [ ],
   "tier_summary": { "must_fix": 1, "should_fix": 5, "consider": 4 }
+}
+```
+
+**Chunked mode example (additional fields):**
+
+```json
+{
+  "review_mode": "chunked",
+  "chunk_count": 8,
+  "chunks": [
+    {
+      "id": 1,
+      "description": "src/auth/*",
+      "files": ["src/auth/login.py", "src/auth/session.py", "src/auth/middleware.py"],
+      "file_count": 12,
+      "diff_lines": 1800,
+      "risk_tier": "critical",
+      "passes_run": 6,
+      "findings": 14
+    },
+    {
+      "id": 2,
+      "description": "src/api/orders/*",
+      "files": ["src/api/orders/views.py", "src/api/orders/serializers.py"],
+      "file_count": 10,
+      "diff_lines": 1500,
+      "risk_tier": "standard",
+      "passes_run": 4,
+      "findings": 7
+    }
+  ]
 }
 ```
 

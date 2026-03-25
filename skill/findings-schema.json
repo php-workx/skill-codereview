@@ -3,8 +3,61 @@
   "title": "Code Review Findings",
   "description": "Output schema for the codereview skill. Contains envelope metadata and an array of findings from deterministic and AI review passes.",
   "type": "object",
-  "required": ["run_id", "timestamp", "scope", "base_ref", "head_ref", "verdict", "verdict_reason", "strengths", "files_reviewed", "tool_status", "findings", "tier_summary", "spec_requirements"],
+  "required": ["run_id", "timestamp", "scope", "base_ref", "head_ref", "verdict", "verdict_reason", "strengths", "files_reviewed", "tool_status", "findings", "tier_summary", "spec_requirements", "review_mode"],
   "properties": {
+    "review_mode": {
+      "type": "string",
+      "enum": ["standard", "chunked"],
+      "description": "Whether the review used standard mode or chunked mode for large changesets"
+    },
+    "chunk_count": {
+      "type": ["integer", "null"],
+      "description": "Number of review chunks (null or omitted in standard mode)"
+    },
+    "chunks": {
+      "type": ["array", "null"],
+      "description": "Chunk metadata for chunked reviews (null or omitted in standard mode)",
+      "items": {
+        "type": "object",
+        "required": ["id", "description", "files", "file_count", "diff_lines", "risk_tier"],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Sequential chunk ID (1, 2, 3, ...)"
+          },
+          "description": {
+            "type": "string",
+            "description": "Directory path(s) covered by this chunk"
+          },
+          "files": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "File paths in this chunk"
+          },
+          "file_count": {
+            "type": "integer",
+            "description": "Number of files in this chunk"
+          },
+          "diff_lines": {
+            "type": "integer",
+            "description": "Total lines changed in this chunk"
+          },
+          "risk_tier": {
+            "type": "string",
+            "enum": ["critical", "standard", "low-risk"],
+            "description": "Highest risk tier of any file in this chunk"
+          },
+          "passes_run": {
+            "type": "integer",
+            "description": "Number of explorer passes that reviewed this chunk"
+          },
+          "findings": {
+            "type": "integer",
+            "description": "Number of findings from explorers for this chunk"
+          }
+        }
+      }
+    },
     "run_id": {
       "type": "string",
       "description": "Unique identifier for this review run (ISO timestamp + short hash)"
