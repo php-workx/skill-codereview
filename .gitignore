@@ -1,5 +1,6 @@
 # Research data (not part of distributable skill)
 data/
+.agents
 
 # macOS
 .DS_Store
@@ -19,17 +20,5 @@ download.log
 /firebase-debug.log
 /download_reviews.sh
 
-
-feat: enrich explorer sub-agents with calibration, add judge prompt, 3 new passes
-
-  - Extract judge prompt to reviewer-judge.md with adversarial validation
-    protocol (existence check, contradiction check, severity calibration),
-    root cause grouping, and cross-explorer synthesis
-  - Enrich all 4 existing explorer prompts from ~16 to ~120 lines each:
-    chain-of-thought investigation phases, 3 calibration examples per pass,
-    false positive suppression lists
-- Add 3 new extended explorer passes: error-handling, api-contract, concurrency — each with adaptive skip signals
-- Add pass_models config for per-pass model selection and force_all_passes option to override adaptive skipping
-- Update global contract with shared chain-of-thought protocol and confidence calibration table
-
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+# AgentOps session artifacts (auto-added)
+.agents/
