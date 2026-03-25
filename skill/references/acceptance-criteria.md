@@ -32,7 +32,7 @@ Validation criteria for the codereview skill. Not needed at runtime — use for 
 | Check | Requirement |
 |-------|-------------|
 | JSON structure | `findings.json` validates against `findings-schema.json` |
-| Envelope fields | `run_id`, `timestamp`, `scope`, `base_ref`, `head_ref`, `verdict`, `verdict_reason`, `strengths`, `files_reviewed`, `tool_status`, `findings`, `tier_summary` present |
+| Envelope fields | `run_id`, `timestamp`, `scope`, `base_ref`, `head_ref`, `verdict`, `verdict_reason`, `strengths`, `files_reviewed`, `tool_status`, `findings`, `tier_summary`, `spec_requirements`, `review_mode` present |
 | Finding fields | Every finding has `id`, `source`, `pass`, `severity`, `confidence`, `file`, `line`, `summary` |
 | Confidence gating | No AI findings with `confidence < 0.65` in final output |
 | Evidence gating | All `high`/`critical` findings have `failure_mode` populated |

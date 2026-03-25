@@ -157,14 +157,6 @@ Glob patterns for high-priority paths. Findings in these paths get slightly boos
 
 Free-text instructions included in the context packet for all review passes. Use this for repo-specific conventions that the AI should enforce.
 
-## Precedence
-
-If multiple configuration sources exist:
-
-1. CLI flags (highest priority)
-2. `.codereview.yaml` in repo root
-3. Built-in defaults (lowest priority)
-
 ### `large_diff`
 
 Settings for large changeset (chunked) review mode. The skill automatically activates chunked mode when the diff exceeds file or line count thresholds. All settings have sensible defaults.
@@ -214,6 +206,14 @@ Force chunked review mode even when the diff is below thresholds. Useful for tes
 ```bash
 /codereview --force-chunk
 ```
+
+## Precedence
+
+If multiple configuration sources exist:
+
+1. CLI flags (highest priority)
+2. `.codereview.yaml` in repo root
+3. Built-in defaults (lowest priority)
 
 ## No Config Required
 

@@ -1,6 +1,5 @@
 # Research data (not part of distributable skill)
 data/
-.agents
 
 # macOS
 .DS_Store
@@ -20,5 +19,5 @@ download.log
 /firebase-debug.log
 /download_reviews.sh
 
-# AgentOps session artifacts (auto-added)
+# AgentOps session artifacts
 .agents/

@@ -4,7 +4,7 @@
 #
 # Checks:
 #  1.  findings.json is valid JSON
-#  2.  Required envelope fields (run_id, timestamp, scope, base_ref, head_ref, verdict, verdict_reason, strengths, files_reviewed, tool_status, findings, tier_summary)
+#  2.  Required envelope fields (run_id, timestamp, scope, base_ref, head_ref, verdict, verdict_reason, strengths, files_reviewed, tool_status, findings, tier_summary, spec_requirements, review_mode)
 #  2b. Verdict value is PASS/WARN/FAIL
 #  2c. Strengths is an array (if present)
 #  2d. Spec gaps is an array (if present)
@@ -68,7 +68,7 @@ echo "PASS: Valid JSON"
 
 # 2. Required envelope fields
 ENVELOPE_ERRORS=0
-for field in run_id timestamp scope base_ref head_ref verdict verdict_reason strengths files_reviewed tool_status findings tier_summary; do
+for field in run_id timestamp scope base_ref head_ref verdict verdict_reason strengths files_reviewed tool_status findings tier_summary spec_requirements review_mode; do
   if [ "$(jq "has(\"$field\")" "$FINDINGS")" != "true" ]; then
     echo "FAIL: Missing required envelope field: $field"
     ENVELOPE_ERRORS=$((ENVELOPE_ERRORS + 1))
@@ -257,7 +257,16 @@ if [ "$(jq 'has("review_mode")' "$FINDINGS")" = "true" ]; then
       ERRORS=$((ERRORS + 1))
     else
       CHUNK_COUNT=$(jq '.chunks | length' "$FINDINGS")
+      DECLARED_CHUNK_COUNT=$(jq '.chunk_count' "$FINDINGS")
       echo "INFO: $CHUNK_COUNT chunks"
+
+      # Validate chunk_count matches actual array length
+      if [ "$DECLARED_CHUNK_COUNT" -ne "$CHUNK_COUNT" ]; then
+        echo "FAIL: chunk_count ($DECLARED_CHUNK_COUNT) does not match chunks array length ($CHUNK_COUNT)"
+        ERRORS=$((ERRORS + 1))
+      else
+        echo "PASS: chunk_count matches chunks array length"
+      fi
 
       # Validate required fields in each chunk
       BAD_CHUNKS=$(jq '[.chunks[] | select(.id == null or .description == null or .files == null or .file_count == null or .diff_lines == null or .risk_tier == null)] | length' "$FINDINGS")
@@ -279,11 +288,15 @@ if [ "$(jq 'has("review_mode")' "$FINDINGS")" = "true" ]; then
     fi
   fi
 else
-  echo "WARN: Missing review_mode field (should be 'standard' or 'chunked')"
+  echo "FAIL: Missing review_mode field (must be 'standard' or 'chunked')"
+  ERRORS=$((ERRORS + 1))
 fi
 
-# 12. spec_requirements validation (if present)
-if [ "$(jq 'has("spec_requirements")' "$FINDINGS")" = "true" ]; then
+# 12. spec_requirements validation
+if [ "$(jq 'has("spec_requirements")' "$FINDINGS")" != "true" ]; then
+  echo "FAIL: Missing required field: spec_requirements"
+  ERRORS=$((ERRORS + 1))
+elif [ "$(jq 'has("spec_requirements")' "$FINDINGS")" = "true" ]; then
   if [ "$(jq '.spec_requirements | type' "$FINDINGS")" != '"array"' ]; then
     echo "FAIL: spec_requirements must be an array"
     ERRORS=$((ERRORS + 1))

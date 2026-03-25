@@ -79,7 +79,7 @@ SEM_RC=0
 SONAR_RC=0
 
 if command -v semgrep &>/dev/null; then
-  HOME="$SEMGREP_HOME" semgrep scan --json --quiet $CHANGED_FILES > "/tmp/codereview/semgrep-${RUN_ID}.json" 2>"/tmp/codereview/semgrep-${RUN_ID}.err" &
+  HOME="$SEMGREP_HOME" semgrep scan --json --quiet "${FILES[@]}" > "/tmp/codereview/semgrep-${RUN_ID}.json" 2>"/tmp/codereview/semgrep-${RUN_ID}.err" &
   SEM_PID=$!
 fi
 
@@ -101,9 +101,12 @@ fi
 ## Individual Tool Scripts
 
 ```bash
+# NOTE: These snippets assume FILES array from "File Path Handling" section above.
+# Build it first: while IFS= read -r f; do [ -n "$f" ] && FILES+=("$f"); done <<< "$CHANGED_FILES"
+
 # semgrep — static analysis / custom rules (scoped to changed files)
 if command -v semgrep &>/dev/null; then
-  HOME="$SEMGREP_HOME" semgrep scan --json --quiet $CHANGED_FILES 2>/dev/null | head -500
+  HOME="$SEMGREP_HOME" semgrep scan --json --quiet "${FILES[@]}" 2>/dev/null | head -500
 else
   echo "semgrep not installed (pip install semgrep)"
 fi
@@ -125,11 +128,12 @@ else
 fi
 
 # shellcheck — shell script linter (scoped to .sh files in diff)
-SH_FILES=$(echo "$CHANGED_FILES" | grep -E '\.sh$' || true)
-if [ -n "$SH_FILES" ] && command -v shellcheck &>/dev/null; then
-  shellcheck --format=json $SH_FILES 2>/dev/null | head -500
+SH_FILES=()
+for f in "${FILES[@]}"; do [[ "$f" == *.sh ]] && SH_FILES+=("$f"); done
+if [ ${#SH_FILES[@]} -gt 0 ] && command -v shellcheck &>/dev/null; then
+  shellcheck --format=json "${SH_FILES[@]}" 2>/dev/null | head -500
 else
-  if [ -n "$SH_FILES" ]; then
+  if [ ${#SH_FILES[@]} -gt 0 ]; then
     echo "shellcheck not installed (brew install shellcheck)"
   fi
 fi
@@ -140,7 +144,7 @@ if [ -f .pre-commit-config.yaml ] && command -v pre-commit &>/dev/null; then
   GOCACHE="$GOCACHE" \
   GOMODCACHE="$GOMODCACHE" \
   GOPATH="$GOPATH" \
-  pre-commit run --files $CHANGED_FILES 2>&1 | head -200
+  pre-commit run --files "${FILES[@]}" 2>&1 | head -200
 fi
 
 # sonarqube — deep static analysis via the sonarqube skill's Python scanner
@@ -156,7 +160,7 @@ if [ -f "$SONAR_SCRIPT" ] && command -v python3 &>/dev/null; then
     --base-ref "${BASE_REF:-HEAD~1}" --list-only --output-dir .sonarqube 2>/dev/null
   # Read findings if scan succeeded
   if [ -f .sonarqube/findings.json ]; then
-    cat .sonarqube/findings.json | head -500
+    head -500 .sonarqube/findings.json
   fi
 else
   echo "sonarqube skill not installed (see skill-sonarqube README)"
