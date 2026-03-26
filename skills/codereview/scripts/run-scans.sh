@@ -155,6 +155,9 @@ get_version() {
     ruff)          ruff --version 2>/dev/null | head -1 ;;
     golangci-lint) golangci-lint --version 2>/dev/null | head -1 ;;
     eslint)        eslint --version 2>/dev/null | head -1 ;;
+    rubocop)       rubocop --version 2>/dev/null | head -1 ;;
+    brakeman)      brakeman --version 2>/dev/null | head -1 ;;
+    pmd)           pmd --version 2>/dev/null | head -1 ;;
     pre-commit)    pre-commit --version 2>/dev/null | head -1 ;;
     sonarqube)     echo "skill-based" ;;
     *)             echo "unknown" ;;
@@ -458,6 +461,99 @@ normalize_eslint() {
         pass: "maintainability",
         source: "deterministic",
         tool: "eslint"
+      }
+    ]
+  ' 2>/dev/null || echo '[]'
+}
+
+normalize_rubocop() {
+  # RuboCop JSON: {files: [{path, offenses: [{cop_name, severity, message, location: {start_line}}]}]}
+  jq '
+    [(.files // [])[] |
+      .path as $fp |
+      (.offenses // [])[] |
+      {
+        file: $fp,
+        line: (.location.start_line // 0),
+        summary: (.message // "rubocop issue"),
+        severity: (
+          if .severity == "fatal" or .severity == "error" then "high"
+          elif .severity == "warning" then "medium"
+          else "low"
+          end
+        ),
+        confidence: 1.0,
+        evidence: (.cop_name // ""),
+        pass: (
+          if (.cop_name // "" | test("Security")) then "security"
+          elif (.cop_name // "" | test("^Lint")) then "correctness"
+          elif (.cop_name // "" | test("Performance")) then "performance"
+          else "maintainability"
+          end
+        ),
+        source: "deterministic",
+        tool: "rubocop"
+      }
+    ]
+  ' 2>/dev/null || echo '[]'
+}
+
+normalize_brakeman() {
+  # Brakeman JSON: {warnings: [{warning_type, confidence, file, line, message, code}]}
+  jq '
+    [(.warnings // [])[] |
+      {
+        file: (.file // "unknown"),
+        line: (.line // 0),
+        summary: ((.warning_type // "") + ": " + (.message // "brakeman issue")),
+        severity: (
+          if .confidence == "High" then "high"
+          elif .confidence == "Medium" then "medium"
+          else "low"
+          end
+        ),
+        confidence: (
+          if .confidence == "High" then 0.95
+          elif .confidence == "Medium" then 0.80
+          else 0.65
+          end
+        ),
+        evidence: (.code // ""),
+        pass: "security",
+        source: "deterministic",
+        tool: "brakeman"
+      }
+    ]
+  ' 2>/dev/null || echo '[]'
+}
+
+normalize_pmd() {
+  # PMD JSON: {files: [{filename, violations: [{beginline, rule, ruleset, priority, description}]}]}
+  jq '
+    [(.files // [])[] |
+      .filename as $fp |
+      (.violations // [])[] |
+      {
+        file: $fp,
+        line: (.beginline // 0),
+        summary: (.description // "PMD violation"),
+        severity: (
+          if .priority <= 2 then "high"
+          elif .priority <= 3 then "medium"
+          else "low"
+          end
+        ),
+        confidence: 1.0,
+        evidence: ((.rule // "") + " [" + (.ruleset // "") + "]"),
+        pass: (
+          if (.ruleset // "" | test("[Ss]ecurity")) then "security"
+          elif (.ruleset // "" | test("Error Prone|Design")) then "correctness"
+          elif (.ruleset // "" | test("Performance")) then "performance"
+          else "maintainability"
+          end
+        ),
+        source: "deterministic",
+        tool: "pmd"
       }
     ]
   ' 2>/dev/null || echo '[]'
@@ -891,6 +987,55 @@ else
   record_status "eslint" "skipped" "null" 0 "no JS/TS files in diff"
 fi
 
+# --- rubocop (Ruby) ---
+if $HAS_RUBY; then
+  if command -v rubocop >/dev/null 2>&1; then
+    RUBY_FILES=()
+    for f in "${FILES[@]}"; do
+      case "$f" in *.rb|*.rake|*.gemspec) RUBY_FILES+=("$f") ;; esac
+    done
+    if [ ${#RUBY_FILES[@]} -gt 0 ]; then
+      (run_tool rubocop 120 rubocop --format=json "${RUBY_FILES[@]}") &
+      TIER2_PIDS="$TIER2_PIDS $!"
+    else
+      record_status "rubocop" "skipped" "null" 0 "no Ruby files after filtering"
+    fi
+  else
+    log "rubocop: not installed (Ruby files detected)"
+    record_status "rubocop" "not_installed" "null" 0 "gem install rubocop"
+  fi
+  # brakeman (Rails security — only if Gemfile contains gem 'rails')
+  if command -v brakeman >/dev/null 2>&1 && [ -f "Gemfile" ] && grep -qE "gem ['\"]rails['\"]" Gemfile 2>/dev/null; then
+    (run_tool brakeman 180 brakeman --format json --no-pager --quiet) &
+    TIER2_PIDS="$TIER2_PIDS $!"
+  else
+    record_status "brakeman" "skipped" "null" 0 "no Rails project or brakeman not installed"
+  fi
+else
+  record_status "rubocop" "skipped" "null" 0 "no .rb files in diff"
+  record_status "brakeman" "skipped" "null" 0 "no .rb files in diff"
+fi
+
+# --- pmd (Java/Kotlin/Scala) ---
+if $HAS_JAVA; then
+  if command -v pmd >/dev/null 2>&1; then
+    (
+      # PMD 7+ uses 'pmd check'; PMD 6.x uses 'pmd' directly
+      if pmd check --help >/dev/null 2>&1; then
+        run_tool pmd 120 pmd check -d . -f json -R rulesets/java/quickstart.xml --no-progress
+      else
+        run_tool pmd 120 pmd -d . -f json -R rulesets/java/quickstart.xml
+      fi
+    ) &
+    TIER2_PIDS="$TIER2_PIDS $!"
+  else
+    log "pmd: not installed (Java files detected)"
+    record_status "pmd" "not_installed" "null" 0 "https://pmd.github.io/"
+  fi
+else
+  record_status "pmd" "skipped" "null" 0 "no .java/.kt/.scala files in diff"
+fi
+
 # Wait for all Tier 2 tools
 for pid in $TIER2_PIDS; do
   wait "$pid" 2>/dev/null || true
@@ -898,7 +1043,7 @@ done
 log "=== Tier 2 complete ==="
 
 # Record status and normalize Tier 2 results
-for tool_key in clippy ruff golangci_lint eslint; do
+for tool_key in clippy ruff golangci_lint eslint rubocop brakeman pmd; do
   if [ -f "$SCRATCH/${tool_key}.status" ]; then
     status="$(cat "$SCRATCH/${tool_key}.status")"
     case "$tool_key" in
@@ -945,6 +1090,34 @@ for tool_key in clippy ruff golangci_lint eslint; do
           fi
         fi
         ;;
+      rubocop)
+        if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
+          if [ -s "$SCRATCH/rubocop.out" ]; then
+            normalize_rubocop < "$SCRATCH/rubocop.out" > "$SCRATCH/findings/rubocop.json"
+          else
+            echo '[]' > "$SCRATCH/findings/rubocop.json"
+          fi
+        fi
+        ;;
+      brakeman)
+        if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
+          if [ -s "$SCRATCH/brakeman.out" ]; then
+            normalize_brakeman < "$SCRATCH/brakeman.out" > "$SCRATCH/findings/brakeman.json"
+          else
+            echo '[]' > "$SCRATCH/findings/brakeman.json"
+          fi
+        fi
+        ;;
+      pmd)
+        if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
+          if [ -s "$SCRATCH/pmd.out" ]; then
+            normalize_pmd < "$SCRATCH/pmd.out" > "$SCRATCH/findings/pmd.json"
+            filter_to_changed_files "$SCRATCH/findings/pmd.json"
+          else
+            echo '[]' > "$SCRATCH/findings/pmd.json"
+          fi
+        fi
+        ;;
     esac
 
     # Count and adjust status for tools that exit non-zero on findings
@@ -957,7 +1130,7 @@ for tool_key in clippy ruff golangci_lint eslint; do
     fi
     if [ "$status" = "failed" ]; then
       case "$tool_key" in
-        ruff|eslint|golangci_lint|clippy)
+        ruff|eslint|golangci_lint|clippy|rubocop|brakeman|pmd)
           if [ "$local_count" -gt 0 ] 2>/dev/null; then
             status="ran"
           fi
