@@ -567,12 +567,15 @@ def collect_build_files(root_abs: str, root_rel: str) -> list:
 # ---------------------------------------------------------------------------
 
 def main():
-    # Read changed files from stdin
+    # Read changed files from stdin (fail-open on binary/encoding errors)
     changed_files = []
-    for line in sys.stdin:
-        line = line.strip()
-        if line:
-            changed_files.append(line)
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if line:
+                changed_files.append(line)
+    except UnicodeDecodeError:
+        print("WARNING: binary data on stdin, skipping remaining input", file=sys.stderr)
 
     if not changed_files:
         # No input — output an empty profile

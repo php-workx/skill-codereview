@@ -1,0 +1,20 @@
+{
+  "run_id": "test-non-array-findings",
+  "timestamp": "2026-03-26T08:00:00Z",
+  "review_mode": "standard",
+  "scope": "branch",
+  "base_ref": "main",
+  "head_ref": "feat/test",
+  "pr_number": null,
+  "files_reviewed": ["src/auth/login.py"],
+  "verdict": "PASS",
+  "verdict_reason": "No issues found",
+  "strengths": ["Clean code"],
+  "spec_gaps": [],
+  "spec_requirements": [],
+  "tool_status": {
+    "semgrep": { "status": "ran", "version": "1.56.0", "finding_count": 0, "note": null }
+  },
+  "findings": {},
+  "tier_summary": { "must_fix": 0, "should_fix": 0, "consider": 0 }
+}

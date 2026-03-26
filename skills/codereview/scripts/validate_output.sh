@@ -11,12 +11,12 @@
 #  3.  Each finding has required fields (id, source, pass, severity, confidence, file, line, summary)
 #  3b. Optional sources field (if present) is an array
 #  4.  Confidence gating: no AI findings below 0.65
-#  5.  Evidence gating: high/critical findings have failure_mode populated
+#  5.  Evidence gating: high/critical AI findings have failure_mode populated
 #  6.  Valid severity values
 #  7.  Valid source values
 #  7b. Valid pass values
 #  8.  Tool status present and non-empty
-#  8b. Tool status values valid (ran/skipped/failed/not_installed/sandbox_blocked)
+#  8b. Tool status values valid (ran/skipped/failed/not_installed/sandbox_blocked/timeout/partial)
 #  9.  Action tier classification on every finding
 #  9b. Valid action_tier values
 #  10. Tier summary consistency
@@ -110,8 +110,14 @@ if [ "$(jq 'has("spec_gaps")' "$FINDINGS")" = "true" ]; then
   fi
 fi
 
-# 3. Required finding fields
-FINDING_COUNT=$(jq '.findings | length' "$FINDINGS")
+# 3. findings must be an array
+if [ "$(jq '.findings | type' "$FINDINGS")" != '"array"' ]; then
+  echo "FAIL: findings must be an array"
+  ERRORS=$((ERRORS + 1))
+  FINDING_COUNT=0
+else
+  FINDING_COUNT=$(jq '.findings | length' "$FINDINGS")
+fi
 echo "INFO: $FINDING_COUNT findings"
 
 REQUIRED_FIELDS='["id","source","pass","severity","confidence","file","line","summary"]'
@@ -149,8 +155,8 @@ else
   echo "PASS: Confidence gating OK"
 fi
 
-# 5. Evidence gating — high/critical must have failure_mode
-MISSING_EVIDENCE=$(jq '[.findings[] | select((.severity == "high" or .severity == "critical") and (.failure_mode == null or .failure_mode == ""))] | length' "$FINDINGS")
+# 5. Evidence gating — high/critical AI findings must have failure_mode
+MISSING_EVIDENCE=$(jq '[.findings[] | select(.source == "ai" and (.severity == "high" or .severity == "critical") and (.failure_mode == null or .failure_mode == ""))] | length' "$FINDINGS")
 if [ "$MISSING_EVIDENCE" -gt 0 ]; then
   echo "FAIL: $MISSING_EVIDENCE high/critical findings missing failure_mode"
   ERRORS=$((ERRORS + 1))
@@ -195,7 +201,7 @@ else
 fi
 
 # 8b. Tool status values valid
-BAD_TOOL_STATUS=$(jq '[.tool_status[]? | select((.status // "") | IN("ran","skipped","failed","not_installed","sandbox_blocked") | not)] | length' "$FINDINGS")
+BAD_TOOL_STATUS=$(jq '[.tool_status[]? | select((.status // "") | IN("ran","skipped","failed","not_installed","sandbox_blocked","timeout","partial") | not)] | length' "$FINDINGS")
 if [ "$BAD_TOOL_STATUS" -gt 0 ]; then
   echo "FAIL: $BAD_TOOL_STATUS tool_status entries with invalid status value"
   ERRORS=$((ERRORS + 1))
