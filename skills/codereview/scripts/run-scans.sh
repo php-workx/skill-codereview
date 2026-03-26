@@ -116,7 +116,7 @@ log() {
 check_normalized() {
   local fpath="$1"
   local tool="$2"
-  if [ ! -s "$fpath" ] || ! jq 'type == "array"' "$fpath" >/dev/null 2>&1; then
+  if [ ! -s "$fpath" ] || ! jq -e 'type == "array"' "$fpath" >/dev/null 2>&1; then
     log "WARNING: normalization of $tool output produced invalid JSON — replacing with []"
     echo '[]' > "$fpath"
   fi
@@ -734,19 +734,18 @@ fi
 # Also skip DB update — use cached DB (stale data is acceptable for code review;
 # full DB refresh is a separate security audit concern).
 if command -v trivy >/dev/null 2>&1; then
-  TRIVY_TARGETS=""
+  TRIVY_TARGETS=()
   MANIFEST_PATTERNS="package.json|package-lock.json|yarn.lock|pnpm-lock.yaml|go.mod|go.sum|Cargo.toml|Cargo.lock|pyproject.toml|poetry.lock|requirements.txt|Pipfile.lock|Gemfile.lock|composer.lock"
   for tf in "${FILES[@]}"; do
     if echo "$tf" | grep -qE "(${MANIFEST_PATTERNS})$"; then
-      TRIVY_TARGETS="$TRIVY_TARGETS $tf"
+      TRIVY_TARGETS+=("$tf")
     fi
   done
-  if [ -n "$TRIVY_TARGETS" ]; then
+  if [ ${#TRIVY_TARGETS[@]} -gt 0 ]; then
     (
       # Pass manifest files directly to trivy — scanning individual files is ~100ms
       # vs 18s+ for directories. Trivy auto-discovers related lockfiles.
-      # shellcheck disable=SC2086
-      run_tool trivy 60 trivy fs $TRIVY_TARGETS --cache-dir "$TRIVY_CACHE_DIR" --skip-db-update --format json --quiet
+      run_tool trivy 60 trivy fs "${TRIVY_TARGETS[@]}" --cache-dir "$TRIVY_CACHE_DIR" --skip-db-update --format json --quiet
     ) &
     TIER1_PIDS="$TIER1_PIDS $!"
   else
@@ -1213,11 +1212,22 @@ if [ -n "$PROJECT_PROFILE" ] && [ -f "$PROJECT_PROFILE" ]; then
       PROJ_CMD_INDEX=$((PROJ_CMD_INDEX + 1))
       proj_key="project_cmd_${PROJ_CMD_INDEX}"
       log "project command ${PROJ_CMD_INDEX}: ${cmd}"
-      (
-        # Run each project command with a 120s timeout
-        # Use bash -c for isolation — cmd comes from agent-interpreted profile
-        run_tool "$proj_key" 120 bash -c "$cmd"
-      ) &
+      # Validate command against allowlist before execution
+      proj_tool=$(echo "$cmd" | awk '{print $1}')
+      case "$proj_tool" in
+        npm|npx|yarn|pnpm|bundle|rake|make|just|task|gradle|mvn|cargo|go|ruff|eslint|rubocop|pmd|checkstyle|prettier|black|isort|mypy|pylint|flake8)
+          (
+            # Run allowed project command with a 120s timeout
+            # shellcheck disable=SC2086
+            run_tool "$proj_key" 120 $cmd
+          ) &
+          ;;
+        *)
+          log "project command ${PROJ_CMD_INDEX}: BLOCKED (tool '$proj_tool' not in allowlist)"
+          record_status "$proj_key" "sandbox_blocked" "null" 0 "tool '$proj_tool' not in allowlist"
+          continue
+          ;;
+      esac
       TIER3_PIDS="$TIER3_PIDS $!"
     done <<PROJEOF
 $PROJ_CMDS_JSON
@@ -1442,7 +1452,8 @@ jq -n --slurpfile findings "$DEDUPED" --slurpfile status "$TOOL_STATUS" \
     tool_status: $status[0],
     _timing: {
       total_ms: $total_ms,
-      tools: $timing[0]
+      steps: ($timing[0] | to_entries | map({name: .key, duration_ms: (.value.ms // .value // 0)})),
+      marks: []
     }
   }'
 

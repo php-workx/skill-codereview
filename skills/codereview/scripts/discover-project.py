@@ -692,6 +692,12 @@ def main():
     contexts = {}
     for filepath in changed_files:
         root_rel, marker = find_project_root(filepath, repo_root)
+        # Skip paths that find_project_root flagged as outside repo
+        # (returns "." with None marker when path escapes repo root)
+        if root_rel == "." and marker is None and (
+            os.path.isabs(filepath) or filepath.startswith("..")
+        ):
+            continue
         if root_rel not in contexts:
             contexts[root_rel] = {"root": root_rel, "marker": marker, "files": []}
         else:

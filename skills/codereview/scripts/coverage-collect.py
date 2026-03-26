@@ -110,7 +110,7 @@ TEST_COMMANDS = {
     },
     "rust": {
         "cargo-tarpaulin": ["cargo", "tarpaulin", "--out", "json", "--output-dir", "{COVER_DIR}/"],
-        "cargo-llvm-cov": ["cargo", "llvm-cov", "--json", "--output-path", "{COVER_DIR}/lcov.json"],
+        "cargo-llvm-cov": ["cargo", "llvm-cov", "--lcov", "--output-path", "{COVER_DIR}/lcov.info"],
     },
     "typescript": {
         "c8": ["npx", "c8", "--reporter=json", "--reports-dir={COVER_DIR}/", "npm", "test"],
@@ -810,7 +810,11 @@ def _collect_coverage_impl(language, changed_files, run_tests_flag, timeout, lan
     tool_name, tool_version, tool_key = detect_tool(language)
     status = "ran" if entries else "skipped"
     if artifact_from_tests:
-        status = "ran"
+        # Preserve partial/timeout distinction from test run
+        if partial:
+            status = "partial"
+        else:
+            status = "ran"
 
     return entries, {tool_key: {
         "status": status,

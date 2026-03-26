@@ -266,6 +266,15 @@ else
     while IFS= read -r line; do
       [ -z "$line" ] && continue
       FILE=$(echo "$line" | jq -r '.file // "unknown"')
+      # Filter to changed Java files only (PMD scans repo-wide)
+      FILE_IN_CHANGESET=false
+      for jf in "${JAVA_FILES[@]}"; do
+        if [ "$FILE" = "$jf" ] || echo "$FILE" | grep -qF "$jf"; then
+          FILE_IN_CHANGESET=true
+          break
+        fi
+      done
+      if ! $FILE_IN_CHANGESET; then continue; fi
       FUNC=$(echo "$line" | jq -r '.desc // "unknown"')
       SCORE=$(echo "$line" | jq -r '.score // 0')
       if [ "$SCORE" -ge 11 ] 2>/dev/null; then

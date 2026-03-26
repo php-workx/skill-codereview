@@ -279,7 +279,7 @@ assert_json_field "tool_status has entries" "$SCANS_REAL" "len(d['tool_status'])
 
 # 5d. Each tool status value is from allowed enum
 assert_json_field "tool_status values are valid enum" "$SCANS_REAL" \
-  "all(v['status'] in ('ran','skipped','failed','timeout','not_installed','sandbox_blocked') for v in d['tool_status'].values())"
+  "all(v['status'] in ('ran','skipped','failed','timeout','partial','not_installed','sandbox_blocked') for v in d['tool_status'].values())"
 
 # 5e. Findings (if any) have required fields
 assert_json_field "all findings have file field" "$SCANS_REAL" \
