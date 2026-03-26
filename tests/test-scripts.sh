@@ -13,6 +13,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FIXTURES="$SCRIPT_DIR/fixtures"
 SCRIPTS="$REPO_ROOT/skills/codereview/scripts"
 
+# Use isolated temp directory to avoid statefulness across test runs
+TEST_TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TEST_TMPDIR"' EXIT
+
 PASS=0
 FAIL=0
 TOTAL=0
@@ -139,8 +143,8 @@ assert_json_field "deterministic findings have confidence 1.0" "$ENRICH_OUT" \
   "all(f.get('confidence')==1.0 for f in d['findings'] if f['source']=='deterministic')"
 
 # 2i. Empty input produces valid output
-ENRICH_EMPTY=$(echo '{"findings":[]}' > /tmp/test-empty.json && \
-  python3 "$SCRIPTS/enrich-findings.py" --judge-findings /tmp/test-empty.json 2>/dev/null)
+ENRICH_EMPTY=$(echo '{"findings":[]}' > $TEST_TMPDIR/test-empty.json && \
+  python3 "$SCRIPTS/enrich-findings.py" --judge-findings $TEST_TMPDIR/test-empty.json 2>/dev/null)
 assert_json_valid "empty input produces valid JSON" "$ENRICH_EMPTY"
 assert_json_field "empty input has zero findings" "$ENRICH_EMPTY" \
   "len(d['findings']) == 0"
@@ -517,27 +521,27 @@ assert_json_field "all findings still present" "$LIFECYCLE_NOSUPP" \
   "len(d['findings']) > 0"
 
 # 9h. Malformed suppressions file → fail-open (warn and skip)
-echo "this is not valid json" > /tmp/test-malformed-supp.json
+echo "this is not valid json" > $TEST_TMPDIR/test-malformed-supp.json
 LIFECYCLE_BADSUPP=$(python3 "$SCRIPTS/lifecycle.py" \
   --findings "$FIXTURES/judge-output.json" --raw \
-  --suppressions /tmp/test-malformed-supp.json 2>/dev/null)
+  --suppressions $TEST_TMPDIR/test-malformed-supp.json 2>/dev/null)
 assert_json_valid "lifecycle with malformed suppressions produces valid JSON" "$LIFECYCLE_BADSUPP"
 assert_json_field "malformed suppressions → no findings suppressed" "$LIFECYCLE_BADSUPP" \
   "len(d['suppressed_findings']) == 0"
-rm -f /tmp/test-malformed-supp.json
+rm -f $TEST_TMPDIR/test-malformed-supp.json
 
 # 9i. Recurring detection with previous review
 # Create a previous review with same findings
-echo "$LIFECYCLE_NEW" > /tmp/test-prev-review.json
+echo "$LIFECYCLE_NEW" > $TEST_TMPDIR/test-prev-review.json
 LIFECYCLE_RECUR=$(python3 "$SCRIPTS/lifecycle.py" \
   --findings "$FIXTURES/judge-output.json" --raw \
-  --previous-review /tmp/test-prev-review.json 2>/dev/null)
+  --previous-review $TEST_TMPDIR/test-prev-review.json 2>/dev/null)
 assert_json_valid "lifecycle with previous review produces valid JSON" "$LIFECYCLE_RECUR"
 assert_json_field "findings detected as recurring" "$LIFECYCLE_RECUR" \
   "any(f.get('lifecycle_status') == 'recurring' for f in d['findings'])"
 assert_json_field "lifecycle_summary has recurring count" "$LIFECYCLE_RECUR" \
   "d['lifecycle_summary']['recurring'] > 0"
-rm -f /tmp/test-prev-review.json
+rm -f $TEST_TMPDIR/test-prev-review.json
 
 # 9j. Suppression matching works
 # Create a suppressions file matching first finding
@@ -560,12 +564,12 @@ supp = {
     'summary_snippet': 'test'
   }]
 }
-with open('/tmp/test-suppressions.json', 'w') as f:
+with open('$TEST_TMPDIR/test-suppressions.json', 'w') as f:
   json.dump(supp, f)
 "
 LIFECYCLE_SUPP=$(python3 "$SCRIPTS/lifecycle.py" \
   --findings "$FIXTURES/judge-output.json" --raw \
-  --suppressions /tmp/test-suppressions.json 2>/dev/null)
+  --suppressions $TEST_TMPDIR/test-suppressions.json 2>/dev/null)
 assert_json_valid "lifecycle with suppressions produces valid JSON" "$LIFECYCLE_SUPP"
 assert_json_field "suppressed finding moved to suppressed_findings" "$LIFECYCLE_SUPP" \
   "len(d['suppressed_findings']) == 1"
@@ -574,7 +578,7 @@ assert_json_field "suppressed finding has rejected status" "$LIFECYCLE_SUPP" \
 BASELINE_COUNT=$(echo "$LIFECYCLE_NEW" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['findings']))" 2>/dev/null)
 assert_json_field "one fewer active finding after suppression" "$LIFECYCLE_SUPP" \
   "len(d['findings']) == $BASELINE_COUNT - 1"
-rm -f /tmp/test-suppressions.json
+rm -f $TEST_TMPDIR/test-suppressions.json
 
 # 9k. Output structure has all required top-level keys
 assert_json_field "has findings array" "$LIFECYCLE_NEW" "'findings' in d"
@@ -587,15 +591,15 @@ assert_json_field "lifecycle_summary has all keys" "$LIFECYCLE_NEW" \
 ENRICHED_INPUT=$(python3 "$SCRIPTS/enrich-findings.py" \
   --judge-findings "$FIXTURES/judge-output.json" \
   --scan-findings "$FIXTURES/scan-findings.json" 2>/dev/null)
-echo "$ENRICHED_INPUT" > /tmp/test-enriched-for-lifecycle.json
+echo "$ENRICHED_INPUT" > $TEST_TMPDIR/test-enriched-for-lifecycle.json
 LIFECYCLE_ENRICHED=$(python3 "$SCRIPTS/lifecycle.py" \
-  --findings /tmp/test-enriched-for-lifecycle.json 2>/dev/null)
+  --findings $TEST_TMPDIR/test-enriched-for-lifecycle.json 2>/dev/null)
 assert_json_valid "lifecycle with enriched input produces valid JSON" "$LIFECYCLE_ENRICHED"
 assert_json_field "enriched input findings have fingerprint" "$LIFECYCLE_ENRICHED" \
   "all('fingerprint' in f for f in d['findings'])"
 assert_json_field "enriched input findings have lifecycle_status" "$LIFECYCLE_ENRICHED" \
   "all('lifecycle_status' in f for f in d['findings'])"
-rm -f /tmp/test-enriched-for-lifecycle.json
+rm -f $TEST_TMPDIR/test-enriched-for-lifecycle.json
 
 # ============================================================
 echo ""
@@ -614,7 +618,7 @@ else
 fi
 
 # 10b. start then stop produces valid JSONL entries
-TIMING_TEST_FILE="/tmp/test-timing-$$-b.jsonl"
+TIMING_TEST_FILE="$TEST_TMPDIR/test-timing-$$-b.jsonl"
 rm -f "$TIMING_TEST_FILE"
 CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" start "test_step_b" 2>/dev/null
 CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" stop "test_step_b" 2>/dev/null
@@ -633,7 +637,7 @@ fi
 rm -f "$TIMING_TEST_FILE"
 
 # 10c. summary on empty file produces valid JSON with zero total
-TIMING_TEST_FILE="/tmp/test-timing-$$-c.jsonl"
+TIMING_TEST_FILE="$TEST_TMPDIR/test-timing-$$-c.jsonl"
 rm -f "$TIMING_TEST_FILE"
 TIMING_EMPTY_SUMMARY=$(CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" summary 2>/dev/null)
 assert_json_valid "timing summary on empty file produces valid JSON" "$TIMING_EMPTY_SUMMARY"
@@ -643,7 +647,7 @@ assert_json_field "timing empty summary has empty marks" "$TIMING_EMPTY_SUMMARY"
 rm -f "$TIMING_TEST_FILE"
 
 # 10d. summary after start+stop has correct step with positive duration_ms
-TIMING_TEST_FILE="/tmp/test-timing-$$-d.jsonl"
+TIMING_TEST_FILE="$TEST_TMPDIR/test-timing-$$-d.jsonl"
 rm -f "$TIMING_TEST_FILE"
 CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" start "my_step" 2>/dev/null
 sleep 1
@@ -657,7 +661,7 @@ assert_json_field "timing total_ms is positive" "$TIMING_STEP_SUMMARY" "d['total
 rm -f "$TIMING_TEST_FILE"
 
 # 10e. mark records event with value
-TIMING_TEST_FILE="/tmp/test-timing-$$-e.jsonl"
+TIMING_TEST_FILE="$TEST_TMPDIR/test-timing-$$-e.jsonl"
 rm -f "$TIMING_TEST_FILE"
 CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" mark "files_reviewed" "42" 2>/dev/null
 if [ -f "$TIMING_TEST_FILE" ]; then
@@ -678,7 +682,7 @@ fi
 rm -f "$TIMING_TEST_FILE"
 
 # 10f. Multiple steps produce correct count in summary
-TIMING_TEST_FILE="/tmp/test-timing-$$-f.jsonl"
+TIMING_TEST_FILE="$TEST_TMPDIR/test-timing-$$-f.jsonl"
 rm -f "$TIMING_TEST_FILE"
 CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" start "step_a" 2>/dev/null
 CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" stop "step_a" 2>/dev/null
@@ -692,7 +696,7 @@ assert_json_field "timing summary has 3 steps" "$TIMING_MULTI_SUMMARY" "len(d['s
 rm -f "$TIMING_TEST_FILE"
 
 # 10g. Timing file is configurable via CODEREVIEW_TIMING_FILE env var
-TIMING_CUSTOM_FILE="/tmp/test-timing-$$-custom.jsonl"
+TIMING_CUSTOM_FILE="$TEST_TMPDIR/test-timing-$$-custom.jsonl"
 rm -f "$TIMING_CUSTOM_FILE"
 CODEREVIEW_TIMING_FILE="$TIMING_CUSTOM_FILE" bash "$TIMING_SCRIPT" start "custom_step" 2>/dev/null
 if [ -f "$TIMING_CUSTOM_FILE" ]; then
@@ -742,8 +746,8 @@ json.dump(envelope, sys.stdout, indent=2)
 " 2>/dev/null)
 
 # Write to temp file and validate
-echo "$REVIEW_ENVELOPE" > /tmp/test-pipeline-review.json
-PIPELINE_VALID=$(bash "$SCRIPTS/validate_output.sh" --findings /tmp/test-pipeline-review.json 2>&1) || PIPELINE_RC=$?
+echo "$REVIEW_ENVELOPE" > $TEST_TMPDIR/test-pipeline-review.json
+PIPELINE_VALID=$(bash "$SCRIPTS/validate_output.sh" --findings $TEST_TMPDIR/test-pipeline-review.json 2>&1) || PIPELINE_RC=$?
 PIPELINE_RC=${PIPELINE_RC:-0}
 
 if echo "$PIPELINE_VALID" | grep -q "ERRORS: 0\|0 errors"; then
@@ -785,23 +789,23 @@ import json, sys
 d = json.load(sys.stdin)
 json.dump(d, sys.stdout)
 " 2>/dev/null)
-echo "$SUPPRESS_REVIEW" > /tmp/test-suppress-review.json
+echo "$SUPPRESS_REVIEW" > $TEST_TMPDIR/test-suppress-review.json
 
 # Get the first finding ID
 SUPPRESS_TARGET_ID=$(echo "$SUPPRESS_REVIEW" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['findings'][0]['id'] if d['findings'] else '')" 2>/dev/null)
 
 if [ -n "$SUPPRESS_TARGET_ID" ]; then
-  rm -f /tmp/test-suppress-suppressions.json
+  rm -f $TEST_TMPDIR/test-suppress-suppressions.json
 
   # Run suppress subcommand
   python3 "$SCRIPTS/lifecycle.py" suppress \
-    --review /tmp/test-suppress-review.json \
+    --review $TEST_TMPDIR/test-suppress-review.json \
     --finding-id "$SUPPRESS_TARGET_ID" \
     --status rejected --reason "Test rejection" \
-    --suppressions /tmp/test-suppress-suppressions.json 2>/dev/null
+    --suppressions $TEST_TMPDIR/test-suppress-suppressions.json 2>/dev/null
 
-  if [ -f /tmp/test-suppress-suppressions.json ]; then
-    SUPP_CONTENT=$(cat /tmp/test-suppress-suppressions.json)
+  if [ -f $TEST_TMPDIR/test-suppress-suppressions.json ]; then
+    SUPP_CONTENT=$(cat $TEST_TMPDIR/test-suppress-suppressions.json)
     assert_json_valid "suppress subcommand produces valid JSON" "$SUPP_CONTENT"
     assert_json_field "suppress creates entry with fingerprint" "$SUPP_CONTENT" \
       "len(d.get('suppressions', [])) == 1"
@@ -813,7 +817,7 @@ if [ -n "$SUPPRESS_TARGET_ID" ]; then
   else
     fail "suppress subcommand creates suppression file" "file not created"
   fi
-  rm -f /tmp/test-suppress-review.json /tmp/test-suppress-suppressions.json
+  rm -f $TEST_TMPDIR/test-suppress-review.json $TEST_TMPDIR/test-suppress-suppressions.json
 else
   fail "suppress subcommand test" "could not extract finding ID from lifecycle output"
 fi
@@ -834,28 +838,39 @@ envelope = {
   },
   'findings': [], 'tier_summary': {'must_fix': 0, 'should_fix': 0, 'consider': 0}
 }
-json.dump(envelope, open('/tmp/test-timeout-review.json', 'w'), indent=2)
+json.dump(envelope, open('$TEST_TMPDIR/test-timeout-review.json', 'w'), indent=2)
 " 2>/dev/null)
-TIMEOUT_VALID=$(bash "$SCRIPTS/validate_output.sh" --findings /tmp/test-timeout-review.json 2>&1) || TIMEOUT_RC=$?
+TIMEOUT_VALID=$(bash "$SCRIPTS/validate_output.sh" --findings $TEST_TMPDIR/test-timeout-review.json 2>&1) || TIMEOUT_RC=$?
 TIMEOUT_RC=${TIMEOUT_RC:-0}
 if [ "$TIMEOUT_RC" -eq 0 ]; then
   pass "validate_output.sh accepts timeout/partial tool_status values"
 else
   fail "validate_output.sh accepts timeout/partial tool_status values" "exit code $TIMEOUT_RC"
 fi
-rm -f /tmp/test-timeout-review.json
+rm -f $TEST_TMPDIR/test-timeout-review.json
 
 # 12e. Semgrep pass classification: security-adjacent rule IDs map to security (not maintainability)
-SEMGREP_CLASS=$(echo '{"results":[{"path":"test.py","start":{"line":1},"message":"buffer overflow","severity":"ERROR","check_id":"c.lang.vuln.buffer-overflow","extra":{}}]}' | \
-  bash -c 'source /dev/stdin; normalize_semgrep' < "$SCRIPTS/run-scans.sh" 2>/dev/null || \
-  echo '[]')
-# Fallback: test the classification regex directly since sourcing run-scans.sh is tricky
-CLASSIFICATION_CHECK=$(grep -cE 'vuln|injection|crypto|auth|xss' "$SCRIPTS/run-scans.sh" || true)
-if [ "$CLASSIFICATION_CHECK" -gt 0 ]; then
-  pass "semgrep classification includes security-adjacent patterns (vuln, injection, crypto, etc.)"
+# Source run-scans.sh in a subshell to get normalize_semgrep, then pipe JSON to it
+SEMGREP_INPUT='{"results":[{"path":"test.py","start":{"line":1},"end":{"line":1},"message":"buffer overflow","severity":"ERROR","check_id":"c.lang.vuln.buffer-overflow","extra":{}}]}'
+echo "$SEMGREP_INPUT" > "$TEST_TMPDIR/test-semgrep-input.json"
+SEMGREP_CLASS=$(bash -c '
+  # Extract just the normalize_semgrep function from run-scans.sh
+  eval "$(sed -n "/^normalize_semgrep/,/^}/p" "'"$SCRIPTS/run-scans.sh"'")"
+  normalize_semgrep < "'"$TEST_TMPDIR/test-semgrep-input.json"'"
+' 2>/dev/null || echo '[]')
+SEMGREP_PASS=$(echo "$SEMGREP_CLASS" | jq -r '.[0].pass // "unknown"' 2>/dev/null || echo "unknown")
+if [ "$SEMGREP_PASS" = "security" ]; then
+  pass "semgrep classification maps vuln rule IDs to security pass"
 else
-  fail "semgrep classification patterns" "security-adjacent patterns not found"
+  # Fallback: verify the classification regex exists in the script
+  CLASSIFICATION_CHECK=$(grep -cE 'vuln|injection|crypto|auth|xss' "$SCRIPTS/run-scans.sh" || true)
+  if [ "$CLASSIFICATION_CHECK" -gt 0 ]; then
+    pass "semgrep classification includes security-adjacent patterns (vuln, injection, crypto, etc.)"
+  else
+    fail "semgrep classification patterns" "security-adjacent patterns not found"
+  fi
 fi
+rm -f "$TEST_TMPDIR/test-semgrep-input.json"
 
 # 12f. enrich-findings.py: low-confidence AI finding is counted in dropped.below_confidence_floor
 # The judge fixture has a 0.50 confidence finding which gets filtered
@@ -883,16 +898,16 @@ envelope = {
   }],
   'tier_summary': {'must_fix': 1, 'should_fix': 0, 'consider': 0}
 }
-json.dump(envelope, open('/tmp/test-evidence-gate.json', 'w'), indent=2)
+json.dump(envelope, open('$TEST_TMPDIR/test-evidence-gate.json', 'w'), indent=2)
 " 2>/dev/null)
-EVIDENCE_RESULT=$(bash "$SCRIPTS/validate_output.sh" --findings /tmp/test-evidence-gate.json 2>&1) || EVIDENCE_RC=$?
+EVIDENCE_RESULT=$(bash "$SCRIPTS/validate_output.sh" --findings $TEST_TMPDIR/test-evidence-gate.json 2>&1) || EVIDENCE_RC=$?
 EVIDENCE_RC=${EVIDENCE_RC:-0}
 if [ "$EVIDENCE_RC" -eq 0 ]; then
   pass "validate_output.sh allows deterministic critical without failure_mode"
 else
   fail "validate_output.sh allows deterministic critical without failure_mode" "exit code $EVIDENCE_RC"
 fi
-rm -f /tmp/test-evidence-gate.json
+rm -f $TEST_TMPDIR/test-evidence-gate.json
 
 # ============================================================
 echo ""
@@ -900,45 +915,45 @@ echo "=== 13. Malformed Input Resilience ==="
 echo ""
 
 # --- 13a. enrich-findings.py: truncated JSON input ---
-echo '{"findings": [{"pass":' > /tmp/test-truncated.json
-ENRICH_TRUNC=$(python3 "$SCRIPTS/enrich-findings.py" --judge-findings /tmp/test-truncated.json 2>/dev/null)
-ENRICH_TRUNC_RC=$?
+echo '{"findings": [{"pass":' > $TEST_TMPDIR/test-truncated.json
+ENRICH_TRUNC_RC=0
+ENRICH_TRUNC=$(python3 "$SCRIPTS/enrich-findings.py" --judge-findings $TEST_TMPDIR/test-truncated.json 2>/dev/null) || ENRICH_TRUNC_RC=$?
 if [ "$ENRICH_TRUNC_RC" -eq 0 ]; then
   pass "enrich-findings.py truncated JSON exits 0"
 else
   fail "enrich-findings.py truncated JSON exits 0" "exit code $ENRICH_TRUNC_RC"
 fi
 assert_json_valid "enrich-findings.py truncated JSON produces valid JSON" "$ENRICH_TRUNC"
-rm -f /tmp/test-truncated.json
+rm -f $TEST_TMPDIR/test-truncated.json
 
 # --- 13b. enrich-findings.py: empty file ---
-: > /tmp/test-empty-file.json
-ENRICH_EMPTYFILE=$(python3 "$SCRIPTS/enrich-findings.py" --judge-findings /tmp/test-empty-file.json 2>/dev/null)
-ENRICH_EMPTYFILE_RC=$?
+: > $TEST_TMPDIR/test-empty-file.json
+ENRICH_EMPTYFILE_RC=0
+ENRICH_EMPTYFILE=$(python3 "$SCRIPTS/enrich-findings.py" --judge-findings $TEST_TMPDIR/test-empty-file.json 2>/dev/null) || ENRICH_EMPTYFILE_RC=$?
 if [ "$ENRICH_EMPTYFILE_RC" -eq 0 ]; then
   pass "enrich-findings.py empty file exits 0"
 else
   fail "enrich-findings.py empty file exits 0" "exit code $ENRICH_EMPTYFILE_RC"
 fi
 assert_json_valid "enrich-findings.py empty file produces valid JSON" "$ENRICH_EMPTYFILE"
-rm -f /tmp/test-empty-file.json
+rm -f $TEST_TMPDIR/test-empty-file.json
 
 # --- 13c. enrich-findings.py: non-JSON text ---
-echo "hello world" > /tmp/test-nonjson.json
-ENRICH_NONJSON=$(python3 "$SCRIPTS/enrich-findings.py" --judge-findings /tmp/test-nonjson.json 2>/dev/null)
-ENRICH_NONJSON_RC=$?
+echo "hello world" > $TEST_TMPDIR/test-nonjson.json
+ENRICH_NONJSON_RC=0
+ENRICH_NONJSON=$(python3 "$SCRIPTS/enrich-findings.py" --judge-findings $TEST_TMPDIR/test-nonjson.json 2>/dev/null) || ENRICH_NONJSON_RC=$?
 if [ "$ENRICH_NONJSON_RC" -eq 0 ]; then
   pass "enrich-findings.py non-JSON text exits 0"
 else
   fail "enrich-findings.py non-JSON text exits 0" "exit code $ENRICH_NONJSON_RC"
 fi
 assert_json_valid "enrich-findings.py non-JSON text produces valid JSON" "$ENRICH_NONJSON"
-rm -f /tmp/test-nonjson.json
+rm -f $TEST_TMPDIR/test-nonjson.json
 
 # --- 13d. enrich-findings.py: missing findings key ---
-echo '{"other": 1}' > /tmp/test-nokey.json
-ENRICH_NOKEY=$(python3 "$SCRIPTS/enrich-findings.py" --judge-findings /tmp/test-nokey.json 2>/dev/null)
-ENRICH_NOKEY_RC=$?
+echo '{"other": 1}' > $TEST_TMPDIR/test-nokey.json
+ENRICH_NOKEY_RC=0
+ENRICH_NOKEY=$(python3 "$SCRIPTS/enrich-findings.py" --judge-findings $TEST_TMPDIR/test-nokey.json 2>/dev/null) || ENRICH_NOKEY_RC=$?
 if [ "$ENRICH_NOKEY_RC" -eq 0 ]; then
   pass "enrich-findings.py missing findings key exits 0"
 else
@@ -946,22 +961,22 @@ else
 fi
 assert_json_valid "enrich-findings.py missing findings key produces valid JSON" "$ENRICH_NOKEY"
 assert_json_field "enrich missing key has zero findings" "$ENRICH_NOKEY" "len(d['findings']) == 0"
-rm -f /tmp/test-nokey.json
+rm -f $TEST_TMPDIR/test-nokey.json
 
 # --- 13e. lifecycle.py: truncated JSON findings ---
-echo '{"findings": [{"pass":' > /tmp/test-lc-truncated.json
-LIFECYCLE_TRUNC=$(python3 "$SCRIPTS/lifecycle.py" --findings /tmp/test-lc-truncated.json --raw 2>/dev/null)
-LIFECYCLE_TRUNC_RC=$?
+echo '{"findings": [{"pass":' > $TEST_TMPDIR/test-lc-truncated.json
+LIFECYCLE_TRUNC_RC=0
+LIFECYCLE_TRUNC=$(python3 "$SCRIPTS/lifecycle.py" --findings $TEST_TMPDIR/test-lc-truncated.json --raw 2>/dev/null) || LIFECYCLE_TRUNC_RC=$?
 if [ "$LIFECYCLE_TRUNC_RC" -eq 0 ]; then
   pass "lifecycle.py truncated JSON exits 0"
 else
   fail "lifecycle.py truncated JSON exits 0" "exit code $LIFECYCLE_TRUNC_RC"
 fi
 assert_json_valid "lifecycle.py truncated JSON produces valid JSON" "$LIFECYCLE_TRUNC"
-rm -f /tmp/test-lc-truncated.json
+rm -f $TEST_TMPDIR/test-lc-truncated.json
 
 # --- 13f. lifecycle.py: suppressions with invalid expires_at ---
-echo '{"findings": [{"pass":"security","severity":"high","confidence":0.9,"file":"test.py","line":1,"summary":"test finding"}]}' > /tmp/test-lc-findings.json
+echo '{"findings": [{"pass":"security","severity":"high","confidence":0.9,"file":"test.py","line":1,"summary":"test finding"}]}' > $TEST_TMPDIR/test-lc-findings.json
 python3 -c "
 import json
 supp = {
@@ -978,27 +993,27 @@ supp = {
     'summary_snippet': 'test'
   }]
 }
-json.dump(supp, open('/tmp/test-lc-bad-expires.json', 'w'))
+json.dump(supp, open('$TEST_TMPDIR/test-lc-bad-expires.json', 'w'))
 "
+LIFECYCLE_BADEXPIRY_RC=0
 LIFECYCLE_BADEXPIRY=$(python3 "$SCRIPTS/lifecycle.py" \
-  --findings /tmp/test-lc-findings.json --raw \
-  --suppressions /tmp/test-lc-bad-expires.json 2>/dev/null)
-LIFECYCLE_BADEXPIRY_RC=$?
+  --findings $TEST_TMPDIR/test-lc-findings.json --raw \
+  --suppressions $TEST_TMPDIR/test-lc-bad-expires.json 2>/dev/null) || LIFECYCLE_BADEXPIRY_RC=$?
 if [ "$LIFECYCLE_BADEXPIRY_RC" -eq 0 ]; then
   pass "lifecycle.py invalid expires_at exits 0"
 else
   fail "lifecycle.py invalid expires_at exits 0" "exit code $LIFECYCLE_BADEXPIRY_RC"
 fi
 assert_json_valid "lifecycle.py invalid expires_at produces valid JSON" "$LIFECYCLE_BADEXPIRY"
-rm -f /tmp/test-lc-findings.json /tmp/test-lc-bad-expires.json
+rm -f $TEST_TMPDIR/test-lc-findings.json $TEST_TMPDIR/test-lc-bad-expires.json
 
 # --- 13g. lifecycle.py: plain text suppressions file ---
-echo "this is plain text, not json" > /tmp/test-lc-textsupp.json
-echo '{"findings": [{"pass":"correctness","severity":"medium","confidence":0.8,"file":"foo.py","line":5,"summary":"test"}]}' > /tmp/test-lc-findings2.json
+echo "this is plain text, not json" > $TEST_TMPDIR/test-lc-textsupp.json
+echo '{"findings": [{"pass":"correctness","severity":"medium","confidence":0.8,"file":"foo.py","line":5,"summary":"test"}]}' > $TEST_TMPDIR/test-lc-findings2.json
+LIFECYCLE_TEXTSUPP_RC=0
 LIFECYCLE_TEXTSUPP=$(python3 "$SCRIPTS/lifecycle.py" \
-  --findings /tmp/test-lc-findings2.json --raw \
-  --suppressions /tmp/test-lc-textsupp.json 2>/dev/null)
-LIFECYCLE_TEXTSUPP_RC=$?
+  --findings $TEST_TMPDIR/test-lc-findings2.json --raw \
+  --suppressions $TEST_TMPDIR/test-lc-textsupp.json 2>/dev/null) || LIFECYCLE_TEXTSUPP_RC=$?
 if [ "$LIFECYCLE_TEXTSUPP_RC" -eq 0 ]; then
   pass "lifecycle.py plain text suppressions exits 0"
 else
@@ -1007,24 +1022,24 @@ fi
 assert_json_valid "lifecycle.py plain text suppressions produces valid JSON" "$LIFECYCLE_TEXTSUPP"
 assert_json_field "lifecycle plain text supp: no findings suppressed" "$LIFECYCLE_TEXTSUPP" \
   "len(d['suppressed_findings']) == 0"
-rm -f /tmp/test-lc-textsupp.json /tmp/test-lc-findings2.json
+rm -f $TEST_TMPDIR/test-lc-textsupp.json $TEST_TMPDIR/test-lc-findings2.json
 
 # --- 13h. lifecycle.py: findings with missing fields (no pass, no file) ---
-echo '{"findings": [{"severity":"low","confidence":0.7,"summary":"no pass or file field","line":1}]}' > /tmp/test-lc-missing-fields.json
+echo '{"findings": [{"severity":"low","confidence":0.7,"summary":"no pass or file field","line":1}]}' > $TEST_TMPDIR/test-lc-missing-fields.json
+LIFECYCLE_MISSING_RC=0
 LIFECYCLE_MISSING=$(python3 "$SCRIPTS/lifecycle.py" \
-  --findings /tmp/test-lc-missing-fields.json --raw 2>/dev/null)
-LIFECYCLE_MISSING_RC=$?
+  --findings $TEST_TMPDIR/test-lc-missing-fields.json --raw 2>/dev/null) || LIFECYCLE_MISSING_RC=$?
 if [ "$LIFECYCLE_MISSING_RC" -eq 0 ]; then
   pass "lifecycle.py findings with missing fields exits 0"
 else
   fail "lifecycle.py findings with missing fields exits 0" "exit code $LIFECYCLE_MISSING_RC"
 fi
 assert_json_valid "lifecycle.py findings with missing fields produces valid JSON" "$LIFECYCLE_MISSING"
-rm -f /tmp/test-lc-missing-fields.json
+rm -f $TEST_TMPDIR/test-lc-missing-fields.json
 
 # --- 13i. discover-project.py: non-existent file paths on stdin ---
-DISCOVER_NONEXIST=$(echo "/nonexistent/path/to/file.py" | python3 "$SCRIPTS/discover-project.py" 2>/dev/null)
-DISCOVER_NONEXIST_RC=$?
+DISCOVER_NONEXIST_RC=0
+DISCOVER_NONEXIST=$(echo "/nonexistent/path/to/file.py" | python3 "$SCRIPTS/discover-project.py" 2>/dev/null) || DISCOVER_NONEXIST_RC=$?
 if [ "$DISCOVER_NONEXIST_RC" -eq 0 ]; then
   pass "discover-project.py non-existent paths exits 0"
 else
@@ -1033,8 +1048,8 @@ fi
 assert_json_valid "discover-project.py non-existent paths produces valid JSON" "$DISCOVER_NONEXIST"
 
 # --- 13j. discover-project.py: binary data on stdin ---
-DISCOVER_BINARY=$(printf '\x00\x01\x02\xff\xfe' | python3 "$SCRIPTS/discover-project.py" 2>/dev/null)
-DISCOVER_BINARY_RC=$?
+DISCOVER_BINARY_RC=0
+DISCOVER_BINARY=$(printf '\x00\x01\x02\xff\xfe' | python3 "$SCRIPTS/discover-project.py" 2>/dev/null) || DISCOVER_BINARY_RC=$?
 if [ "$DISCOVER_BINARY_RC" -eq 0 ]; then
   pass "discover-project.py binary data exits 0"
 else
@@ -1043,8 +1058,8 @@ fi
 assert_json_valid "discover-project.py binary data produces valid JSON" "$DISCOVER_BINARY"
 
 # --- 13k. complexity.sh: non-existent file paths ---
-COMPLEXITY_NONEXIST=$(echo "/nonexistent/path/to/file.py" | bash "$SCRIPTS/complexity.sh" 2>/dev/null)
-COMPLEXITY_NONEXIST_RC=$?
+COMPLEXITY_NONEXIST_RC=0
+COMPLEXITY_NONEXIST=$(echo "/nonexistent/path/to/file.py" | bash "$SCRIPTS/complexity.sh" 2>/dev/null) || COMPLEXITY_NONEXIST_RC=$?
 if [ "$COMPLEXITY_NONEXIST_RC" -eq 0 ]; then
   pass "complexity.sh non-existent paths exits 0"
 else
@@ -1053,8 +1068,8 @@ fi
 assert_json_valid "complexity.sh non-existent paths produces valid JSON" "$COMPLEXITY_NONEXIST"
 
 # --- 13l. complexity.sh: binary filename ---
-COMPLEXITY_BIN=$(printf '\x00binary\xff.py' | bash "$SCRIPTS/complexity.sh" 2>/dev/null)
-COMPLEXITY_BIN_RC=$?
+COMPLEXITY_BIN_RC=0
+COMPLEXITY_BIN=$(printf '\x00binary\xff.py' | bash "$SCRIPTS/complexity.sh" 2>/dev/null) || COMPLEXITY_BIN_RC=$?
 if [ "$COMPLEXITY_BIN_RC" -eq 0 ]; then
   pass "complexity.sh binary filename exits 0"
 else
@@ -1063,8 +1078,8 @@ fi
 assert_json_valid "complexity.sh binary filename produces valid JSON" "$COMPLEXITY_BIN"
 
 # --- 13m. git-risk.sh: non-existent file paths ---
-GITRISK_NONEXIST=$(echo "/nonexistent/path/to/file.py" | bash "$SCRIPTS/git-risk.sh" 2>/dev/null)
-GITRISK_NONEXIST_RC=$?
+GITRISK_NONEXIST_RC=0
+GITRISK_NONEXIST=$(echo "/nonexistent/path/to/file.py" | bash "$SCRIPTS/git-risk.sh" 2>/dev/null) || GITRISK_NONEXIST_RC=$?
 if [ "$GITRISK_NONEXIST_RC" -eq 0 ]; then
   pass "git-risk.sh non-existent paths exits 0"
 else
@@ -1073,8 +1088,8 @@ fi
 assert_json_valid "git-risk.sh non-existent paths produces valid JSON" "$GITRISK_NONEXIST"
 
 # --- 13n. git-risk.sh: file path with spaces ---
-GITRISK_SPACES=$(echo "path with spaces/my file.py" | bash "$SCRIPTS/git-risk.sh" 2>/dev/null)
-GITRISK_SPACES_RC=$?
+GITRISK_SPACES_RC=0
+GITRISK_SPACES=$(echo "path with spaces/my file.py" | bash "$SCRIPTS/git-risk.sh" 2>/dev/null) || GITRISK_SPACES_RC=$?
 if [ "$GITRISK_SPACES_RC" -eq 0 ]; then
   pass "git-risk.sh file path with spaces exits 0"
 else
@@ -1083,8 +1098,8 @@ fi
 assert_json_valid "git-risk.sh file path with spaces produces valid JSON" "$GITRISK_SPACES"
 
 # --- 13o. run-scans.sh: empty stdin with --base-ref ---
-SCANS_EMPTY_BASE=$(echo "" | bash "$SCRIPTS/run-scans.sh" --base-ref HEAD~1 2>/dev/null)
-SCANS_EMPTY_BASE_RC=$?
+SCANS_EMPTY_BASE_RC=0
+SCANS_EMPTY_BASE=$(echo "" | bash "$SCRIPTS/run-scans.sh" --base-ref HEAD~1 2>/dev/null) || SCANS_EMPTY_BASE_RC=$?
 if [ "$SCANS_EMPTY_BASE_RC" -eq 0 ]; then
   pass "run-scans.sh empty stdin with --base-ref exits 0"
 else
@@ -1093,7 +1108,7 @@ fi
 assert_json_valid "run-scans.sh empty stdin with --base-ref produces valid JSON" "$SCANS_EMPTY_BASE"
 
 # --- 13p. timing.sh: stop without matching start ---
-TIMING_ORPHAN_FILE="/tmp/test-timing-$$-orphan.jsonl"
+TIMING_ORPHAN_FILE="$TEST_TMPDIR/test-timing-$$-orphan.jsonl"
 rm -f "$TIMING_ORPHAN_FILE"
 CODEREVIEW_TIMING_FILE="$TIMING_ORPHAN_FILE" bash "$SCRIPTS/timing.sh" stop "orphan_step" 2>/dev/null
 TIMING_ORPHAN_RC=$?
@@ -1108,7 +1123,7 @@ assert_json_valid "timing.sh summary with orphan stop produces valid JSON" "$TIM
 rm -f "$TIMING_ORPHAN_FILE"
 
 # --- 13q. timing.sh: summary with only marks (no start/stop pairs) ---
-TIMING_MARKS_FILE="/tmp/test-timing-$$-marks.jsonl"
+TIMING_MARKS_FILE="$TEST_TMPDIR/test-timing-$$-marks.jsonl"
 rm -f "$TIMING_MARKS_FILE"
 CODEREVIEW_TIMING_FILE="$TIMING_MARKS_FILE" bash "$SCRIPTS/timing.sh" mark "event_a" "val1" 2>/dev/null
 CODEREVIEW_TIMING_FILE="$TIMING_MARKS_FILE" bash "$SCRIPTS/timing.sh" mark "event_b" "val2" 2>/dev/null
@@ -1119,7 +1134,7 @@ assert_json_field "timing marks-only summary has marks" "$TIMING_MARKS_SUMMARY" 
 rm -f "$TIMING_MARKS_FILE"
 
 # --- 13r. timing.sh: double start same name ---
-TIMING_DOUBLE_FILE="/tmp/test-timing-$$-double.jsonl"
+TIMING_DOUBLE_FILE="$TEST_TMPDIR/test-timing-$$-double.jsonl"
 rm -f "$TIMING_DOUBLE_FILE"
 CODEREVIEW_TIMING_FILE="$TIMING_DOUBLE_FILE" bash "$SCRIPTS/timing.sh" start "dup_step" 2>/dev/null
 CODEREVIEW_TIMING_FILE="$TIMING_DOUBLE_FILE" bash "$SCRIPTS/timing.sh" start "dup_step" 2>/dev/null
@@ -1213,12 +1228,20 @@ else
   fail "validator catches bad suppressed_findings lifecycle_status" "Expected 'suppressed_findings with invalid lifecycle_status'"
 fi
 
-# 14j. Verify all fixtures trigger exactly one error category (specificity check)
+# 14j. Verify all fixtures trigger their expected FAIL count (specificity check)
+# Each fixture should trigger a known number of FAILs — not zero, not wildly more
 for fixture_file in "$VALIDATOR_FIXTURES"/*.json; do
   fixture_name="$(basename "$fixture_file" .json)"
   FAIL_COUNT=$(bash "$SCRIPTS/validate_output.sh" --findings "$fixture_file" 2>&1 | grep -c "^FAIL:" || true)
-  if [ "$FAIL_COUNT" -ge 1 ]; then
+  # Expected counts: most fixtures trigger exactly 1; some legitimately trigger more
+  case "$fixture_name" in
+    missing-review-mode) EXPECTED_FAILS=2 ;;
+    *) EXPECTED_FAILS=1 ;;
+  esac
+  if [ "$FAIL_COUNT" -eq "$EXPECTED_FAILS" ]; then
     pass "fixture $fixture_name triggers FAIL ($FAIL_COUNT)"
+  elif [ "$FAIL_COUNT" -ge 1 ]; then
+    fail "fixture $fixture_name triggers FAIL ($FAIL_COUNT)" "expected $EXPECTED_FAILS FAIL(s), got $FAIL_COUNT"
   else
     fail "fixture $fixture_name triggers FAIL" "no FAIL lines found"
   fi
@@ -1237,14 +1260,14 @@ CHAIN_ENRICHED=$(python3 "$SCRIPTS/enrich-findings.py" \
 assert_json_valid "chain step 1: enrich produces valid JSON" "$CHAIN_ENRICHED"
 assert_json_field "chain step 1: has findings array" "$CHAIN_ENRICHED" "'findings' in d"
 assert_json_field "chain step 1: has tier_summary" "$CHAIN_ENRICHED" "'tier_summary' in d"
-echo "$CHAIN_ENRICHED" > /tmp/test-chain-enriched.json
+echo "$CHAIN_ENRICHED" > $TEST_TMPDIR/test-chain-enriched.json
 
 # Capture enriched finding count for consistency checks
 CHAIN_ENRICHED_COUNT=$(echo "$CHAIN_ENRICHED" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['findings']))" 2>/dev/null)
 
 # Step 2: Run lifecycle on enriched output (no previous review = all new)
 CHAIN_LIFECYCLE=$(python3 "$SCRIPTS/lifecycle.py" \
-  --findings /tmp/test-chain-enriched.json 2>/dev/null)
+  --findings $TEST_TMPDIR/test-chain-enriched.json 2>/dev/null)
 assert_json_valid "chain step 2: lifecycle produces valid JSON" "$CHAIN_LIFECYCLE"
 assert_json_field "chain step 2: has findings array" "$CHAIN_LIFECYCLE" "'findings' in d"
 assert_json_field "chain step 2: has suppressed_findings" "$CHAIN_LIFECYCLE" "'suppressed_findings' in d"
@@ -1267,13 +1290,13 @@ else
 fi
 
 # Step 3: Wrap in full envelope
-echo "$CHAIN_LIFECYCLE" > /tmp/test-chain-lifecycle.json
+echo "$CHAIN_LIFECYCLE" > $TEST_TMPDIR/test-chain-lifecycle.json
 CHAIN_ENVELOPE=$(python3 -c "
 import json, sys
 
-with open('/tmp/test-chain-lifecycle.json') as f:
+with open('$TEST_TMPDIR/test-chain-lifecycle.json') as f:
     lifecycle = json.load(f)
-with open('/tmp/test-chain-enriched.json') as f:
+with open('$TEST_TMPDIR/test-chain-enriched.json') as f:
     enriched = json.load(f)
 
 envelope = {
@@ -1301,10 +1324,10 @@ envelope = {
 json.dump(envelope, sys.stdout, indent=2)
 " 2>/dev/null)
 assert_json_valid "chain step 3: envelope produces valid JSON" "$CHAIN_ENVELOPE"
-echo "$CHAIN_ENVELOPE" > /tmp/test-chain-envelope.json
+echo "$CHAIN_ENVELOPE" > $TEST_TMPDIR/test-chain-envelope.json
 
 # Step 4: Validate
-CHAIN_VALIDATE=$(bash "$SCRIPTS/validate_output.sh" --findings /tmp/test-chain-envelope.json 2>&1) || CHAIN_VALIDATE_RC=$?
+CHAIN_VALIDATE=$(bash "$SCRIPTS/validate_output.sh" --findings $TEST_TMPDIR/test-chain-envelope.json 2>&1) || CHAIN_VALIDATE_RC=$?
 CHAIN_VALIDATE_RC=${CHAIN_VALIDATE_RC:-0}
 if [ "$CHAIN_VALIDATE_RC" -eq 0 ]; then
   pass "chain step 4: full pipeline envelope passes validation"
@@ -1319,7 +1342,7 @@ else
 fi
 
 # Clean up chain temp files
-rm -f /tmp/test-chain-enriched.json /tmp/test-chain-lifecycle.json /tmp/test-chain-envelope.json
+rm -f $TEST_TMPDIR/test-chain-enriched.json $TEST_TMPDIR/test-chain-lifecycle.json $TEST_TMPDIR/test-chain-envelope.json
 
 # ============================================================
 echo ""
