@@ -6,21 +6,24 @@ Local AI code review for Claude Code and Codex. Review your changes *before* the
 
 - **Faster feedback loop**: Review locally in seconds, not waiting for CI/PR review bots
 - **Deeper than linters**: AI explorers trace call paths, check callers, verify test coverage — things no linter catches
-- **Spec verification**: Pass a spec file and verify every requirement is implemented and tested (with correct test categories: unit/integration/e2e)
+- **Spec verification**: Pass a spec file and verify every requirement is actually implemented and behaviorally correct — not just that a matching function exists
 - **Works offline**: Only needs your local git repo and whatever tools you have installed
 - **Agent-friendly**: Findings include fix suggestions that Claude/Codex can execute immediately
 
 ## Features
 
 - **Explorer-judge architecture**: 8 specialized explorer sub-agents (correctness, security, reliability, test adequacy + 4 extended passes) investigate in parallel, then a review judge synthesizes findings with adversarial validation
+- **Large-diff chunked review**: diffs exceeding 80 files or 8000 lines are automatically split into risk-tiered chunks with cross-chunk analysis, keeping reviews within context limits without sacrificing quality
 - **Deterministic scans first**: semgrep, trivy, osv-scanner, shellcheck, pre-commit, sonarqube run before AI review
 - **Local-first review modes**: staged changes, last commit, full branch (`--base`), commit range (`--range`), specific path — also works on PRs
-- **Spec verification with traceability**: check implementation against a plan/spec with `--spec`, scope to sections with `--spec-scope`, get per-requirement traceability with test category coverage
+- **Spec verification with traceability**: check implementation against a plan/spec with `--spec`, scope to sections with `--spec-scope`, get per-requirement behavioral verification and test category coverage
+- **Deep correctness analysis**: traces nil/partial objects on skip paths, detects type mismatches across serialization boundaries, catches panics from uninitialized fields
+- **Deep security analysis**: traces inter-component data flows into dangerous sinks, detects environment variable namespace hijacking from dynamic sources
 - **Test category classification**: classifies tests as unit/integration/e2e and flags when the wrong category is used
 - **Adaptive pass selection**: extended passes (error handling, API/contract, concurrency, spec verification) auto-skip when irrelevant to the diff
 - **Structured output**: JSON findings conforming to `findings-schema.json` + markdown report
 - **Action tiers**: Must Fix / Should Fix / Consider with mechanical classification
-- **Configurable**: review cadence, pushback level, confidence floor, model per pass, focus/ignore paths via `.codereview.yaml`
+- **Configurable**: review cadence, pushback level, confidence floor, model per pass, chunked mode thresholds, focus/ignore paths via `.codereview.yaml`
 
 ## Prerequisites
 
@@ -61,7 +64,7 @@ npm install @php-workx/skill-codereview --registry=https://npm.pkg.github.com
 ### Via installer script
 
 ```bash
-git clone --depth 1 --branch v1.0.0 https://github.com/php-workx/skill-codereview.git
+git clone --depth 1 https://github.com/php-workx/skill-codereview.git
 cd skill-codereview
 bash scripts/install-codereview-skill.sh
 ```
@@ -79,6 +82,8 @@ Review local changes before they leave your machine:
 /codereview src/auth/                                        # specific path
 /codereview --spec docs/plan.md --base main                  # verify against spec
 /codereview --spec docs/plan.md --spec-scope "Auth" --base main  # one section of spec
+/codereview --base main --no-chunk                           # force standard mode on large diffs
+/codereview --force-chunk                                    # force chunked mode for testing
 /codereview 42                                               # PR #42 (also supported)
 ```
 
@@ -97,6 +102,9 @@ pass_models:
 ignore_paths:
   - "vendor/"
   - "*.generated.*"
+large_diff:
+  file_threshold: 80     # file count that triggers chunked mode
+  line_threshold: 8000   # diff line count that triggers chunked mode
 ```
 
 See `docs/CONFIGURATION.md` for the full schema reference.
