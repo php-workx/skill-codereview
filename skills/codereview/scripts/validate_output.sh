@@ -114,6 +114,10 @@ fi
 if [ "$(jq '.findings | type' "$FINDINGS")" != '"array"' ]; then
   echo "FAIL: findings must be an array"
   ERRORS=$((ERRORS + 1))
+  # Normalize to empty array so subsequent jq .findings[] queries don't crash under set -e
+  FINDINGS_NORMALIZED=$(mktemp)
+  jq '.findings = []' "$FINDINGS" > "$FINDINGS_NORMALIZED" 2>/dev/null || echo '{"findings":[]}' > "$FINDINGS_NORMALIZED"
+  FINDINGS="$FINDINGS_NORMALIZED"
   FINDING_COUNT=0
 else
   FINDING_COUNT=$(jq '.findings | length' "$FINDINGS")
@@ -318,7 +322,12 @@ if [ "$(jq 'has("suppressed_findings")' "$FINDINGS")" = "true" ]; then
     SUPP_COUNT=$(jq '.suppressed_findings | length' "$FINDINGS")
     echo "INFO: $SUPP_COUNT suppressed findings"
 
-    BAD_SUPP_STATUS=$(jq '[.suppressed_findings[] | select(.lifecycle_status | IN("rejected","deferred") | not)] | length' "$FINDINGS")
+    BAD_SUPP_STATUS=$(jq '[.suppressed_findings[] | select(type == "object") | select(.lifecycle_status | IN("rejected","deferred") | not)] | length' "$FINDINGS")
+    BAD_SUPP_TYPE=$(jq '[.suppressed_findings[] | select(type != "object")] | length' "$FINDINGS")
+    if [ "$BAD_SUPP_TYPE" -gt 0 ]; then
+      echo "FAIL: $BAD_SUPP_TYPE suppressed_findings entries are not objects"
+      ERRORS=$((ERRORS + 1))
+    fi
     if [ "$BAD_SUPP_STATUS" -gt 0 ]; then
       echo "FAIL: $BAD_SUPP_STATUS suppressed_findings with invalid lifecycle_status (must be rejected/deferred)"
       ERRORS=$((ERRORS + 1))
