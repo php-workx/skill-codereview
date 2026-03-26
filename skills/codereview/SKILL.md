@@ -272,6 +272,25 @@ Before reviewing, understand the surrounding code. This is critical for catching
 - Extract changed file paths, function names, class names
 - Note added/removed imports and dependencies
 
+**2a-1. Discover project tooling (implemented by `scripts/discover-project.py` + agent interpretation — do not reimplement):**
+
+Run the project discovery script to find the project's build system, quality commands, and monorepo structure:
+```bash
+echo "$CHANGED_FILES" | python3 scripts/discover-project.py > /tmp/codereview-project.json
+```
+
+The script outputs raw data: which build files exist, target/script names, config sections, CI file paths, monorepo orchestrator. It does NOT interpret what targets do — that's your job.
+
+After the script runs, **read the build files it identified** (Makefile, package.json, Justfile, etc.) using the Read tool:
+1. For targets/scripts with unclear names (`preflight`, `verify`, `checks`, `ci`), read their definitions to understand what they actually run
+2. Identify quality-relevant commands (linting, testing, coverage, type checking, security scanning)
+3. Map each to standard categories: `lint`, `test`, `coverage`, `typecheck`, `security`
+4. For monorepos, decide whether to run via orchestrator (`turbo run lint --filter=...`) or directly in project root
+
+Write the interpreted profile to `/tmp/codereview-project-interpreted.json` for `run-scans.sh` to consume via `--project-profile`.
+
+If the script is not available or fails, skip project discovery — `run-scans.sh` still runs Tier 1 and Tier 2 tools without a project profile.
+
 **2b. Explore surrounding code using tools:**
 
 Use `Grep`, `Glob`, and `Read` to examine:
@@ -290,26 +309,16 @@ For each changed or newly added function, check if it's actually called:
 ```
 Include dead-code findings in the context packet so the review judge can flag YAGNI issues rather than reviewing unused code in detail.
 
-**2d. Complexity analysis:**
+**2d. Complexity analysis (implemented by `scripts/complexity.sh` — do not reimplement):**
 
-Run cyclomatic complexity on changed files (best-effort). Check file extensions first to avoid running language-specific tools on irrelevant files:
-
+Run the complexity analysis script:
 ```bash
-# Filter CHANGED_FILES by language before running tools
-PY_FILES=$(echo "$CHANGED_FILES" | grep -E '\.py$' || true)
-GO_FILES=$(echo "$CHANGED_FILES" | grep -E '\.go$' || true)
-
-# Python — only if there are .py files in the diff
-if [ -n "$PY_FILES" ] && command -v radon &>/dev/null; then
-  radon cc $PY_FILES -a -s 2>/dev/null | head -30
-  radon mi $PY_FILES -s 2>/dev/null | head -30
-fi
-
-# Go — only if there are .go files in the diff
-if [ -n "$GO_FILES" ] && command -v gocyclo &>/dev/null; then
-  gocyclo -over 10 $GO_FILES 2>/dev/null | head -30
-fi
+echo "$CHANGED_FILES" | bash scripts/complexity.sh > /tmp/codereview-complexity.json
 ```
+
+The script detects `.py` files (runs `radon` if installed) and `.go` files (runs `gocyclo` if installed). It only reports functions rated C or worse (complexity >= 11). Output is JSON with `hotspots[]` and `tool_status`.
+
+If the script is not available or fails, fall back to running radon/gocyclo manually per the logic in `references/deterministic-scans.md`.
 
 | Score | Rating | Implication |
 |-------|--------|-------------|
@@ -319,7 +328,7 @@ fi
 | D (21-30) | Very complex | Recommend refactor |
 | F (31+) | Untestable | Must refactor |
 
-Include complexity scores in the context packet so AI passes can flag high-complexity functions.
+Include complexity hotspots in the context packet so AI passes can flag high-complexity functions.
 
 **2e. Check for repo-level review instructions:**
 ```bash
@@ -388,7 +397,8 @@ If a spec is found, include it in the context packet for requirements completene
 - List of changed files with brief descriptions
 - Key surrounding code snippets (callers, interfaces, types)
 - Dead code flags (functions with no callers)
-- Complexity scores for changed files
+- Complexity hotspots (from `scripts/complexity.sh` output at `/tmp/codereview-complexity.json`)
+- Project tooling profile (from `scripts/discover-project.py` + agent interpretation)
 - Language standards (if loaded)
 - Spec/plan content (if available)
 - Any repo-level review instructions found
@@ -440,21 +450,30 @@ For each chunk, generate a cross-chunk interface summary listing how this chunk'
 
 This enables chunk explorers to flag cross-chunk interface risks. Store as `CROSS_CHUNK_SUMMARY[chunk_id]`.
 
-### Step 3: Run Deterministic Scans (Best-Effort)
+### Step 3: Run Deterministic Scans (implemented by `scripts/run-scans.sh` — do not reimplement)
 
-Run available deterministic tools (semgrep, trivy, osv-scanner, shellcheck, pre-commit, sonarqube). Their output serves two purposes: (1) deterministic findings go directly into the final report, and (2) AI passes receive scan results so they skip restating what tools already caught.
+Run the deterministic scan orchestration script:
+```bash
+echo "$CHANGED_FILES" | bash scripts/run-scans.sh \
+  --base-ref "$BASE_REF" \
+  --project-profile /tmp/codereview-project-interpreted.json \
+  > /tmp/codereview-scans.json
+```
 
-**See `references/deterministic-scans.md`** for full tool scripts, cache setup, parallel execution patterns, zsh safety workarounds, and tool status keys.
+Omit `--project-profile` if project discovery (Step 2a-1) was skipped or failed.
 
-**Summary of what to do:**
-1. Request elevated permissions before the scan bundle (single escalation)
-2. Initialize sandbox/cache dirs (TRIVY_CACHE_DIR, SEMGREP_HOME, etc.)
-3. Run each tool scoped to `CHANGED_FILES` where supported; run semgrep + sonarqube in parallel when both available
-4. Normalize findings into standard schema (`source: "deterministic"`, `confidence: 1.0`)
-5. Deduplicate: on `file:line:summary` collision, keep highest severity, union provenance in `sources`
-6. Record `tool_status` for every tool (`ran` / `skipped` / `not_installed` / `sandbox_blocked` / `failed`)
+The script handles all deterministic tooling in three tiers:
+- **Tier 1 (baseline, always run):** semgrep, trivy, osv-scanner, gitleaks, shellcheck
+- **Tier 2 (language-detected):** clippy (Rust), ruff (Python), golangci-lint (Go), eslint (JS/TS if config exists)
+- **Tier 3 (project-configured):** commands from `--project-profile` (discovered in Step 2a-1)
 
-If no tools are available, continue — the AI passes still run. Log missing tools in the final report.
+The script runs tools in parallel with per-tool timeouts, normalizes all output to the standard finding shape, deduplicates across tiers, and outputs `{ "findings": [...], "tool_status": {...} }`.
+
+If the script is not available or fails, fall back to running tools manually per `references/deterministic-scans.md`.
+
+**See `references/deterministic-scans.md`** for tool documentation, install instructions, and cache setup rationale. The executable logic from that document has been extracted to `scripts/run-scans.sh` — the reference file is now documentation-only.
+
+Output from this step serves two purposes: (1) deterministic findings go directly into the final report, and (2) AI passes receive scan results so they skip restating what tools already caught. If no tools are available, continue — the AI passes still run.
 
 ### Step 4: Run AI Review (Explorer Sub-Agents → Review Judge)
 
@@ -845,21 +864,37 @@ Parameters:
 
 Combine deterministic findings (Step 3) with the judge's validated findings (Step 4b), then apply signal controls and classify into action tiers.
 
-**5a. Enrich and combine:**
+**5a. Agent pre-processing (AI judgment required):**
 
-The orchestrator (the agent executing this skill) adds fields that explorers and the judge don't produce:
+Before running the enrichment script, perform two steps that require judgment:
 
-1. **Assign `source`** — set `"source": "deterministic"` for tool findings, `"source": "ai"` for judge findings
-2. **Assign `id`** — generate a stable ID for each finding: `<pass>-<file-hash>-<line>` (e.g., `security-a3f1-42`)
-3. **Combine** deterministic findings (confidence 1.0) with judge's findings into one list
-4. **Confidence floor** — drop any AI finding with `confidence < 0.65`
-5. **Deduplicate** — merge findings that share the same dedupe key (`file + line + normalized summary`) or clearly describe the same root cause; keep the higher-severity version and preserve provenance in `sources` (for example `["semgrep","sonarqube"]`)
-6. **No linter restatement** — remove findings about formatting, naming conventions, or import ordering that linters/formatters already handle
-7. **Evidence check** — for `high` or `critical` severity, verify `failure_mode` is populated; if not, downgrade to `medium`
+1. **Deduplicate by root cause** — merge findings that describe the same underlying issue with different wording. Keep the higher-severity version and preserve provenance in `sources`.
+2. **Remove linter restatements** — remove findings about formatting, naming conventions, or import ordering that linters/formatters already handle.
 
-**5b. Assign `action_tier` to each finding:**
+Save the cleaned judge findings to `/tmp/codereview-judge-cleaned.json`.
 
-The orchestrator assigns `action_tier` mechanically based on severity and confidence — this is not an AI judgment. Evaluate rules in order; first match wins. Since code agents can address findings quickly, surface everything actionable rather than enforcing a hard cap:
+**5b. Enrich and classify (implemented by `scripts/enrich-findings.py` — do not reimplement):**
+
+Run the enrichment script on the cleaned findings:
+```bash
+python3 scripts/enrich-findings.py \
+  --judge-findings /tmp/codereview-judge-cleaned.json \
+  --scan-findings /tmp/codereview-scans.json \
+  --confidence-floor 0.65 \
+  > /tmp/codereview-enriched.json
+```
+
+The script mechanically performs:
+- Assigns `source` ("deterministic" / "ai") and generates stable `id` per finding
+- Applies confidence floor (drops AI findings below threshold)
+- Evidence check (high/critical without `failure_mode` → downgrade to medium)
+- Assigns `action_tier` (Must Fix / Should Fix / Consider) per rules below
+- Ranks within each tier by `severity_weight × confidence`
+- Computes `tier_summary` counts
+
+If `python3` is not available or the script fails, fall back to performing these steps manually per the rules below.
+
+**Action tier rules** (reference — implemented by script):
 
 | Priority | Tier | Criteria | Action |
 |----------|------|----------|--------|
@@ -867,9 +902,7 @@ The orchestrator assigns `action_tier` mechanically based on severity and confid
 | 2nd | **Should Fix** | `medium` severity, OR `high` with confidence 0.65-0.79 | Fix in this PR — fast for agents |
 | 3rd | **Consider** | Everything else above the confidence floor | Fix if convenient, or defer |
 
-Evaluate in order — a `high`/0.85 finding matches "Must Fix" and stops there; a `medium`/0.90 finding skips "Must Fix" (not high/critical), matches "Should Fix".
-
-**5c. Rank within each tier** by `severity_weight * confidence`:
+**Severity weights** (reference — implemented by script):
 
 | Severity | Weight |
 |----------|--------|

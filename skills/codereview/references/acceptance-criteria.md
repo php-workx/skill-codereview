@@ -76,6 +76,25 @@ Validation criteria for the codereview skill. Not needed at runtime — use for 
 | Orchestrator context protection | Full diff written to temp file, chunk diffs extracted fresh from git |
 | Config overrides | `large_diff.*` settings from `.codereview.yaml` respected |
 
+## Pipeline Scripts
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| `scripts/run-scans.sh` available | Step 3 runs the script, consumes JSON output. Agent does not re-interpret `deterministic-scans.md` |
+| `scripts/run-scans.sh` not available | Agent falls back to manual tool execution per `references/deterministic-scans.md` |
+| `scripts/enrich-findings.py` available | Step 5 runs the script for mechanical enrichment (ID, tier, confidence floor) |
+| `scripts/enrich-findings.py` not available (python3 missing) | Agent performs Step 5 enrichment manually. Warning logged. |
+| `scripts/complexity.sh` available | Step 2d runs the script, includes hotspots in context packet |
+| `scripts/complexity.sh` not available | Agent runs radon/gocyclo manually or skips complexity analysis |
+| `scripts/discover-project.py` available | Step 2a-1 discovers project tooling, agent interprets build files |
+| `scripts/discover-project.py` not available | Project discovery skipped, `run-scans.sh` uses Tier 1 + Tier 2 only (no Tier 3 project commands) |
+| Script exits non-zero | Agent logs stderr, falls back to manual execution for that step |
+| Script produces invalid JSON | Agent validates with `jq`, falls back to manual execution if invalid |
+| `--project-profile` with valid JSON | `run-scans.sh` executes Tier 3 project commands from profile |
+| `--project-profile` with malformed JSON | `run-scans.sh` warns on stderr, skips Tier 3, continues with Tier 1 + 2 |
+| Monorepo with multiple project contexts | `discover-project.py` groups files by context, agent interprets each context's build files |
+| Empty CHANGED_FILES | All scripts produce valid JSON with empty findings/hotspots/contexts |
+
 ## Validation Script
 
 ```bash
