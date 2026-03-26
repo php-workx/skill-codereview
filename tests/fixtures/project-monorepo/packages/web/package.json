@@ -1,0 +1,11 @@
+{
+  "name": "@example/web",
+  "scripts": {
+    "lint": "eslint .",
+    "test": "jest",
+    "test:coverage": "jest --coverage",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build",
+    "dev": "vite"
+  }
+}

@@ -15,7 +15,8 @@
     "spec-verification"
   ],
   "scripts": {
-    "validate": "bash -n skills/codereview/scripts/validate_output.sh && bash -n scripts/install-codereview-skill.sh && bash -n scripts/ci-local-release.sh",
+    "validate": "bash -n skills/codereview/scripts/validate_output.sh && bash -n skills/codereview/scripts/run-scans.sh && bash -n skills/codereview/scripts/complexity.sh && python3 -c \"import ast; [ast.parse(open(f).read()) for f in ['skills/codereview/scripts/enrich-findings.py','skills/codereview/scripts/discover-project.py']]\" && bash -n scripts/install-codereview-skill.sh && bash -n scripts/ci-local-release.sh",
+    "test": "bash tests/test-scripts.sh",
     "prepublishOnly": "npm run validate"
   },
   "publishConfig": {

@@ -1,0 +1,45 @@
+{
+  "findings": [
+    {
+      "pass": "security",
+      "severity": "high",
+      "confidence": 0.92,
+      "file": "src/auth/login.py",
+      "line": 42,
+      "summary": "SQL injection via string formatting in query builder",
+      "evidence": "Line 42: query = f\"SELECT * FROM users WHERE name = '{name}'\"",
+      "failure_mode": "Attacker can extract or modify database contents via crafted name parameter",
+      "fix": "Use parameterized query: cursor.execute('SELECT * FROM users WHERE name = %s', (name,))",
+      "tests_to_add": ["Test login with SQL metacharacters in username"]
+    },
+    {
+      "pass": "correctness",
+      "severity": "medium",
+      "confidence": 0.78,
+      "file": "src/api/orders.py",
+      "line": 105,
+      "summary": "Off-by-one error in pagination offset calculation",
+      "evidence": "Line 105: offset = (page - 1) * size + 1. Should be (page - 1) * size for zero-based indexing.",
+      "fix": "Change to offset = (page - 1) * size"
+    },
+    {
+      "pass": "correctness",
+      "severity": "low",
+      "confidence": 0.50,
+      "file": "src/utils/format.py",
+      "line": 10,
+      "summary": "This finding should be filtered by confidence floor",
+      "evidence": "Low confidence finding"
+    },
+    {
+      "pass": "security",
+      "severity": "critical",
+      "confidence": 0.88,
+      "file": "src/auth/session.py",
+      "line": 22,
+      "summary": "Hardcoded secret key used for session signing",
+      "evidence": "Line 22: SECRET_KEY = 'my-secret-key-123'",
+      "fix": "Load secret from environment variable"
+    }
+  ]
+}
