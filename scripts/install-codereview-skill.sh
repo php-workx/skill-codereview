@@ -47,8 +47,10 @@ rm -rf "$DEST_CLAUDE" "$DEST_CODEX"
 mv "$DEST_CLAUDE_TMP" "$DEST_CLAUDE"
 mv "$DEST_CODEX_TMP" "$DEST_CODEX"
 
-chmod +x "$DEST_CLAUDE/scripts/validate_output.sh" \
-  "$DEST_CODEX/scripts/validate_output.sh"
+# Make all scripts executable
+for dest in "$DEST_CLAUDE" "$DEST_CODEX"; do
+  chmod +x "$dest/scripts/"*.sh "$dest/scripts/"*.py 2>/dev/null || true
+done
 
 if [[ -f "$SRC_PROMPT" ]]; then
   cp "$SRC_PROMPT" "$DEST_CODEX_PROMPTS_BASE/codereview.md" || {
