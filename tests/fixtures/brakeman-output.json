@@ -1,0 +1,1 @@
+{"warnings":[{"warning_type":"SQL Injection","confidence":"High","file":"app/controllers/users_controller.rb","line":42,"message":"Possible SQL injection","code":"User.where(params[:query])"}]}

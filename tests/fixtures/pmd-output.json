@@ -1,0 +1,1 @@
+{"files":[{"filename":"src/main/java/App.java","violations":[{"beginline":15,"rule":"UnusedLocalVariable","ruleset":"Best Practices","priority":3,"description":"Avoid unused local variables such as temp"},{"beginline":30,"rule":"CyclomaticComplexity","ruleset":"Design","priority":2,"description":"The method processData has a cyclomatic complexity of 15"}]}]}
