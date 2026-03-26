@@ -65,9 +65,9 @@ mkdir -p "$TRIVY_CACHE_DIR" "$PRE_COMMIT_HOME" "$SEMGREP_HOME" \
          "$GOCACHE" "$GOMODCACHE" "$GOPATH" 2>/dev/null || true
 
 # Scratch directory for raw tool output
-RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-SCRATCH="/tmp/codereview-scans-${RUN_ID}"
-mkdir -p "$SCRATCH"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+SCRATCH="$(mktemp -d /tmp/codereview-scans-XXXXXX)"
+trap 'rm -rf "$SCRATCH" "${SONAR_OUT_DIR:-}"' EXIT INT TERM
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +96,18 @@ done
 # log: write timestamped message to stderr
 log() {
   echo "[run-scans] $*" >&2
+}
+
+# check_normalized: verify a normalization output file is valid JSON array.
+# If empty or invalid, write '[]' and log a warning.
+# Args: $1=file_path, $2=tool_name
+check_normalized() {
+  local fpath="$1"
+  local tool="$2"
+  if [ ! -s "$fpath" ] || ! jq 'type == "array"' "$fpath" >/dev/null 2>&1; then
+    log "WARNING: normalization of $tool output produced invalid JSON — replacing with []"
+    echo '[]' > "$fpath"
+  fi
 }
 
 # get_version: attempt to get version string for a tool
@@ -160,16 +172,17 @@ record_status() {
   local count="${4:-0}"
   local note="${5:-null}"
 
-  if [ "$version" != "null" ]; then
-    version="\"$version\""
-  fi
-  if [ "$note" != "null" ]; then
-    note="\"$note\""
-  fi
-
-  cat > "$SCRATCH/status/${key}.json" <<STATUSEOF
-{"status":"${status}","version":${version},"finding_count":${count},"note":${note}}
-STATUSEOF
+  jq -n \
+    --arg s "$status" \
+    --arg v "$version" \
+    --argjson c "$count" \
+    --arg n "$note" \
+    '{
+      status: $s,
+      version: (if $v == "null" then null else $v end),
+      finding_count: $c,
+      note: (if $n == "null" then null else $n end)
+    }' > "$SCRATCH/status/${key}.json"
 }
 
 # ---------------------------------------------------------------------------
@@ -196,8 +209,10 @@ normalize_semgrep() {
         confidence: 1.0,
         evidence: ((.extra.lines // "") | tostring),
         pass: (
-          if (.check_id // "" | test("security"; "i")) then "security"
-          elif (.check_id // "" | test("correctness"; "i")) then "correctness"
+          if (.check_id // "" | test("security|vuln|injection|crypto|auth|xss|xxe|ssrf|idor"; "i")) then "security"
+          elif (.check_id // "" | test("correctness|bug|error|type-error|null-deref"; "i")) then "correctness"
+          elif (.check_id // "" | test("performance|complexity|n-plus-one"; "i")) then "performance"
+          elif (.check_id // "" | test("reliability|timeout|retry|resource-leak"; "i")) then "reliability"
           else "maintainability"
           end
         ),
@@ -606,8 +621,16 @@ fi
 # --- gitleaks ---
 if command -v gitleaks >/dev/null 2>&1; then
   (
-    # gitleaks detect — write JSON report to a separate file (run_tool captures stdout separately)
-    run_tool gitleaks 60 gitleaks detect --source . --report-format json --report-path "$SCRATCH/gitleaks_report.json" --no-git --exit-code 0
+    # Scope gitleaks to changed files only — scanning the full repo (--source .)
+    # is too slow (40s+ CPU on medium repos). Create a temp dir with symlinks to
+    # changed files, and scan that instead.
+    GITLEAKS_SRC="$SCRATCH/gitleaks_src"
+    for gf in "${FILES[@]}"; do
+      gf_dir="$GITLEAKS_SRC/$(dirname "$gf")"
+      mkdir -p "$gf_dir" 2>/dev/null
+      ln -sf "$(pwd)/$gf" "$GITLEAKS_SRC/$gf" 2>/dev/null
+    done
+    run_tool gitleaks 60 gitleaks detect --source "$GITLEAKS_SRC" --report-format json --report-path "$SCRATCH/gitleaks_report.json" --no-git --follow-symlinks --exit-code 0
   ) &
   TIER1_PIDS="$TIER1_PIDS $!"
 else
@@ -652,16 +675,19 @@ for tool_key in semgrep trivy osv_scanner gitleaks shellcheck; do
       semgrep)
         if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
           normalize_semgrep < "$SCRATCH/semgrep.out" > "$SCRATCH/findings/semgrep.json"
+          check_normalized "$SCRATCH/findings/semgrep.json" "semgrep"
         fi
         ;;
       trivy)
         if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
           normalize_trivy < "$SCRATCH/trivy.out" > "$SCRATCH/findings/trivy.json"
+          check_normalized "$SCRATCH/findings/trivy.json" "trivy"
         fi
         ;;
       osv_scanner)
         if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
           normalize_osv < "$SCRATCH/osv_scanner.out" > "$SCRATCH/findings/osv_scanner.json"
+          check_normalized "$SCRATCH/findings/osv_scanner.json" "osv-scanner"
         fi
         ;;
       gitleaks)
@@ -723,11 +749,7 @@ TIER2_PIDS=""
 if $HAS_RUST; then
   if command -v cargo >/dev/null 2>&1; then
     (
-      if [ -f "clippy.toml" ] || [ -f ".clippy.toml" ] || grep -q '\[clippy\]' Cargo.toml 2>/dev/null; then
-        run_tool clippy 120 cargo clippy --message-format=json --quiet -- -W clippy::all 2>&1
-      else
-        run_tool clippy 120 cargo clippy --message-format=json --quiet -- -W clippy::all 2>&1
-      fi
+      run_tool clippy 120 cargo clippy --message-format=json --quiet -- -W clippy::all
     ) &
     TIER2_PIDS="$TIER2_PIDS $!"
   else
@@ -923,7 +945,7 @@ SONAR_SCRIPT="${HOME}/.claude/skills/sonarqube/scripts/sonarqube.py"
 if [ ! -f "$SONAR_SCRIPT" ]; then
   SONAR_SCRIPT="${HOME}/.codex/skills/sonarqube/scripts/sonarqube.py"
 fi
-SONAR_OUT_DIR="/tmp/codereview-sonar-${RUN_ID}"
+SONAR_OUT_DIR="$SCRATCH/sonar-out"
 mkdir -p "$SONAR_OUT_DIR" 2>/dev/null || true
 
 if [ -f "$SONAR_SCRIPT" ] && command -v python3 >/dev/null 2>&1; then
@@ -941,8 +963,10 @@ fi
 if [ -n "$PROJECT_PROFILE" ] && [ -f "$PROJECT_PROFILE" ]; then
   log "Processing project profile: $PROJECT_PROFILE"
 
-  # Extract lint/check commands from the project profile
-  # The profile may have contexts[].lint_commands[] or similar
+  # Extract lint/check commands from the project profile.
+  # NOTE: discover-project.py does not currently emit lint_commands.
+  # The orchestrating agent must populate this field in the profile JSON
+  # after interpreting the build_files output from discover-project.py.
   PROJ_CMD_INDEX=0
   # Read commands from the profile — look for lint_commands array
   PROJ_CMDS_JSON="$(jq -r '
