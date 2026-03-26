@@ -127,8 +127,11 @@ def fuzzy_match(finding_a: dict, finding_b: dict) -> bool:
     if finding_a.get("severity") != finding_b.get("severity"):
         return False
 
-    tokens_a = stemmed_tokens(finding_a.get("summary", ""))
-    tokens_b = stemmed_tokens(finding_b.get("summary", ""))
+    # Use summary_snippet as fallback (suppression records store truncated summary)
+    summary_a = finding_a.get("summary") or finding_a.get("summary_snippet", "")
+    summary_b = finding_b.get("summary") or finding_b.get("summary_snippet", "")
+    tokens_a = stemmed_tokens(summary_a)
+    tokens_b = stemmed_tokens(summary_b)
 
     if not tokens_a or not tokens_b:
         return False
@@ -220,8 +223,15 @@ def load_changed_files(path: str) -> set:
         return set()
 
 
-def auto_discover_previous_review(scope: str, base_ref: str, reviews_dir: str = ".agents/reviews") -> str | None:
-    """Scan .agents/reviews/ for most recent file matching scope and base_ref."""
+def auto_discover_previous_review(
+    scope: str, base_ref: str, head_ref: str = "",
+    reviews_dir: str = ".agents/reviews",
+) -> str | None:
+    """Scan .agents/reviews/ for most recent file matching scope, base_ref, and head_ref.
+
+    Including head_ref prevents cross-branch contamination: reviews from branch A
+    won't be selected as "previous" for branch B even if both target the same base.
+    """
     if not os.path.isdir(reviews_dir):
         return None
 
@@ -233,10 +243,13 @@ def auto_discover_previous_review(scope: str, base_ref: str, reviews_dir: str = 
         try:
             with open(fpath, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-            if data.get("scope") == scope and data.get("base_ref") == base_ref:
-                # Use file mtime for recency
-                mtime = os.path.getmtime(fpath)
-                candidates.append((mtime, fpath))
+            if data.get("scope") != scope or data.get("base_ref") != base_ref:
+                continue
+            # Match head_ref when provided (prevents cross-branch selection)
+            if head_ref and data.get("head_ref", "") != head_ref:
+                continue
+            mtime = os.path.getmtime(fpath)
+            candidates.append((mtime, fpath))
         except (json.JSONDecodeError, OSError):
             continue
 
@@ -353,16 +366,16 @@ def apply_suppressions(
         matched_suppression = None
         match_type = None  # "exact" or "fuzzy"
 
-        # 1. Exact fingerprint match
-        for s in suppressions:
+        # 1. Exact fingerprint match (iterate in reverse so latest entry wins)
+        for s in reversed(suppressions):
             if fp and s.get("fingerprint") == fp:
                 matched_suppression = s
                 match_type = "exact"
                 break
 
-        # 2. Fuzzy match (if no exact match)
+        # 2. Fuzzy match (if no exact match, latest entry wins)
         if matched_suppression is None:
-            for s in suppressions:
+            for s in reversed(suppressions):
                 if fuzzy_match(f, s):
                     matched_suppression = s
                     match_type = "fuzzy"
@@ -410,8 +423,8 @@ def apply_suppressions(
                     and f.get("pass") == matched_suppression.get("pass")
                 )
             elif deferred_scope == "exact":
-                # Resurface only on exact fingerprint match
-                should_resurface = match_type == "exact"
+                # Resurface only on exact fingerprint match AND file is in changed files
+                should_resurface = match_type == "exact" and file_path in changed_files
             else:
                 # Unknown scope -> default to file behavior
                 should_resurface = file_path in changed_files
@@ -462,7 +475,9 @@ def run_lifecycle(args) -> dict:
     if args.previous_review:
         previous_findings = load_previous_review(args.previous_review)
     elif args.scope and args.base_ref:
-        discovered = auto_discover_previous_review(args.scope, args.base_ref)
+        discovered = auto_discover_previous_review(
+            args.scope, args.base_ref, head_ref=args.head_ref,
+        )
         if discovered:
             print(f"Auto-discovered previous review: {discovered}", file=sys.stderr)
             previous_findings = load_previous_review(discovered)
@@ -713,6 +728,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--base-ref",
         default="",
         help="Base ref (for auto-discovering previous review).",
+    )
+    parser.add_argument(
+        "--head-ref",
+        default="",
+        help="Head ref / source branch (prevents cross-branch prior review selection).",
     )
     parser.add_argument(
         "--raw",
