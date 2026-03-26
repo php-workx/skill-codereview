@@ -136,9 +136,9 @@ If a deterministic tool already reported the same issue, remove the AI finding. 
 
 After deduplication, look for insights that emerge from combining findings across explorers:
 
-1. **Uncovered new code**: If the correctness explorer found a new code path but the test explorer did NOT flag missing tests for it, add a test gap finding yourself.
-2. **Module hotspots**: If 3+ findings (from any explorers) cluster in the same module/file, note this as a pattern — the module may need broader refactoring attention.
-3. **Consistency issues**: If the change introduces patterns that contradict existing code in the same module (e.g., different error handling style), note it.
+1. **Uncovered new code**: If the correctness explorer found a new code path but the test explorer did NOT flag missing tests for it, annotate the existing correctness finding with a test-gap note. Do NOT create a new finding — only findings that went through Gatekeeper and Verifier may appear in the final output.
+2. **Module hotspots**: If 3+ findings (from any explorers) cluster in the same module/file, add a note to the highest-severity finding in that cluster. Do not create a standalone hotspot finding.
+3. **Consistency issues**: If the change introduces patterns that contradict existing code in the same module (e.g., different error handling style), annotate an existing finding with this context.
 4. **Positive-negative balance**: Ensure the review is not purely negative. If explorers found many issues in one area but the code is strong in another, note the strength.
 
 ### 3d. Contradiction Resolution
@@ -184,7 +184,7 @@ If no spec-verification explorer ran but a spec is in the context, fall back to 
 For each requirement the spec-verification explorer marked as `implemented`:
 - Spot-check 2-3 with **Read** to verify the `impl_evidence` is real.
 - **Behavioral verification**: Don't just confirm the code exists — verify its **behavior** matches the spec. For requirements that define decision rules, matrices, state machines, or conditional logic: read the actual code and check that each rule/cell/transition matches the spec's definition. A function existing with the right name and having tests does NOT mean it implements the spec correctly.
-- If another explorer found a bug in the same implementation file, note the requirement as `partial` with the bug reference, even if the code exists.
+- If another explorer found a bug that overlaps this requirement's `impl_evidence` or directly violates its behavior, note the requirement as `partial` with the bug reference. Do NOT downgrade for unrelated bugs that happen to be in the same file.
 - If `impl_evidence` references code that doesn't exist, mark as `cannot_determine`.
 - If the behavior deviates from the spec (even if the function exists and has tests), mark as `partial` and describe the deviation.
 

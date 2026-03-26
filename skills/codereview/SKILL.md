@@ -67,17 +67,17 @@ description: 'Use when reviewing local code changes — staged files, branches, 
 
 Record timing for observability throughout the review. This data helps identify bottlenecks and optimize the pipeline.
 
-At the start of each review:
+At the start of each review, if `scripts/timing.sh` exists:
 ```bash
-bash scripts/timing.sh reset
-bash scripts/timing.sh start "review_total"
+[ -f scripts/timing.sh ] && bash scripts/timing.sh reset
+[ -f scripts/timing.sh ] && bash scripts/timing.sh start "review_total"
 ```
 
-Wrap each major step with timing calls:
+Wrap each major step with timing calls (skip silently if timing.sh is absent):
 ```bash
-bash scripts/timing.sh start "<step_name>"
+[ -f scripts/timing.sh ] && bash scripts/timing.sh start "<step_name>"
 # ... step execution ...
-bash scripts/timing.sh stop "<step_name>"
+[ -f scripts/timing.sh ] && bash scripts/timing.sh stop "<step_name>"
 ```
 
 Step names to use:
@@ -102,11 +102,11 @@ bash scripts/timing.sh mark "findings_count" "$FINDING_COUNT"
 
 After all steps:
 ```bash
-bash scripts/timing.sh stop "review_total"
-bash scripts/timing.sh summary > /tmp/codereview-timing.json
+[ -f scripts/timing.sh ] && bash scripts/timing.sh stop "review_total"
+[ -f scripts/timing.sh ] && bash scripts/timing.sh summary > /tmp/codereview-timing.json
 ```
 
-Include the timing summary in the JSON review envelope as `_timing` and in the markdown report as a "Timing" section. If `timing.sh` is not available, skip timing — it must never block the review.
+Include the timing summary in the JSON review envelope as `_timing` and in the markdown report as a "Timing" section. If `timing.sh` is not available, skip all timing calls silently — timing must never block the review.
 
 ### Step 1: Determine Review Target
 
@@ -240,7 +240,7 @@ Assign each file a risk tier. Evaluate in order — first match wins:
 - Path matches any `focus_paths` pattern from `.codereview.yaml`
 - `lines_added + lines_removed > 200`
 - Diff for this file contains new route/endpoint definitions (grep for `route|endpoint|handler|@app\.|@api\.|@router\.`)
-- Historical risk = high (from `scripts/git-risk.sh` output — file has frequent bug-related commits)
+- Historical risk = high (from `scripts/git-risk.sh` output — file has frequent bug-related commits; available after Step 2i runs; apply retroactively if Step 1.5c runs before 2i)
 
 **Tier 3 (Low-risk)** — any of (unless already Tier 1):
 - Path matches any `ignore_paths` pattern from `.codereview.yaml`
