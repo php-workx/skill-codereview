@@ -37,6 +37,11 @@ EXTENSION_LANGUAGE = {
     ".js": "typescript",
     ".tsx": "typescript",
     ".jsx": "typescript",
+    ".rb": "ruby",
+    ".rake": "ruby",
+    ".java": "java",
+    ".kt": "java",
+    ".scala": "java",
 }
 
 # Test file patterns to exclude from coverage output
@@ -49,6 +54,11 @@ TEST_PATTERNS = [
     re.compile(r"__tests__/"),
     re.compile(r"tests?/test_"),
     re.compile(r"tests?/.*_test\."),
+    re.compile(r"[^/]*_spec\.rb$"),
+    re.compile(r"spec/"),
+    re.compile(r"[^/]*Test\.java$"),
+    re.compile(r"[^/]*Tests\.java$"),
+    re.compile(r"src/test/"),
 ]
 
 # Coverage artifact paths to check, per language (checked in order)

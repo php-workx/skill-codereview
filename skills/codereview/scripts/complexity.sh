@@ -29,13 +29,17 @@ fi
 # --- Read file list from stdin (safe file-path handling) ---
 PY_FILES=()
 GO_FILES=()
+RUBY_FILES=()
+JAVA_FILES=()
 
 while IFS= read -r file; do
   # Skip empty lines
   [ -z "$file" ] && continue
   case "$file" in
-    *.py)  PY_FILES[${#PY_FILES[@]}]="$file" ;;
-    *.go)  GO_FILES[${#GO_FILES[@]}]="$file" ;;
+    *.py)    PY_FILES[${#PY_FILES[@]}]="$file" ;;
+    *.go)    GO_FILES[${#GO_FILES[@]}]="$file" ;;
+    *.rb)    RUBY_FILES[${#RUBY_FILES[@]}]="$file" ;;
+    *.java)  JAVA_FILES[${#JAVA_FILES[@]}]="$file" ;;
   esac
 done
 

@@ -190,7 +190,7 @@
     },
     "tool_status": {
       "type": "object",
-      "description": "Status of each tool/pass that was attempted. Keys include deterministic scan tools (semgrep, trivy, etc.), AI passes (ai_correctness, ai_security, etc.), and coverage tools (coverage_go, coverage_python, coverage_rust, coverage_typescript).",
+      "description": "Status of each tool/pass that was attempted. Keys include deterministic scan tools (semgrep, trivy, rubocop, brakeman, pmd, etc.), AI passes (ai_correctness, ai_security, etc.), and coverage tools (coverage_go, coverage_python, coverage_rust, coverage_typescript, coverage_ruby, coverage_java).",
       "additionalProperties": {
         "type": "object",
         "required": ["status"],

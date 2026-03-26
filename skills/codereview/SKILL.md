@@ -538,7 +538,7 @@ Omit `--project-profile` if project discovery (Step 2a-1) was skipped or failed.
 
 The script handles all deterministic tooling in three tiers:
 - **Tier 1 (baseline, always run):** semgrep, trivy, osv-scanner, gitleaks, shellcheck
-- **Tier 2 (language-detected):** clippy (Rust), ruff (Python), golangci-lint (Go), eslint (JS/TS if config exists)
+- **Tier 2 (language-detected):** clippy (Rust), ruff (Python), golangci-lint (Go), eslint (JS/TS if config exists), rubocop (Ruby), brakeman (Ruby/Rails security), pmd (Java/Kotlin/Scala)
 - **Tier 3 (project-configured):** commands from `--project-profile` (discovered in Step 2a-1)
 
 The script runs tools in parallel with per-tool timeouts, normalizes all output to the standard finding shape, deduplicates across tiers, and outputs `{ "findings": [...], "tool_status": {...} }`.

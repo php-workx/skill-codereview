@@ -32,6 +32,10 @@ PROJECT_MARKERS = [
     "pyproject.toml",
     "setup.cfg",
     "setup.py",
+    "Gemfile",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
     "Makefile",
     "Justfile",
     "Taskfile.yml",
@@ -47,6 +51,10 @@ MARKER_LANGUAGE = {
     "pyproject.toml": "python",
     "setup.cfg": "python",
     "setup.py": "python",
+    "Gemfile": "ruby",
+    "pom.xml": "java",
+    "build.gradle": "java",
+    "build.gradle.kts": "java",
     "Makefile": "unknown",
     "Justfile": "unknown",
     "Taskfile.yml": "unknown",
@@ -84,6 +92,10 @@ TOOL_CONFIG_PATTERNS = [
     ("prettier.config.cjs", "prettier"),
     ("mypy.ini", "mypy"),
     (".mypy.ini", "mypy"),
+    (".rubocop.yml", "rubocop"),
+    (".rubocop.yaml", "rubocop"),
+    ("pmd.xml", "pmd"),
+    ("pmd-ruleset.xml", "pmd"),
 ]
 
 # Monorepo orchestrator files (checked at repo root and context roots)

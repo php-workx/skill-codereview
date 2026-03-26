@@ -85,6 +85,8 @@ HAS_RUST=false
 HAS_PYTHON=false
 HAS_GO=false
 HAS_JS=false
+HAS_RUBY=false
+HAS_JAVA=false
 SH_FILES=()
 
 for f in "${FILES[@]}"; do
@@ -93,6 +95,8 @@ for f in "${FILES[@]}"; do
     *.py)                    HAS_PYTHON=true ;;
     *.go)                    HAS_GO=true ;;
     *.ts|*.tsx|*.js|*.jsx)   HAS_JS=true ;;
+    *.rb|*.rake|*.gemspec)   HAS_RUBY=true ;;
+    *.java|*.kt|*.scala)     HAS_JAVA=true ;;
     *.sh)                    SH_FILES+=("$f") ;;
   esac
 done
