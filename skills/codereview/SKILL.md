@@ -961,16 +961,20 @@ python3 scripts/enrich-findings.py \
 The script mechanically performs:
 - Assigns `source` ("deterministic" / "ai") and generates stable `id` per finding
 - Applies confidence floor (drops AI findings below threshold)
-- Evidence check (high/critical without `failure_mode` → downgrade to medium)
 - Assigns `action_tier` (Must Fix / Should Fix / Consider) per rules below
 - Ranks within each tier by `severity_weight × confidence`
-- Computes `tier_summary` counts
+- Computes `tier_summary` counts and `dropped` statistics
 
 If `python3` is not available or the script fails, fall back to performing these steps manually per the rules below.
 
 **5c. Finding lifecycle (implemented by `scripts/lifecycle.py` — do not reimplement):**
 
-Run the lifecycle script on enriched findings:
+First, write the changed files list for deferred suppression resurfacing:
+```bash
+echo "$CHANGED_FILES" > /tmp/codereview-changed-files.txt
+```
+
+Then run the lifecycle script on enriched findings:
 ```bash
 python3 scripts/lifecycle.py \
   --findings /tmp/codereview-enriched.json \
