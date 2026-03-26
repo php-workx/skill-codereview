@@ -126,6 +126,16 @@ Validation criteria for the codereview skill. Not needed at runtime — use for 
 | Suppressed findings in JSON envelope | `suppressed_findings[]` array present in output with same shape as `findings[]` but `lifecycle_status` is `rejected` or `deferred`. |
 | Lifecycle summary | `lifecycle_summary` object with `new`, `recurring`, `rejected`, `deferred`, `deferred_resurfaced` counts. All counts are non-negative integers. |
 
+## Named Expert Panel (Judge)
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| Gatekeeper discards phantom knowledge finding | Finding references a function that does not exist in the codebase. Gatekeeper sets `gatekeeper_action: "discard"` with reason "References non-existent code." Finding is excluded from Verifier input. |
+| Gatekeeper discards speculative concern | Finding says "might cause issues" with no concrete failure mode. Gatekeeper sets `gatekeeper_action: "discard"` with reason "Speculative — no concrete failure mode." Finding is excluded from Verifier input. |
+| Verifier downgrades unverified finding | Verifier cannot conclusively confirm a finding with Read/Grep but evidence is plausible. Finding marked `verification: "unverified"`, confidence reduced by 0.15. If confidence drops below 0.65, Calibrator removes it. |
+| Verifier drops disproven finding | Verifier finds a valid defense (e.g., null guard exists upstream) that contradicts the finding. Finding marked `verification: "disproven"` and dropped before Calibrator phase. |
+| Calibrator merges root cause group | Three explorers report symptoms of the same underlying issue in the same function. Calibrator merges into one finding with the highest severity, combined evidence, and the most specific fix. |
+
 ## Pipeline Scripts
 
 | Scenario | Expected Behavior |
