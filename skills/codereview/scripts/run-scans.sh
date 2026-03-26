@@ -597,11 +597,31 @@ else
 fi
 
 # --- trivy ---
+# Scope trivy to manifest/lockfiles in the changeset. Scanning the full repo
+# (trivy fs .) takes 18s+ even on small repos. Trivy only needs package manifests
+# (package.json, go.mod, Cargo.toml, etc.) to find dependency vulnerabilities.
+# Also skip DB update — use cached DB (stale data is acceptable for code review;
+# full DB refresh is a separate security audit concern).
 if command -v trivy >/dev/null 2>&1; then
-  (
-    run_tool trivy 120 trivy fs . --cache-dir "$TRIVY_CACHE_DIR" --format json --quiet
-  ) &
-  TIER1_PIDS="$TIER1_PIDS $!"
+  TRIVY_TARGETS=""
+  MANIFEST_PATTERNS="package.json|package-lock.json|yarn.lock|pnpm-lock.yaml|go.mod|go.sum|Cargo.toml|Cargo.lock|pyproject.toml|poetry.lock|requirements.txt|Pipfile.lock|Gemfile.lock|composer.lock"
+  for tf in "${FILES[@]}"; do
+    if echo "$tf" | grep -qE "(${MANIFEST_PATTERNS})$"; then
+      TRIVY_TARGETS="$TRIVY_TARGETS $tf"
+    fi
+  done
+  if [ -n "$TRIVY_TARGETS" ]; then
+    (
+      # Pass manifest files directly to trivy — scanning individual files is ~100ms
+      # vs 18s+ for directories. Trivy auto-discovers related lockfiles.
+      # shellcheck disable=SC2086
+      run_tool trivy 60 trivy fs $TRIVY_TARGETS --cache-dir "$TRIVY_CACHE_DIR" --skip-db-update --format json --quiet
+    ) &
+    TIER1_PIDS="$TIER1_PIDS $!"
+  else
+    log "trivy: skipped (no manifest/lockfiles in changed files)"
+    record_status "trivy" "skipped" "null" 0 "no manifest/lockfiles in changed files"
+  fi
 else
   log "trivy: not installed"
   record_status "trivy" "not_installed" "null" 0 "brew install trivy"
