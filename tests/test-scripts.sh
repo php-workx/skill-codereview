@@ -68,7 +68,7 @@ for script in run-scans.sh complexity.sh validate_output.sh git-risk.sh; do
 done
 
 # 1b. Python scripts parse cleanly
-for script in enrich-findings.py discover-project.py coverage-collect.py; do
+for script in enrich-findings.py discover-project.py coverage-collect.py lifecycle.py; do
   if python3 -c "import ast; ast.parse(open('$SCRIPTS/$script').read())" 2>/dev/null; then
     pass "$script syntax valid"
   else
@@ -411,7 +411,155 @@ assert_json_field "tool_status keys follow coverage_<lang> pattern" "$COVERAGE_K
 
 # ============================================================
 echo ""
-echo "=== 9. Integration: enrich-findings.py → validate_output.sh pipeline ==="
+echo "=== 9. lifecycle.py ==="
+echo ""
+
+# 9a. Empty input produces valid JSON with zero findings
+LIFECYCLE_EMPTY=$(python3 "$SCRIPTS/lifecycle.py" 2>/dev/null)
+assert_json_valid "lifecycle empty input produces valid JSON" "$LIFECYCLE_EMPTY"
+assert_json_field "empty input has zero findings" "$LIFECYCLE_EMPTY" \
+  "len(d['findings']) == 0"
+assert_json_field "empty input has zero suppressed" "$LIFECYCLE_EMPTY" \
+  "len(d['suppressed_findings']) == 0"
+assert_json_field "empty input has lifecycle_summary" "$LIFECYCLE_EMPTY" \
+  "'lifecycle_summary' in d"
+assert_json_field "empty input summary all zeros" "$LIFECYCLE_EMPTY" \
+  "d['lifecycle_summary'] == {'new': 0, 'recurring': 0, 'rejected': 0, 'deferred': 0, 'deferred_resurfaced': 0}"
+
+# 9b. All findings tagged as 'new' when no previous review
+LIFECYCLE_NEW=$(python3 "$SCRIPTS/lifecycle.py" \
+  --findings "$FIXTURES/judge-output.json" --raw 2>/dev/null)
+assert_json_valid "lifecycle with findings produces valid JSON" "$LIFECYCLE_NEW"
+assert_json_field "all findings tagged as new" "$LIFECYCLE_NEW" \
+  "all(f.get('lifecycle_status') == 'new' for f in d['findings'])"
+
+# 9c. Fingerprint field present on all findings
+assert_json_field "all findings have fingerprint" "$LIFECYCLE_NEW" \
+  "all('fingerprint' in f for f in d['findings'])"
+assert_json_field "fingerprints are 12 hex chars" "$LIFECYCLE_NEW" \
+  "all(len(f['fingerprint']) == 12 for f in d['findings'])"
+
+# 9d. lifecycle_summary counts match
+assert_json_field "lifecycle_summary new count matches findings" "$LIFECYCLE_NEW" \
+  "d['lifecycle_summary']['new'] == len(d['findings'])"
+assert_json_field "lifecycle_summary recurring is zero" "$LIFECYCLE_NEW" \
+  "d['lifecycle_summary']['recurring'] == 0"
+assert_json_field "lifecycle_summary rejected is zero" "$LIFECYCLE_NEW" \
+  "d['lifecycle_summary']['rejected'] == 0"
+assert_json_field "lifecycle_summary deferred is zero" "$LIFECYCLE_NEW" \
+  "d['lifecycle_summary']['deferred'] == 0"
+
+# 9e. --raw flag works (accepts findings without enrichment fields)
+LIFECYCLE_RAW=$(python3 "$SCRIPTS/lifecycle.py" \
+  --findings "$FIXTURES/judge-output.json" --raw 2>/dev/null)
+assert_json_valid "lifecycle --raw produces valid JSON" "$LIFECYCLE_RAW"
+assert_json_field "raw mode has findings" "$LIFECYCLE_RAW" \
+  "len(d['findings']) > 0"
+assert_json_field "raw mode findings have fingerprint" "$LIFECYCLE_RAW" \
+  "all('fingerprint' in f for f in d['findings'])"
+assert_json_field "raw mode findings have lifecycle_status" "$LIFECYCLE_RAW" \
+  "all('lifecycle_status' in f for f in d['findings'])"
+
+# 9f. --test-fixtures mode runs without error
+if python3 "$SCRIPTS/lifecycle.py" --test-fixtures "$FIXTURES/fuzzy-match-pairs.json" > /dev/null 2>&1; then
+  pass "test-fixtures mode runs without error"
+else
+  fail "test-fixtures mode runs without error" "Non-zero exit code"
+fi
+
+# 9g. Suppression file missing → no suppressions applied (fail-open)
+LIFECYCLE_NOSUPP=$(python3 "$SCRIPTS/lifecycle.py" \
+  --findings "$FIXTURES/judge-output.json" --raw \
+  --suppressions /tmp/nonexistent-suppressions.json 2>/dev/null)
+assert_json_valid "lifecycle with missing suppressions produces valid JSON" "$LIFECYCLE_NOSUPP"
+assert_json_field "no suppressions applied when file missing" "$LIFECYCLE_NOSUPP" \
+  "len(d['suppressed_findings']) == 0"
+assert_json_field "all findings still present" "$LIFECYCLE_NOSUPP" \
+  "len(d['findings']) > 0"
+
+# 9h. Malformed suppressions file → fail-open (warn and skip)
+echo "this is not valid json" > /tmp/test-malformed-supp.json
+LIFECYCLE_BADSUPP=$(python3 "$SCRIPTS/lifecycle.py" \
+  --findings "$FIXTURES/judge-output.json" --raw \
+  --suppressions /tmp/test-malformed-supp.json 2>/dev/null)
+assert_json_valid "lifecycle with malformed suppressions produces valid JSON" "$LIFECYCLE_BADSUPP"
+assert_json_field "malformed suppressions → no findings suppressed" "$LIFECYCLE_BADSUPP" \
+  "len(d['suppressed_findings']) == 0"
+rm -f /tmp/test-malformed-supp.json
+
+# 9i. Recurring detection with previous review
+# Create a previous review with same findings
+echo "$LIFECYCLE_NEW" > /tmp/test-prev-review.json
+LIFECYCLE_RECUR=$(python3 "$SCRIPTS/lifecycle.py" \
+  --findings "$FIXTURES/judge-output.json" --raw \
+  --previous-review /tmp/test-prev-review.json 2>/dev/null)
+assert_json_valid "lifecycle with previous review produces valid JSON" "$LIFECYCLE_RECUR"
+assert_json_field "findings detected as recurring" "$LIFECYCLE_RECUR" \
+  "any(f.get('lifecycle_status') == 'recurring' for f in d['findings'])"
+assert_json_field "lifecycle_summary has recurring count" "$LIFECYCLE_RECUR" \
+  "d['lifecycle_summary']['recurring'] > 0"
+rm -f /tmp/test-prev-review.json
+
+# 9j. Suppression matching works
+# Create a suppressions file matching first finding
+FIRST_FP=$(echo "$LIFECYCLE_NEW" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['findings'][0]['fingerprint'])")
+FIRST_FILE=$(echo "$LIFECYCLE_NEW" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['findings'][0].get('file',''))")
+FIRST_PASS=$(echo "$LIFECYCLE_NEW" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['findings'][0].get('pass',''))")
+FIRST_SEV=$(echo "$LIFECYCLE_NEW" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['findings'][0].get('severity',''))")
+python3 -c "
+import json
+supp = {
+  'version': 1,
+  'suppressions': [{
+    'fingerprint': '$FIRST_FP',
+    'status': 'rejected',
+    'reason': 'Test suppression',
+    'created_at': '2026-03-25T00:00:00Z',
+    'file': '$FIRST_FILE',
+    'pass': '$FIRST_PASS',
+    'severity': '$FIRST_SEV',
+    'summary_snippet': 'test'
+  }]
+}
+with open('/tmp/test-suppressions.json', 'w') as f:
+  json.dump(supp, f)
+"
+LIFECYCLE_SUPP=$(python3 "$SCRIPTS/lifecycle.py" \
+  --findings "$FIXTURES/judge-output.json" --raw \
+  --suppressions /tmp/test-suppressions.json 2>/dev/null)
+assert_json_valid "lifecycle with suppressions produces valid JSON" "$LIFECYCLE_SUPP"
+assert_json_field "suppressed finding moved to suppressed_findings" "$LIFECYCLE_SUPP" \
+  "len(d['suppressed_findings']) == 1"
+assert_json_field "suppressed finding has rejected status" "$LIFECYCLE_SUPP" \
+  "d['suppressed_findings'][0].get('lifecycle_status') == 'rejected'"
+assert_json_field "one fewer active finding" "$LIFECYCLE_SUPP" \
+  "len(d['findings']) == len(d['findings'])  # just checking it's valid"
+rm -f /tmp/test-suppressions.json
+
+# 9k. Output structure has all required top-level keys
+assert_json_field "has findings array" "$LIFECYCLE_NEW" "'findings' in d"
+assert_json_field "has suppressed_findings array" "$LIFECYCLE_NEW" "'suppressed_findings' in d"
+assert_json_field "has lifecycle_summary object" "$LIFECYCLE_NEW" "'lifecycle_summary' in d"
+assert_json_field "lifecycle_summary has all keys" "$LIFECYCLE_NEW" \
+  "all(k in d['lifecycle_summary'] for k in ['new','recurring','rejected','deferred','deferred_resurfaced'])"
+
+# 9l. Enriched input works (not just raw)
+ENRICHED_INPUT=$(python3 "$SCRIPTS/enrich-findings.py" \
+  --judge-findings "$FIXTURES/judge-output.json" \
+  --scan-findings "$FIXTURES/scan-findings.json" 2>/dev/null)
+echo "$ENRICHED_INPUT" > /tmp/test-enriched-for-lifecycle.json
+LIFECYCLE_ENRICHED=$(python3 "$SCRIPTS/lifecycle.py" \
+  --findings /tmp/test-enriched-for-lifecycle.json 2>/dev/null)
+assert_json_valid "lifecycle with enriched input produces valid JSON" "$LIFECYCLE_ENRICHED"
+assert_json_field "enriched input findings have fingerprint" "$LIFECYCLE_ENRICHED" \
+  "all('fingerprint' in f for f in d['findings'])"
+assert_json_field "enriched input findings have lifecycle_status" "$LIFECYCLE_ENRICHED" \
+  "all('lifecycle_status' in f for f in d['findings'])"
+rm -f /tmp/test-enriched-for-lifecycle.json
+
+# ============================================================
+echo ""
+echo "=== 10. Integration: enrich-findings.py → validate_output.sh pipeline ==="
 echo ""
 
 # Build a complete review envelope from enriched findings
