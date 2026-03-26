@@ -7,7 +7,7 @@ The codereview skill supports optional repo-level configuration via `.codereview
 ```yaml
 # .codereview.yaml (optional)
 
-# Which review passes to run (default: all 7)
+# Which review passes to run (default: all 8)
 passes:
   # Core passes (always run unless removed)
   - correctness
@@ -18,6 +18,7 @@ passes:
   - error-handling
   - api-contract
   - concurrency
+  - spec-verification  # runs only when --spec is provided
 
 # Minimum confidence for AI findings (default: 0.65)
 confidence_floor: 0.65
@@ -62,7 +63,7 @@ custom_instructions: |
 
 ### `passes`
 
-Which AI review passes to run. Default: all 7 (4 core + 3 extended).
+Which AI review passes to run. Default: all 8 (4 core + 4 extended).
 
 **Core passes** — always run when listed:
 
@@ -80,8 +81,19 @@ Which AI review passes to run. Default: all 7 (4 core + 3 extended).
 | `error-handling` | Swallowed exceptions, missing error propagation, inconsistent patterns | Diff is test/docs/config only |
 | `api-contract` | Breaking API changes, missing backward compatibility, contract violations | No public API surface changes in diff |
 | `concurrency` | Race conditions, deadlocks, shared mutable state, goroutine/thread leaks | No concurrency primitives in diff |
+| `spec-verification` | Requirement tracing, implementation status, test category adequacy | No spec loaded (`--spec` not provided) |
 
-Extended passes are automatically skipped when their skip signal triggers. Use `force_all_passes: true` to override.
+Extended passes are automatically skipped when their skip signal triggers. Use `force_all_passes: true` to override (except `spec-verification`, which always requires `--spec`).
+
+### `--spec-scope`
+
+CLI flag (not a config file option) to restrict spec verification to a specific section or milestone:
+
+```bash
+/codereview --spec docs/plan.md --spec-scope "Authentication" --base main
+```
+
+The spec-verification explorer matches the scope text against section headings (case-insensitive substring match) and milestone labels. If no match is found, it falls back to the full document with a warning.
 
 ### `confidence_floor`
 
@@ -145,6 +157,56 @@ Glob patterns for high-priority paths. Findings in these paths get slightly boos
 
 Free-text instructions included in the context packet for all review passes. Use this for repo-specific conventions that the AI should enforce.
 
+### `large_diff`
+
+Settings for large changeset (chunked) review mode. The skill automatically activates chunked mode when the diff exceeds file or line count thresholds. All settings have sensible defaults.
+
+```yaml
+large_diff:
+  # File count that triggers chunked mode (default: 80)
+  file_threshold: 80
+
+  # Diff line count that triggers chunked mode (default: 8000)
+  line_threshold: 8000
+
+  # Maximum files per review chunk (default: 15)
+  max_chunk_files: 15
+
+  # Maximum diff lines per review chunk (default: 2000)
+  max_chunk_lines: 2000
+
+  # Maximum parallel explorer sub-agents per wave (default: 12)
+  max_parallel_explorers: 12
+
+  # Model for cross-chunk synthesis agent (default: null = session default)
+  cross_chunk_model: null
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `file_threshold` | 80 | File count that triggers chunked mode |
+| `line_threshold` | 8000 | Diff line count that triggers chunked mode |
+| `max_chunk_files` | 15 | Maximum files per chunk |
+| `max_chunk_lines` | 2000 | Maximum diff lines per chunk |
+| `max_parallel_explorers` | 12 | Maximum parallel Task calls per wave |
+| `cross_chunk_model` | `null` | Model for cross-chunk synthesizer |
+
+### `--no-chunk` (CLI flag)
+
+Force standard (non-chunked) review mode even when the diff exceeds large-diff thresholds. Useful when you want the original single-explorer behavior and accept potential context truncation.
+
+```bash
+/codereview --base main --no-chunk
+```
+
+### `--force-chunk` (CLI flag)
+
+Force chunked review mode even when the diff is below thresholds. Useful for testing the chunked pipeline on small diffs.
+
+```bash
+/codereview --force-chunk
+```
+
 ## Precedence
 
 If multiple configuration sources exist:
@@ -156,10 +218,11 @@ If multiple configuration sources exist:
 ## No Config Required
 
 If no `.codereview.yaml` exists, the skill uses defaults:
-- All 7 passes enabled (4 core + 3 extended)
+- All 8 passes enabled (4 core + 4 extended)
 - 0.65 confidence floor
 - Manual cadence
 - fix-all pushback
 - sonnet model for all explorers
-- Adaptive skip enabled
+- Adaptive skip enabled (spec-verification only runs with `--spec`)
 - No ignored or focused paths
+- Chunked mode auto-activates at 80 files or 8000 diff lines

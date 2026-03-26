@@ -4,7 +4,7 @@
 #
 # Checks:
 #  1.  findings.json is valid JSON
-#  2.  Required envelope fields (run_id, timestamp, scope, base_ref, head_ref, verdict, verdict_reason, strengths, files_reviewed, tool_status, findings, tier_summary)
+#  2.  Required envelope fields (run_id, timestamp, scope, base_ref, head_ref, verdict, verdict_reason, strengths, files_reviewed, tool_status, findings, tier_summary, spec_requirements, review_mode)
 #  2b. Verdict value is PASS/WARN/FAIL
 #  2c. Strengths is an array (if present)
 #  2d. Spec gaps is an array (if present)
@@ -20,7 +20,15 @@
 #  9.  Action tier classification on every finding
 #  9b. Valid action_tier values
 #  10. Tier summary consistency
+#  10b. review_mode field validation (standard/chunked)
+#  10c. Chunked mode: chunk metadata validation (chunk_count, chunks array, required fields, risk_tier)
 #  11. Report markdown: verdict, strengths, tier sections, summary
+#  12. spec_requirements array validation (if present)
+#  12a. Required fields (id, text, source_section, impl_status)
+#  12b. Valid impl_status values
+#  12c. Valid priority values (if present)
+#  12d. Valid test_coverage.status (if present)
+#  12e. Valid test category values (if present)
 
 set -euo pipefail
 
@@ -60,7 +68,7 @@ echo "PASS: Valid JSON"
 
 # 2. Required envelope fields
 ENVELOPE_ERRORS=0
-for field in run_id timestamp scope base_ref head_ref verdict verdict_reason strengths files_reviewed tool_status findings tier_summary; do
+for field in run_id timestamp scope base_ref head_ref verdict verdict_reason strengths files_reviewed tool_status findings tier_summary spec_requirements review_mode; do
   if [ "$(jq "has(\"$field\")" "$FINDINGS")" != "true" ]; then
     echo "FAIL: Missing required envelope field: $field"
     ENVELOPE_ERRORS=$((ENVELOPE_ERRORS + 1))
@@ -167,7 +175,7 @@ else
 fi
 
 # 7b. Valid pass values
-BAD_PASS=$(jq '[.findings[] | select(.pass | IN("correctness","security","reliability","performance","testing","maintainability") | not)] | length' "$FINDINGS")
+BAD_PASS=$(jq '[.findings[] | select(.pass | IN("correctness","security","reliability","performance","testing","maintainability","spec_verification") | not)] | length' "$FINDINGS")
 if [ "$BAD_PASS" -gt 0 ]; then
   echo "FAIL: $BAD_PASS findings with invalid pass value"
   ERRORS=$((ERRORS + 1))
@@ -221,6 +229,125 @@ if [ "$(jq 'has("tier_summary")' "$FINDINGS")" = "true" ]; then
     echo "WARN: tier_summary counts ($TOTAL) don't match findings count ($FINDING_COUNT)"
   else
     echo "PASS: tier_summary consistent (must_fix=$MUST, should_fix=$SHOULD, consider=$CONSIDER)"
+  fi
+fi
+
+# 10b. review_mode field validation
+if [ "$(jq 'has("review_mode")' "$FINDINGS")" = "true" ]; then
+  REVIEW_MODE=$(jq -r '.review_mode' "$FINDINGS")
+  case "$REVIEW_MODE" in
+    standard|chunked) echo "PASS: review_mode valid ($REVIEW_MODE)" ;;
+    *) echo "FAIL: Invalid review_mode: $REVIEW_MODE (must be standard/chunked)"; ERRORS=$((ERRORS + 1)) ;;
+  esac
+
+  # 10c. Chunked mode: validate chunk metadata
+  if [ "$REVIEW_MODE" = "chunked" ]; then
+    if [ "$(jq 'has("chunk_count")' "$FINDINGS")" != "true" ]; then
+      echo "FAIL: chunked mode requires chunk_count field"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS: chunk_count present ($(jq '.chunk_count' "$FINDINGS"))"
+    fi
+
+    if [ "$(jq 'has("chunks")' "$FINDINGS")" != "true" ]; then
+      echo "FAIL: chunked mode requires chunks array"
+      ERRORS=$((ERRORS + 1))
+    elif [ "$(jq '.chunks | type' "$FINDINGS")" != '"array"' ]; then
+      echo "FAIL: chunks must be an array"
+      ERRORS=$((ERRORS + 1))
+    else
+      CHUNK_COUNT=$(jq '.chunks | length' "$FINDINGS")
+      DECLARED_CHUNK_COUNT=$(jq '.chunk_count' "$FINDINGS")
+      echo "INFO: $CHUNK_COUNT chunks"
+
+      # Validate chunk_count matches actual array length
+      if [ "$DECLARED_CHUNK_COUNT" -ne "$CHUNK_COUNT" ]; then
+        echo "FAIL: chunk_count ($DECLARED_CHUNK_COUNT) does not match chunks array length ($CHUNK_COUNT)"
+        ERRORS=$((ERRORS + 1))
+      else
+        echo "PASS: chunk_count matches chunks array length"
+      fi
+
+      # Validate required fields in each chunk
+      BAD_CHUNKS=$(jq '[.chunks[] | select(.id == null or .description == null or .files == null or .file_count == null or .diff_lines == null or .risk_tier == null)] | length' "$FINDINGS")
+      if [ "$BAD_CHUNKS" -gt 0 ]; then
+        echo "FAIL: $BAD_CHUNKS chunks missing required fields (id, description, files, file_count, diff_lines, risk_tier)"
+        ERRORS=$((ERRORS + 1))
+      else
+        echo "PASS: All chunks have required fields"
+      fi
+
+      # Validate risk_tier values
+      BAD_RISK=$(jq '[.chunks[] | select(.risk_tier | IN("critical","standard","low-risk") | not)] | length' "$FINDINGS")
+      if [ "$BAD_RISK" -gt 0 ]; then
+        echo "FAIL: $BAD_RISK chunks with invalid risk_tier"
+        ERRORS=$((ERRORS + 1))
+      else
+        echo "PASS: Chunk risk_tier values valid"
+      fi
+    fi
+  fi
+else
+  echo "FAIL: Missing review_mode field (must be 'standard' or 'chunked')"
+  ERRORS=$((ERRORS + 1))
+fi
+
+# 12. spec_requirements validation
+if [ "$(jq 'has("spec_requirements")' "$FINDINGS")" != "true" ]; then
+  echo "FAIL: Missing required field: spec_requirements"
+  ERRORS=$((ERRORS + 1))
+elif [ "$(jq 'has("spec_requirements")' "$FINDINGS")" = "true" ]; then
+  if [ "$(jq '.spec_requirements | type' "$FINDINGS")" != '"array"' ]; then
+    echo "FAIL: spec_requirements must be an array"
+    ERRORS=$((ERRORS + 1))
+  else
+    SPEC_REQ_COUNT=$(jq '.spec_requirements | length' "$FINDINGS")
+    echo "INFO: $SPEC_REQ_COUNT spec requirements"
+
+    # 12a. Required fields in each spec requirement
+    BAD_SPEC_REQ=$(jq '[.spec_requirements[] | select(.id == null or .text == null or .source_section == null or .impl_status == null)] | length' "$FINDINGS")
+    if [ "$BAD_SPEC_REQ" -gt 0 ]; then
+      echo "FAIL: $BAD_SPEC_REQ spec requirements missing required fields (id, text, source_section, impl_status)"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS: All spec requirements have required fields"
+    fi
+
+    # 12b. Valid impl_status values
+    BAD_IMPL=$(jq '[.spec_requirements[] | select(.impl_status | IN("implemented","partial","not_implemented","cannot_determine") | not)] | length' "$FINDINGS")
+    if [ "$BAD_IMPL" -gt 0 ]; then
+      echo "FAIL: $BAD_IMPL spec requirements with invalid impl_status"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS: impl_status values valid"
+    fi
+
+    # 12c. Valid priority values (if present)
+    BAD_PRIORITY=$(jq '[.spec_requirements[] | select(has("priority") and (.priority | IN("must","should","could","informational") | not))] | length' "$FINDINGS")
+    if [ "$BAD_PRIORITY" -gt 0 ]; then
+      echo "FAIL: $BAD_PRIORITY spec requirements with invalid priority"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS: Priority values valid"
+    fi
+
+    # 12d. Valid test_coverage.status (if present)
+    BAD_COV=$(jq '[.spec_requirements[] | select(has("test_coverage") and (.test_coverage.status | IN("covered","partial","missing","not_applicable") | not))] | length' "$FINDINGS")
+    if [ "$BAD_COV" -gt 0 ]; then
+      echo "FAIL: $BAD_COV spec requirements with invalid test_coverage.status"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS: test_coverage.status values valid"
+    fi
+
+    # 12e. Valid test category values (if present)
+    BAD_CAT=$(jq '[.spec_requirements[] | select(has("test_coverage")) | .test_coverage.tests[]? | select(.category | IN("unit","integration","e2e","unknown") | not)] | length' "$FINDINGS")
+    if [ "$BAD_CAT" -gt 0 ]; then
+      echo "FAIL: $BAD_CAT tests with invalid category"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS: Test category values valid"
+    fi
   fi
 fi
 

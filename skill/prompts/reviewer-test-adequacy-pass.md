@@ -55,6 +55,46 @@ For changed function signatures, return values, or behavior:
    - Does the test mock a dependency that is no longer used?
 3. Stale tests give false confidence — they pass but test nothing useful.
 
+### Phase 6 — Test Category Classification
+
+For each test file you examine during Phases 1-5, classify the tests into categories. This enriches your findings with actionable guidance about which *type* of test is missing, not just that a test is missing.
+
+**Unit test** — Tests a single function/class in isolation. All external dependencies are mocked. No real I/O.
+- Signals: `unittest.mock.patch`, `jest.mock()`, `gomock`, `mockall`, `@Mock`, `sinon.stub`
+- Location: `unit/`, `__tests__/` (without integration/e2e markers)
+
+**Integration test** — Tests interaction between 2+ real components. Uses real or containerized databases, real HTTP calls to localhost, real file system.
+- Signals: test containers, docker-compose, `httptest.NewServer` (Go), `@SpringBootTest` (Java), `TestClient` with real app (Python/FastAPI), `supertest` (Node.js)
+- Location: `integration/`, `tests/integration/`
+- May mock third-party external services but uses real internal dependencies
+
+**E2E test** — Tests full user flows through the running application. Uses browser automation or calls a deployed application instance.
+- Signals: Playwright, Cypress, Selenium, Puppeteer, `page.goto()`, `cy.visit()`
+- Location: `e2e/`, `cypress/`, `playwright/`, `tests/e2e/`
+
+**Classification heuristics:**
+1. **Directory-based** (strongest): `unit/` → unit, `integration/` → integration, `e2e/` → e2e
+2. **Explicit markers**: `@pytest.mark.unit`, `//go:build integration`, `@IntegrationTest`
+3. **Mock density**: All deps mocked → unit, some mocked → integration, none mocked → integration or e2e
+4. **Infrastructure**: Test containers → integration, browser driver → e2e, in-memory only → unit
+
+When reporting test gaps, include a `test_category_needed` field as an enum array (values: `"unit"`, `"integration"`, `"e2e"`). Put the rationale for why that category is needed in the `summary` or `evidence` fields, not in `test_category_needed` itself.
+
+**Correct:**
+```json
+{
+  "summary": "Order persistence has only unit tests with mocked DB — missing integration test to catch schema drift",
+  "test_category_needed": ["integration"]
+}
+```
+
+**Incorrect:**
+```json
+{
+  "test_category_needed": ["Missing integration test — current unit test mocks the database"]
+}
+```
+
 ---
 
 ## Calibration Examples

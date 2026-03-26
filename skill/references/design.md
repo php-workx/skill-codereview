@@ -28,24 +28,25 @@ This document contains background context for the codereview skill. It is not ne
 │  - Skip concurrency pass if no concurrency primitives         │
 │  - Skip api-contract pass if no public API changes            │
 │  - Skip error-handling pass if test/docs/config only          │
+│  - Skip spec-verification pass if no spec loaded              │
 │  - Core passes (correctness, security, reliability, tests)    │
 │    are never skipped                                          │
 └──────────────────────────────────────────────────────────────┘
                               │
-    ┌────────┬────────┬───────┼───────┬────────┬────────┐
-    ▼        ▼        ▼       ▼       ▼        ▼        ▼
-┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐
-│Correct-││Secur-  ││Reliab- ││Test    ││Error   ││API/    ││Concur- │
-│ness    ││ity     ││ility   ││Adequacy││Handling││Contract││rency   │
-│        ││        ││        ││        ││        ││        ││        │
-│ core   ││ core   ││ core   ││ core   ││extended││extended││extended│
-│        ││        ││        ││        ││        ││        ││        │
-│ Each explorer: chain-of-thought investigation,              │
-│ calibration examples, false positive suppression,           │
-│ Grep/Read/Glob to verify findings                           │
-└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘
-    │         │         │         │         │         │         │
-    └─────────┴─────────┴────┬────┴─────────┴─────────┴─────────┘
+    ┌────────┬────────┬───────┼───────┬────────┬────────┬────────┐
+    ▼        ▼        ▼       ▼       ▼        ▼        ▼        ▼
+┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐
+│Correct-││Secur-  ││Reliab- ││Test    ││Error   ││API/    ││Concur- ││Spec    │
+│ness    ││ity     ││ility   ││Adequacy││Handling││Contract││rency   ││Verif.  │
+│        ││        ││        ││        ││        ││        ││        ││        │
+│ core   ││ core   ││ core   ││ core   ││extended││extended││extended││extended│
+│        ││        ││        ││+ test  ││        ││        ││        ││req→impl│
+│        ││        ││        ││category││        ││        ││        ││→tests  │
+│ Each explorer: chain-of-thought investigation, calibration            │
+│ examples, false positive suppression, Grep/Read/Glob to verify        │
+└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘
+    │         │         │         │         │         │         │         │
+    └─────────┴─────────┴────┬────┴─────────┴─────────┴─────────┴─────────┘
                              ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  Review Judge (prompts/reviewer-judge.md)                     │
@@ -54,9 +55,10 @@ This document contains background context for the codereview skill. It is not ne
 │  2. Root cause grouping (merge related findings)              │
 │  3. Cross-explorer synthesis (catch gaps across explorers)    │
 │  4. Strengths assessment (specific, not generic)              │
-│  5. Spec compliance check                                     │
+│  5. Spec compliance: merge spec-verification explorer data,    │
+│     validate impl/test claims, produce spec_requirements       │
 │  6. Verdict: PASS / WARN / FAIL                               │
-│  → Returns validated findings + verdict + strengths           │
+│  → Returns findings + verdict + strengths + spec_requirements │
 └──────────────────────────────────────────────────────────────┘
                               │
 ┌──────────────────────────────────────────────────────────────┐
@@ -110,6 +112,10 @@ This document contains background context for the codereview skill. It is not ne
 | Language standards (optional) | Give explorers concrete language-specific rules; graceful degradation if not installed | Vibe/standards skill two-tier system |
 | Dead code / YAGNI check | Avoid reviewing and fixing unused code — waste of agent time | receiving-code-review YAGNI pattern |
 | Spec/plan comparison | Check implementation completeness against requirements | requesting-code-review plan comparison |
+| Dedicated spec-verification pass | Requirement extraction, implementation tracing, and test category classification need deep investigation that doesn't fit in the judge's synthesis role | v1 gap: judge did shallow keyword matching, no test category awareness |
+| Test category classification (unit/integration/e2e) | Knowing a test exists is not enough — knowing what *kind* of test it is determines if the right failure modes are caught | User need: DB interaction tested only with mocks misses schema drift |
+| Per-requirement traceability (spec_requirements) | Flat spec_gaps list says what's missing but not what's covered or how — structured output enables downstream tooling and tracking | User need: verify spec section-by-section with evidence |
+| --spec-scope flag | Large specs cover many features; scoping avoids context pollution and irrelevant "not implemented" noise | User need: verify specific milestone or section against diff |
 | Merge verdict (PASS/WARN/FAIL) | Clear ship/no-ship signal for humans and downstream agents | Vibe/council verdict pattern, requesting-code-review assessment |
 | Strengths section | Acknowledge good patterns — review isn't just finding faults | requesting-code-review strengths output |
 | Configurable pushback level | fix-all for agent workflows, cautious for human review | User feedback: agents should fix most issues, but not rabbit-hole |
@@ -123,6 +129,75 @@ This document contains background context for the codereview skill. It is not ne
 | Envelope metadata in artifacts | run_id/timestamp/scope/tool_status/verdict make reviews traceable | Previous plan |
 | Best-effort degradation | Skip unavailable tools with explicit status rather than failing | Previous plan |
 | Repo-level config file | Teams customize passes, cadence, pushback, paths, thresholds | CodeRabbit `.coderabbit.yaml`, Gemini `config.yaml` |
+
+---
+
+## Large Changeset Support (Chunked Review Mode)
+
+For diffs exceeding 80 files or 8000 lines, the standard pipeline hits context window limits — each explorer receives the entire diff (~40-80k tokens) plus context, leaving insufficient room for investigation. The chunked review mode transparently scales the review by splitting files into groups and using a single final judge.
+
+### Architecture
+
+```
+Step 1:    Determine review target (unchanged)
+                │
+Step 1.5:  Mode selection + Diff triage + File clustering
+           ├─ Count files/lines → decide standard vs chunked mode
+           ├─ Build changeset manifest (risk tiers per file)
+           ├─ Cluster files into chunks (8-15 files, max 2000 diff lines)
+           └─ Write full diff to temp file (protect orchestrator context)
+                │
+Step 2-L:  Tiered context gathering
+           ├─ Phase A: lightweight global context (~5k tokens)
+           │   ├─ Import graph, dead code (new functions only)
+           │   └─ Complexity hotspots (C+ only), standards, spec
+           └─ Phase B: chunk-scoped deep context (per chunk, ~10-15k)
+               ├─ Callers/callees (top 5/3 per function)
+               └─ Types, test files
+                │
+Step 3:    Deterministic scans (unchanged, output scoped per chunk)
+                │
+Step 3.5:  Adaptive pass selection (per chunk, not global)
+                │
+Step 4-L:  Chunked AI review
+           │
+           ├─ 4-L.2: Chunked explorers (waves of 8-12 parallel Tasks)
+           │   ├─ Wave 1: All passes × Tier 1 (critical) chunks
+           │   ├─ Wave 2: Core passes × Tier 2 (standard) chunks
+           │   └─ Wave 3: Extended passes × Tier 2 + Tier 3 chunks
+           │   (Spec verification runs as single global pass with full diff)
+           │
+           ├─ 4-L.3: Cross-chunk synthesizer (single agent)
+           │   └─ Interface mismatches, data flow, consistency, shared resources
+           │   └─ Receives actual diff content at chunk boundaries
+           │
+           └─ 4-L.4: Final judge (full adversarial validation)
+               └─ Same rigor as standard mode, cross-chunk root cause grouping, verdict
+                │
+Steps 5-7: Merge, format (+ chunk summary table), save
+```
+
+### Key Design Decisions
+
+| Decision | Why |
+|----------|-----|
+| High activation thresholds (80 files / 8000 lines) | Modern models handle large contexts well. Only chunk when truly necessary to avoid information loss from context fragmentation. Raised from 30/3000 after testing showed chunking hurt quality on medium-sized diffs. |
+| Directory-based clustering | Deterministic, no AI required, strong proxy for file relatedness. |
+| Three-tier risk tiering (Critical / Standard / Low-risk) | Auth/payment files need deeper review than config files. Prioritizes explorer attention where risk is highest. |
+| Single final judge (no chunk judges) | Chunk judges created multi-level filtering that removed real findings. A single final judge with full adversarial validation preserves recall while maintaining precision. Explorers optimize for recall, judge optimizes for precision — one gate, not three. |
+| Cross-chunk synthesizer with actual diff content | Cross-file pattern detection needs its own context budget and tool access. Including actual diff at chunk boundaries (not just summaries) enables detection of type mismatches, interface changes, and data flow breaks. |
+| Spec verification runs globally with full diff | Requirements span the entire changeset — fragmenting per chunk loses traceability. Full diff available via temp file enables behavioral verification, not just existence checks. |
+| Wave batching (8-12 per wave) | Prevents spawning too many simultaneous sub-agents while maintaining parallelism. |
+| Diff offloading to temp files | Prevents the orchestrator's own context from being consumed by a 40-80k token diff. |
+
+### Tradeoffs
+
+| Risk | Mitigation | Residual |
+|------|-----------|----------|
+| Cross-chunk bugs missed | Cross-chunk synthesizer with actual diff at boundaries + full adversarial validation in final judge | Medium: subtle interactions through unchanged code may be missed |
+| Increased latency (~2-3x) | Highly parallel waves; serial overhead is only synthesizer + final judge | Acceptable: standard mode would fail on the same diff |
+| Increased token cost (~2-4x) | Each explorer handles less work; without chunking, review is truncated/superficial | Acceptable tradeoff for quality |
+| Final judge context pressure | All raw findings from all chunks sent to final judge | Mitigated by high activation thresholds (80/8000) limiting chunk count; judge can use tools to investigate |
 
 ---
 

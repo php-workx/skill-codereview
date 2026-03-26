@@ -5,6 +5,18 @@
 ## [1.1.0] - 2026-02-09
 
 ### Added
+- **Spec verification explorer pass** (`reviewer-spec-verification-pass.md`):
+  - Per-requirement traceability: extracts requirements from spec, traces to implementation, maps to tests
+  - Test category classification: classifies tests as unit/integration/e2e with evidence
+  - Category adequacy assessment: flags when requirements need integration/e2e tests but only have unit
+  - Scoped verification via `--spec-scope` flag (filter to section/milestone)
+  - Full `spec_requirements` output with impl_status, test_coverage, needed_categories per requirement
+- **Test category classification** in test-adequacy pass (Phase 6):
+  - Classifies discovered tests as unit/integration/e2e/unknown using directory, mock-density, and infrastructure heuristics
+  - `test_category_needed` field on findings specifying which test category is missing
+- **`--spec-scope <text>` flag** — restrict spec verification to a specific section or milestone
+- **`spec_requirements` in findings schema** — structured per-requirement traceability replacing flat `spec_gaps` list (backward-compatible: `spec_gaps` still populated)
+- **`spec_verification` pass enum value** — findings from spec verification are tagged distinctly
 - **3 new explorer passes** (extended, with adaptive skip signals):
   - Error handling: swallowed exceptions, missing error propagation, inconsistent patterns, missing rollback
   - API/contract: breaking changes, backward compatibility, convention consistency, documentation sync
@@ -24,11 +36,25 @@
 
 ### Changed
 - Explorer prompts expanded from ~16 lines to ~120-140 lines each with structured investigation phases
-- Global contract updated with confidence calibration table and chain-of-thought protocol
-- SKILL.md Step 4a updated to support up to 7 explorers with configurable models
+- Global contract updated with confidence calibration table, chain-of-thought protocol, and `spec_verification` pass value
+- SKILL.md Step 4a updated to support up to 8 explorers with configurable models
 - SKILL.md Step 4b now references external judge prompt file instead of inline prompt
-- Tool status table expanded with keys for new passes and judge
-- Default config now includes all 7 passes (4 core + 3 extended)
+- SKILL.md report format: "Spec Gaps" section replaced with rich "Spec Verification" section (requirement table + details) when spec is provided
+- Judge Step 5 enhanced: merges spec-verification explorer data, validates impl/test claims, produces structured `spec_requirements`
+- Test-adequacy pass expanded with Phase 6 (test category classification)
+- Tool status table expanded with keys for new passes including `ai_spec_verification`
+- Default config now includes all 8 passes (4 core + 4 extended)
+- Validation script updated with spec_requirements checks (12a-12e) and `spec_verification` pass value
+- **SKILL.md description** rewritten with local-first positioning — leads with local review, removes redundant trigger keywords
+- **README** rewritten with "Why Use This?" section, local-first framing, updated feature list (8 explorers, spec verification, test categories)
+- **SKILL.md token efficiency**: extracted heavy reference material into 3 new files (6,641→4,086 words, -38%)
+  - `references/deterministic-scans.md` — full tool scripts, cache setup, parallel patterns, zsh workarounds
+  - `references/report-template.md` — full markdown report template and JSON envelope format
+  - `references/acceptance-criteria.md` — functional scenarios and output validation checks
+- **"When to Use" section** added with user-facing symptoms and diff mode decision table
+- **User-facing common mistakes** added (huge diffs, missing tools, `gh` auth, vague specs)
+- Fixed stale "4 passes" references → 8 passes throughout
+- Configuration section condensed to summary table referencing `docs/CONFIGURATION.md`
 
 ## [1.0.0] - 2026-02-08
 
