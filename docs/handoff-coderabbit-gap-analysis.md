@@ -2,8 +2,12 @@
 
 **Date:** 2026-03-26
 **Branch:** `feat/deterministic-pipeline` (PR #2)
+**Commit:** `f120a3a08d16005d58988a3b2a91ecab2c29b2b9`
+**PR URL:** https://github.com/php-workx/skill-codereview/pull/2
 **Source:** CodeRabbit automated review on PR #2
 **Purpose:** Detailed analysis of 30 findings CodeRabbit caught that our own code review skill did not. Use this to identify skill improvements, additional checks, and process changes.
+
+To restore this exact state: `git checkout f120a3a08d16005d58988a3b2a91ecab2c29b2b9`
 
 ---
 
