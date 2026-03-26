@@ -295,7 +295,7 @@ $HOTSPOT"
         {
           file: $fp,
           desc: .description,
-          score: (.description | capture("of (?<n>[0-9]+)") | .n | tonumber)
+          score: ((.description | capture("of (?<n>[0-9]+)") | .n // "0") | tonumber)
         }
       ] | .[]
     ' 2>/dev/null || true)

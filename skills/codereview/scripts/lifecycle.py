@@ -353,7 +353,7 @@ def apply_suppressions(
     5. deferred -> apply deferred_scope rules
     """
     if not suppressions:
-        return findings, []
+        return findings, [], 0
 
     now = datetime.now(timezone.utc)
 

@@ -139,7 +139,10 @@ filter_to_changed_files() {
   filtered=$(jq --argjson changed "$changed_json" \
     '[.[] | select(.file as $f | $changed | any(. == $f or (. | endswith("/" + $f))))]' \
     "$fpath" 2>/dev/null) || return
-  echo "$filtered" > "$fpath"
+  # Validate output before overwriting
+  if [ -n "$filtered" ] && [ "$filtered" != "null" ]; then
+    echo "$filtered" > "$fpath"
+  fi
 }
 
 # get_version: attempt to get version string for a tool
