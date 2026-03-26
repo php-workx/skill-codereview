@@ -18,6 +18,14 @@
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
+# Dependency check
+# ---------------------------------------------------------------------------
+if ! command -v jq >/dev/null 2>&1; then
+  echo "FATAL: jq is required but not installed. Install it with: brew install jq (macOS) or apt-get install jq (Linux)" >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 BASE_REF=""
@@ -108,6 +116,26 @@ check_normalized() {
     log "WARNING: normalization of $tool output produced invalid JSON — replacing with []"
     echo '[]' > "$fpath"
   fi
+}
+
+# filter_to_changed_files: remove findings whose .file is not in changed files.
+# This is needed for repo-wide tools (clippy, golangci-lint) that scan the
+# entire workspace and may report stale findings from untouched files.
+# Args: $1=findings_json_file
+filter_to_changed_files() {
+  local fpath="$1"
+  if [ ! -f "$fpath" ] || [ ! -s "$fpath" ]; then
+    return
+  fi
+  # Build a JSON array of changed file paths for jq
+  local changed_json
+  changed_json=$(printf '%s\n' "${FILES[@]}" | jq -R . | jq -s .)
+  # Filter: keep only findings where .file is in the changed files list
+  local filtered
+  filtered=$(jq --argjson changed "$changed_json" \
+    '[.[] | select(.file as $f | $changed | any(. == $f or (. | endswith("/" + $f))))]' \
+    "$fpath" 2>/dev/null) || return
+  echo "$filtered" > "$fpath"
 }
 
 # get_version: attempt to get version string for a tool
@@ -879,6 +907,7 @@ for tool_key in clippy ruff golangci_lint eslint; do
         if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
           if [ -s "$SCRATCH/clippy.out" ]; then
             normalize_clippy < "$SCRATCH/clippy.out" > "$SCRATCH/findings/clippy.json"
+            filter_to_changed_files "$SCRATCH/findings/clippy.json"
           else
             echo '[]' > "$SCRATCH/findings/clippy.json"
           fi
@@ -897,6 +926,7 @@ for tool_key in clippy ruff golangci_lint eslint; do
         if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
           if [ -s "$SCRATCH/golangci_lint.out" ]; then
             normalize_golangci < "$SCRATCH/golangci_lint.out" > "$SCRATCH/findings/golangci_lint.json"
+            filter_to_changed_files "$SCRATCH/findings/golangci_lint.json"
           else
             echo '[]' > "$SCRATCH/findings/golangci_lint.json"
           fi
@@ -983,18 +1013,18 @@ fi
 if [ -n "$PROJECT_PROFILE" ] && [ -f "$PROJECT_PROFILE" ]; then
   log "Processing project profile: $PROJECT_PROFILE"
 
-  # Extract lint/check commands from the project profile.
-  # NOTE: discover-project.py does not currently emit lint_commands.
-  # The orchestrating agent must populate this field in the profile JSON
-  # after interpreting the build_files output from discover-project.py.
+  # Extract lint/check commands from the interpreted project profile.
+  # The orchestrating agent writes this file after interpreting discover-project.py output.
+  # Expected format: { "contexts": [{ "lint_commands": ["cmd1", "cmd2"] }] }
+  # Also supports: { "commands": [{ "cmd": "cmd1" }] } for backwards compatibility.
   PROJ_CMD_INDEX=0
-  # Read commands from the profile — look for lint_commands array
   PROJ_CMDS_JSON="$(jq -r '
     [
-      (.contexts // [])[] |
-      (.lint_commands // [])[] |
-      select(. != null and . != "")
-    ] | .[]
+      # Format 1: contexts[].lint_commands[] (array of strings)
+      ((.contexts // [])[] | (.lint_commands // [])[] | select(. != null and . != "")),
+      # Format 2: commands[].cmd (array of objects with cmd field)
+      ((.commands // [])[] | .cmd // empty | select(. != null and . != ""))
+    ] | unique | .[]
   ' "$PROJECT_PROFILE" 2>/dev/null || true)"
 
   if [ -n "$PROJ_CMDS_JSON" ]; then
