@@ -193,6 +193,7 @@ Assign each file a risk tier. Evaluate in order — first match wins:
 - Path matches any `focus_paths` pattern from `.codereview.yaml`
 - `lines_added + lines_removed > 200`
 - Diff for this file contains new route/endpoint definitions (grep for `route|endpoint|handler|@app\.|@api\.|@router\.`)
+- Historical risk = high (from `scripts/git-risk.sh` output — file has frequent bug-related commits)
 
 **Tier 3 (Low-risk)** — any of (unless already Tier 1):
 - Path matches any `ignore_paths` pattern from `.codereview.yaml`
@@ -398,10 +399,22 @@ If a spec is found, include it in the context packet for requirements completene
 - Key surrounding code snippets (callers, interfaces, types)
 - Dead code flags (functions with no callers)
 - Complexity hotspots (from `scripts/complexity.sh` output at `/tmp/codereview-complexity.json`)
+- Git history risk scores (from `scripts/git-risk.sh` output at `/tmp/codereview-git-risk.json`)
 - Project tooling profile (from `scripts/discover-project.py` + agent interpretation)
 - Language standards (if loaded)
 - Spec/plan content (if available)
 - Any repo-level review instructions found
+
+**2i. Git history risk scoring (implemented by `scripts/git-risk.sh` — do not reimplement):**
+
+Run the git history risk script:
+```bash
+echo "$CHANGED_FILES" | bash scripts/git-risk.sh > /tmp/codereview-git-risk.json
+```
+
+The script computes churn frequency and bug-related commit counts for each changed file over the last 6 months, producing a per-file risk tier (high/medium/low). Include the output in the context packet (Step 2h).
+
+If the script is not available, skip git history risk — explorers still work without it.
 
 #### Step 2-L: Tiered Context Gathering (Large-Diff Mode Only)
 
@@ -412,9 +425,10 @@ When `REVIEW_MODE = "chunked"`, replace the monolithic context gathering (Steps 
 1. **Import graph** — Use Grep to identify which changed files import/reference other changed files. Record as a dependency map: `file_A → [file_B, file_C]`. This powers the cross-chunk interface summary.
 2. **Dead code check (scoped)** — Only check *newly added* public functions (not modified functions — if they existed before, they presumably have callers). This dramatically reduces Grep calls for large diffs.
 3. **Complexity analysis (hotspots only)** — Run radon/gocyclo but only report functions rated **C or worse** (complexity >= 11). Skip A/B ratings to keep context compact.
-4. **Repo-level review instructions** — Same as Step 2e (fixed-size, regardless of diff size).
-5. **Language standards** — Same as Step 2f (fixed-size per language).
-6. **Spec/plan** — Same as Step 2g (fixed-size).
+4. **Git history risk scoring** — Run `scripts/git-risk.sh` once globally. Per-file risk scores apply across all chunks (~1-2k tokens).
+5. **Repo-level review instructions** — Same as Step 2e (fixed-size, regardless of diff size).
+6. **Language standards** — Same as Step 2f (fixed-size per language).
+7. **Spec/plan** — Same as Step 2g (fixed-size).
 
 Store as `GLOBAL_CONTEXT`.
 

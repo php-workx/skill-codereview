@@ -76,10 +76,26 @@ Validation criteria for the codereview skill. Not needed at runtime — use for 
 | Orchestrator context protection | Full diff written to temp file, chunk diffs extracted fresh from git |
 | Config overrides | `large_diff.*` settings from `.codereview.yaml` respected |
 
+## Git History Risk Scoring
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| Git history available | `scripts/git-risk.sh` produces per-file risk JSON with churn, bug_commits, last_bug, and risk tier for each changed file |
+| Shallow clone (< 50 commits) | Output includes `"shallow_clone": true` and a warning about potentially incomplete scores |
+| All files low-risk | Output includes all files with `risk: "low"`, summary shows `high: 0, medium: 0`. Context packet notes: "All changed files have low historical risk" |
+| File with high historical risk | File with BUG_COMMITS >= 3 or (BUG_COMMITS >= 2 and CHURN >= 10) classified as `risk: "high"` |
+| Tier 2 file promoted to Tier 1 | File classified as Tier 2 (standard) by path heuristics but with `risk: "high"` from git history is promoted to Tier 1 (critical) in large-diff mode |
+| Script not available | Git history risk scoring skipped, explorers still run without historical risk context |
+| Script fails (non-zero exit) | Agent logs stderr, skips git history risk, continues with remaining context gathering |
+| New files (no git history) | New files have churn=0, bug_commits=0, risk="low" — correct default for files with no history |
+| `--months` flag | Custom lookback period used; `lookback_months` in output reflects the specified value |
+
 ## Pipeline Scripts
 
 | Scenario | Expected Behavior |
 |----------|-------------------|
+| `scripts/git-risk.sh` available | Step 2i runs the script, includes per-file risk scores in context packet |
+| `scripts/git-risk.sh` not available | Git history risk scoring skipped. Explorers still work without it. |
 | `scripts/run-scans.sh` available | Step 3 runs the script, consumes JSON output. Agent does not re-interpret `deterministic-scans.md` |
 | `scripts/run-scans.sh` not available | Agent falls back to manual tool execution per `references/deterministic-scans.md` |
 | `scripts/enrich-findings.py` available | Step 5 runs the script for mechanical enrichment (ID, tier, confidence floor) |

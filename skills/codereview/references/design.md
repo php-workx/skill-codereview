@@ -129,6 +129,7 @@ This document contains background context for the codereview skill. It is not ne
 | Envelope metadata in artifacts | run_id/timestamp/scope/tool_status/verdict make reviews traceable | Previous plan |
 | Best-effort degradation | Skip unavailable tools with explicit status rather than failing | Previous plan |
 | Repo-level config file | Teams customize passes, cadence, pushback, paths, thresholds | CodeRabbit `.coderabbit.yaml`, Gemini `config.yaml` |
+| Historical risk scoring | Git log churn + bug frequency provides a per-file risk signal. Files with recent bug history get extra explorer attention. | Complements path-based risk heuristics with data-driven signal |
 
 ---
 

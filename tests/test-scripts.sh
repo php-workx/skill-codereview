@@ -59,7 +59,7 @@ echo "=== 1. Script Syntax Validation ==="
 echo ""
 
 # 1a. Bash scripts parse cleanly
-for script in run-scans.sh complexity.sh validate_output.sh; do
+for script in run-scans.sh complexity.sh validate_output.sh git-risk.sh; do
   if bash -n "$SCRIPTS/$script" 2>/dev/null; then
     pass "$script syntax valid"
   else
@@ -262,10 +262,58 @@ assert_json_field "all findings have source=deterministic" "$SCANS_REAL" \
 
 # ============================================================
 echo ""
-echo "=== 6. validate_output.sh ==="
+echo "=== 6. git-risk.sh ==="
 echo ""
 
-# 6a. Valid review passes validation
+# 6a. Empty input produces valid output
+GITRISK_EMPTY=$(echo "" | bash "$SCRIPTS/git-risk.sh" 2>/dev/null)
+assert_json_valid "git-risk empty input produces valid JSON" "$GITRISK_EMPTY"
+assert_json_field "has files array" "$GITRISK_EMPTY" "'files' in d"
+assert_json_field "has summary object" "$GITRISK_EMPTY" "'summary' in d"
+assert_json_field "has shallow_clone field" "$GITRISK_EMPTY" "'shallow_clone' in d"
+assert_json_field "has lookback_months field" "$GITRISK_EMPTY" "'lookback_months' in d"
+assert_json_field "empty input has zero files" "$GITRISK_EMPTY" "len(d['files']) == 0"
+
+# 6b. Default lookback is 6 months
+assert_json_field "default lookback is 6" "$GITRISK_EMPTY" "d['lookback_months'] == 6"
+
+# 6c. Custom --months flag
+GITRISK_MONTHS=$(echo "" | bash "$SCRIPTS/git-risk.sh" --months 12 2>/dev/null)
+assert_json_valid "git-risk --months 12 produces valid JSON" "$GITRISK_MONTHS"
+assert_json_field "lookback_months is 12" "$GITRISK_MONTHS" "d['lookback_months'] == 12"
+
+# 6d. With real file produces valid output
+GITRISK_REAL=$(echo "skills/codereview/SKILL.md" | bash "$SCRIPTS/git-risk.sh" 2>/dev/null)
+assert_json_valid "git-risk with real file produces valid JSON" "$GITRISK_REAL"
+assert_json_field "has 1 file entry" "$GITRISK_REAL" "len(d['files']) == 1"
+assert_json_field "file entry has all fields" "$GITRISK_REAL" \
+  "all(k in d['files'][0] for k in ['file','churn','bug_commits','last_bug','risk'])"
+assert_json_field "risk is valid tier" "$GITRISK_REAL" \
+  "d['files'][0]['risk'] in ('high','medium','low')"
+
+# 6e. Summary counts are consistent
+assert_json_field "summary counts match file count" "$GITRISK_REAL" \
+  "d['summary']['high'] + d['summary']['medium'] + d['summary']['low'] == len(d['files'])"
+
+# 6f. Churn and bug_commits are non-negative integers
+assert_json_field "churn is non-negative" "$GITRISK_REAL" \
+  "all(f['churn'] >= 0 for f in d['files'])"
+assert_json_field "bug_commits is non-negative" "$GITRISK_REAL" \
+  "all(f['bug_commits'] >= 0 for f in d['files'])"
+
+# 6g. Multiple files
+GITRISK_MULTI=$(printf "skills/codereview/SKILL.md\nskills/codereview/scripts/complexity.sh" | bash "$SCRIPTS/git-risk.sh" 2>/dev/null)
+assert_json_valid "git-risk with multiple files produces valid JSON" "$GITRISK_MULTI"
+assert_json_field "has 2 file entries" "$GITRISK_MULTI" "len(d['files']) == 2"
+assert_json_field "multi-file summary counts match" "$GITRISK_MULTI" \
+  "d['summary']['high'] + d['summary']['medium'] + d['summary']['low'] == len(d['files'])"
+
+# ============================================================
+echo ""
+echo "=== 7. validate_output.sh ==="
+echo ""
+
+# 7a. Valid review passes validation
 VALIDATE_VALID=$(bash "$SCRIPTS/validate_output.sh" --findings "$FIXTURES/valid-review.json" 2>&1)
 VALIDATE_VALID_RC=$?
 if echo "$VALIDATE_VALID" | grep -q "ERRORS: 0\|0 errors"; then
@@ -276,7 +324,7 @@ else
   fail "valid review passes validation" "Exit code: $VALIDATE_VALID_RC"
 fi
 
-# 6b. Invalid review catches errors
+# 7b. Invalid review catches errors
 VALIDATE_INVALID=$(bash "$SCRIPTS/validate_output.sh" --findings "$FIXTURES/invalid-review.json" 2>&1) || VALIDATE_INVALID_RC=$?
 VALIDATE_INVALID_RC=${VALIDATE_INVALID_RC:-0}
 if echo "$VALIDATE_INVALID" | grep -q "FAIL"; then
@@ -287,7 +335,7 @@ fi
 
 # ============================================================
 echo ""
-echo "=== 7. Integration: enrich-findings.py → validate_output.sh pipeline ==="
+echo "=== 8. Integration: enrich-findings.py → validate_output.sh pipeline ==="
 echo ""
 
 # Build a complete review envelope from enriched findings
