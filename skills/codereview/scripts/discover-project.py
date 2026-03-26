@@ -381,6 +381,60 @@ def extract_taskfile_targets(filepath: str) -> list:
     return targets
 
 
+def extract_gemfile_info(filepath: str) -> dict:
+    """Extract gem names and detect Rails from a Gemfile."""
+    gems = []
+    has_rails = False
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = re.match(r"""^\s*gem\s+['"]([^'"]+)['"]""", line)
+                if m:
+                    gem_name = m.group(1)
+                    gems.append(gem_name)
+                    if gem_name == "rails":
+                        has_rails = True
+    except (OSError, IOError):
+        pass
+    return {"gems": gems[:20], "has_rails": has_rails}  # Cap at 20 to keep output compact
+
+
+def extract_pom_info(filepath: str) -> dict:
+    """Extract groupId, artifactId, and modules from pom.xml via regex."""
+    info = {"group_id": "", "artifact_id": "", "modules": []}
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(8192)  # Read first 8KB for top-level elements
+        artifact = re.search(r"<artifactId>([^<]+)</artifactId>", content)
+        if artifact:
+            info["artifact_id"] = artifact.group(1)
+        group = re.search(r"<groupId>([^<]+)</groupId>", content)
+        if group:
+            info["group_id"] = group.group(1)
+        for m in re.finditer(r"<module>([^<]+)</module>", content):
+            info["modules"].append(m.group(1))
+    except (OSError, IOError):
+        pass
+    return info
+
+
+def extract_gradle_info(filepath: str) -> dict:
+    """Extract plugins and subproject indicators from build.gradle."""
+    info = {"plugins": [], "has_subprojects": False}
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(8192)
+        # Detect plugins
+        for m in re.finditer(r"""id\s+['"]([^'"]+)['"]""", content):
+            info["plugins"].append(m.group(1))
+        # Detect subprojects
+        if "subprojects" in content or "include " in content:
+            info["has_subprojects"] = True
+    except (OSError, IOError):
+        pass
+    return info
+
+
 def build_file_entry(abs_path: str, rel_path: str, marker: str) -> dict:
     """Create a build_files entry for a given marker file."""
     entry = {"path": rel_path}
@@ -427,6 +481,27 @@ def build_file_entry(abs_path: str, rel_path: str, marker: str) -> dict:
         uses = extract_go_work_uses(abs_path)
         if uses:
             entry["use"] = uses
+    elif marker == "Gemfile":
+        gemfile_info = extract_gemfile_info(abs_path)
+        entry["type"] = "gemfile"
+        if gemfile_info["gems"]:
+            entry["gems"] = gemfile_info["gems"]
+        entry["has_rails"] = gemfile_info["has_rails"]
+    elif marker == "pom.xml":
+        pom_info = extract_pom_info(abs_path)
+        entry["type"] = "maven"
+        if pom_info["group_id"]:
+            entry["group_id"] = pom_info["group_id"]
+        if pom_info["artifact_id"]:
+            entry["artifact_id"] = pom_info["artifact_id"]
+        if pom_info["modules"]:
+            entry["modules"] = pom_info["modules"]
+    elif marker in ("build.gradle", "build.gradle.kts"):
+        gradle_info = extract_gradle_info(abs_path)
+        entry["type"] = "gradle"
+        if gradle_info["plugins"]:
+            entry["plugins"] = gradle_info["plugins"]
+        entry["has_subprojects"] = gradle_info["has_subprojects"]
     else:
         entry["type"] = "unknown"
 

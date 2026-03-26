@@ -67,6 +67,8 @@ COVERAGE_ARTIFACTS = {
     "python": [".coverage", "coverage.json", "cover.json", "htmlcov/"],
     "rust": ["tarpaulin-report.json", "lcov.info", "lcov.json"],
     "typescript": ["coverage/", ".nyc_output/", "coverage-final.json"],
+    "ruby": ["coverage/.resultset.json", "coverage/.last_run.json"],
+    "java": ["target/site/jacoco/jacoco.xml", "build/reports/jacoco/test/jacocoTestReport.xml"],
 }
 
 # Tool detection commands and versions, per language
@@ -86,6 +88,13 @@ TOOL_DETECTION = {
         {"name": "c8", "check": ["npx", "c8", "--version"], "tool_key": "coverage_typescript"},
         {"name": "nyc", "check": ["npx", "nyc", "--version"], "tool_key": "coverage_typescript"},
         {"name": "jest", "check": ["npx", "jest", "--version"], "tool_key": "coverage_typescript"},
+    ],
+    "ruby": [
+        {"name": "simplecov", "check": ["ruby", "-e", "require 'simplecov'"], "tool_key": "coverage_ruby"},
+    ],
+    "java": [
+        {"name": "jacoco-maven", "check": ["mvn", "--version"], "tool_key": "coverage_java"},
+        {"name": "jacoco-gradle", "check": ["gradle", "--version"], "tool_key": "coverage_java"},
     ],
 }
 
@@ -107,6 +116,13 @@ TEST_COMMANDS = {
         "c8": ["npx", "c8", "--reporter=json", "--reports-dir={COVER_DIR}/", "npm", "test"],
         "nyc": ["npx", "nyc", "--reporter=json", "--report-dir={COVER_DIR}/", "npm", "test"],
         "jest": ["npx", "jest", "--coverage", "--coverageDirectory={COVER_DIR}/"],
+    },
+    "ruby": {
+        "simplecov": ["bundle", "exec", "rspec"],
+    },
+    "java": {
+        "jacoco-maven": ["mvn", "test"],
+        "jacoco-gradle": ["gradle", "test", "jacocoTestReport"],
     },
 }
 
@@ -596,6 +612,108 @@ def parse_typescript_coverage(artifact_path, changed_files):
     return []
 
 
+def parse_simplecov_json(artifact_path, changed_files):
+    """Parse SimpleCov .resultset.json coverage format (Ruby).
+
+    Format: {"RSpec": {"coverage": {"/abs/path/file.rb": {"lines": [null, 1, 0, ...]}}}}
+    null = not executable, 0 = not covered, >0 = covered.
+    Note: SimpleCov uses absolute paths — match by suffix against relative changed_files.
+    """
+    entries = []
+    try:
+        with open(artifact_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return entries
+
+    changed_set = set(changed_files)
+
+    # Iterate over test suites (usually "RSpec" or "MiniTest")
+    for suite_name, suite_data in data.items():
+        if not isinstance(suite_data, dict):
+            continue
+        coverage_data = suite_data.get("coverage", {})
+        if not isinstance(coverage_data, dict):
+            continue
+
+        for abs_filepath, file_info in coverage_data.items():
+            # Match absolute path against relative changed files by suffix
+            matched_file = None
+            for cf in changed_set:
+                if abs_filepath.endswith("/" + cf) or abs_filepath == cf:
+                    matched_file = cf
+                    break
+            if matched_file is None or is_test_file(matched_file):
+                continue
+
+            # file_info can be {"lines": [...]} or just [...]
+            lines = file_info.get("lines", file_info) if isinstance(file_info, dict) else file_info
+            if not isinstance(lines, list):
+                continue
+
+            executable = [l for l in lines if l is not None]
+            covered = [l for l in executable if l > 0]
+            total = len(executable)
+            coverage_pct = int((len(covered) / total * 100)) if total > 0 else 0
+
+            entries.append({
+                "file": matched_file,
+                "line_coverage": coverage_pct,
+                "uncovered_functions": [],
+                "tool": "simplecov",
+            })
+
+    return entries
+
+
+def parse_jacoco_xml(artifact_path, changed_files):
+    """Parse JaCoCo XML coverage format (Java).
+
+    Format: <report><package><sourcefile name="Foo.java">
+              <counter type="LINE" missed="5" covered="20"/>
+            </sourcefile></package></report>
+    """
+    import xml.etree.ElementTree as ET
+    entries = []
+    try:
+        tree = ET.parse(artifact_path)
+        root = tree.getroot()
+    except (OSError, ET.ParseError):
+        return entries
+
+    changed_set = set(changed_files)
+
+    for package in root.findall(".//package"):
+        pkg_name = package.get("name", "").replace("/", os.sep)
+        for sourcefile in package.findall("sourcefile"):
+            sf_name = sourcefile.get("name", "")
+            # Reconstruct relative path: package/name → src/main/java/package/name
+            # Try matching against changed files
+            matched_file = None
+            for cf in changed_set:
+                if cf.endswith(sf_name) or cf.endswith(pkg_name + os.sep + sf_name):
+                    matched_file = cf
+                    break
+            if matched_file is None or is_test_file(matched_file):
+                continue
+
+            for counter in sourcefile.findall("counter"):
+                if counter.get("type") == "LINE":
+                    covered = _safe_int(counter.get("covered", 0))
+                    missed = _safe_int(counter.get("missed", 0))
+                    total = covered + missed
+                    coverage_pct = int((covered / total * 100)) if total > 0 else 0
+                    entries.append({
+                        "file": matched_file,
+                        "line_coverage": coverage_pct,
+                        "uncovered_functions": [],
+                        "tool": "jacoco",
+                    })
+                    break
+
+    return entries
+
+
 # ---------------------------------------------------------------------------
 # Per-language coverage collection
 # ---------------------------------------------------------------------------
@@ -741,6 +859,16 @@ def _parse_coverage(language, artifact_path, changed_files):
 
     elif language == "typescript":
         return parse_typescript_coverage(artifact_path, changed_files)
+
+    elif language == "ruby":
+        if path.suffix == ".json":
+            return parse_simplecov_json(artifact_path, changed_files)
+        return []
+
+    elif language == "java":
+        if path.suffix == ".xml":
+            return parse_jacoco_xml(artifact_path, changed_files)
+        return []
 
     return []
 

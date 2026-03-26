@@ -57,6 +57,16 @@ GOCYCLO_VERSION="null"
 GOCYCLO_COUNT=0
 GOCYCLO_NOTE="null"
 
+FLOG_STATUS="skipped"
+FLOG_VERSION="null"
+FLOG_COUNT=0
+FLOG_NOTE="null"
+
+PMD_CPX_STATUS="skipped"
+PMD_CPX_VERSION="null"
+PMD_CPX_COUNT=0
+PMD_CPX_NOTE="null"
+
 # --- Python: radon ---
 if [ ${#PY_FILES[@]} -eq 0 ]; then
   RADON_STATUS="skipped"
@@ -182,6 +192,118 @@ $HOTSPOT"
   GOCYCLO_STATUS="ran"
 fi
 
+# --- Ruby: flog ---
+if [ ${#RUBY_FILES[@]} -eq 0 ]; then
+  FLOG_STATUS="skipped"
+  FLOG_NOTE="\"no .rb files in changeset\""
+elif ! command -v flog &>/dev/null; then
+  FLOG_STATUS="not_installed"
+  FLOG_NOTE="\"gem install flog\""
+else
+  FLOG_VERSION=$(flog --version 2>/dev/null | head -1 || echo "unknown")
+  FLOG_VERSION=$(echo "$FLOG_VERSION" | sed 's/[^0-9.]//g')
+  if [ -z "$FLOG_VERSION" ]; then FLOG_VERSION="unknown"; fi
+  FLOG_VERSION="\"$FLOG_VERSION\""
+
+  # flog output: "  score: Class#method path/file.rb:line"
+  # Parse methods with score >= 11 (C or worse)
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    # Match lines like "    13.2: SomeClass#method_name"
+    SCORE=$(echo "$line" | sed -nE 's/^[[:space:]]+([0-9]+)\.[0-9]+:.*/\1/p')
+    [ -z "$SCORE" ] && continue
+    if [ "$SCORE" -ge 11 ] 2>/dev/null; then
+      FUNC_NAME=$(echo "$line" | sed -E 's/^[[:space:]]+[0-9.]+:[[:space:]]*//')
+      if [ "$SCORE" -ge 31 ]; then RATING="F"
+      elif [ "$SCORE" -ge 21 ]; then RATING="D"
+      else RATING="C"
+      fi
+      # Try to extract file from the function name (flog may include file:line)
+      FILE_PART=$(echo "$FUNC_NAME" | grep -oE '[^ ]+\.rb(:[0-9]+)?' | head -1 || echo "")
+      if [ -z "$FILE_PART" ]; then FILE_PART="unknown"; fi
+      HOTSPOT=$(jq -n \
+        --arg file "$FILE_PART" \
+        --arg func "$FUNC_NAME" \
+        --argjson score "$SCORE" \
+        --arg rating "$RATING" \
+        '{file: $file, function: $func, score: $score, rating: $rating}')
+      if [ -n "$HOTSPOT_LINES" ]; then
+        HOTSPOT_LINES="$HOTSPOT_LINES
+$HOTSPOT"
+      else
+        HOTSPOT_LINES="$HOTSPOT"
+      fi
+      FLOG_COUNT=$((FLOG_COUNT + 1))
+    fi
+  done < <(flog --all "${RUBY_FILES[@]}" 2>/dev/null || true)
+
+  FLOG_STATUS="ran"
+fi
+
+# --- Java: PMD cyclomatic complexity ---
+if [ ${#JAVA_FILES[@]} -eq 0 ]; then
+  PMD_CPX_STATUS="skipped"
+  PMD_CPX_NOTE="\"no .java files in changeset\""
+elif ! command -v pmd &>/dev/null; then
+  PMD_CPX_STATUS="not_installed"
+  PMD_CPX_NOTE="\"https://pmd.github.io/\""
+else
+  PMD_CPX_VERSION=$(pmd --version 2>/dev/null | head -1 || echo "unknown")
+  PMD_CPX_VERSION=$(echo "$PMD_CPX_VERSION" | sed 's/[^0-9.]//g')
+  if [ -z "$PMD_CPX_VERSION" ]; then PMD_CPX_VERSION="unknown"; fi
+  PMD_CPX_VERSION="\"$PMD_CPX_VERSION\""
+
+  # Run PMD design rules (includes CyclomaticComplexity)
+  PMD_CPX_OUT=""
+  if pmd check --help >/dev/null 2>&1; then
+    PMD_CPX_OUT=$(pmd check -d . -f json -R category/java/design.xml --no-progress 2>/dev/null || true)
+  else
+    PMD_CPX_OUT=$(pmd -d . -f json -R category/java/design.xml 2>/dev/null || true)
+  fi
+
+  if [ -n "$PMD_CPX_OUT" ]; then
+    # Extract CyclomaticComplexity violations and map to hotspots
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      FILE=$(echo "$line" | jq -r '.file // "unknown"')
+      FUNC=$(echo "$line" | jq -r '.desc // "unknown"')
+      SCORE=$(echo "$line" | jq -r '.score // 0')
+      if [ "$SCORE" -ge 11 ] 2>/dev/null; then
+        if [ "$SCORE" -ge 31 ]; then RATING="F"
+        elif [ "$SCORE" -ge 21 ]; then RATING="D"
+        else RATING="C"
+        fi
+        HOTSPOT=$(jq -n \
+          --arg file "$FILE" \
+          --arg func "$FUNC" \
+          --argjson score "$SCORE" \
+          --arg rating "$RATING" \
+          '{file: $file, function: $func, score: $score, rating: $rating}')
+        if [ -n "$HOTSPOT_LINES" ]; then
+          HOTSPOT_LINES="$HOTSPOT_LINES
+$HOTSPOT"
+        else
+          HOTSPOT_LINES="$HOTSPOT"
+        fi
+        PMD_CPX_COUNT=$((PMD_CPX_COUNT + 1))
+      fi
+    done < <(echo "$PMD_CPX_OUT" | jq -c '
+      [(.files // [])[] |
+        .filename as $fp |
+        (.violations // [])[] |
+        select(.rule | test("Cyclomatic|NPath")) |
+        {
+          file: $fp,
+          desc: .description,
+          score: (.description | capture("of (?<n>[0-9]+)") | .n | tonumber)
+        }
+      ] | .[]
+    ' 2>/dev/null || true)
+  fi
+
+  PMD_CPX_STATUS="ran"
+fi
+
 # --- Assemble JSON output ---
 
 # Build hotspots array from accumulated lines
@@ -201,9 +323,19 @@ TOOL_STATUS=$(jq -n \
   --argjson gv "$GOCYCLO_VERSION" \
   --argjson gc "$GOCYCLO_COUNT" \
   --argjson gn "$GOCYCLO_NOTE" \
+  --arg fs "$FLOG_STATUS" \
+  --argjson fv "$FLOG_VERSION" \
+  --argjson fc "$FLOG_COUNT" \
+  --argjson fn "$FLOG_NOTE" \
+  --arg ps "$PMD_CPX_STATUS" \
+  --argjson pv "$PMD_CPX_VERSION" \
+  --argjson pc "$PMD_CPX_COUNT" \
+  --argjson pn "$PMD_CPX_NOTE" \
   '{
     radon: { status: $rs, version: $rv, finding_count: $rc, note: $rn },
-    gocyclo: { status: $gs, version: $gv, finding_count: $gc, note: $gn }
+    gocyclo: { status: $gs, version: $gv, finding_count: $gc, note: $gn },
+    flog: { status: $fs, version: $fv, finding_count: $fc, note: $fn },
+    pmd_complexity: { status: $ps, version: $pv, finding_count: $pc, note: $pn }
   }')
 
 # Combine into final output
