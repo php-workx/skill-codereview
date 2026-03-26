@@ -109,6 +109,23 @@ Validation criteria for the codereview skill. Not needed at runtime — use for 
 | Script not available | Coverage collection skipped, explorers still work without measured coverage data |
 | Script fails (non-zero exit) | Agent logs stderr, skips coverage data, continues with remaining context gathering |
 
+## Finding Lifecycle & Fingerprinting
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| First review (no previous artifact) | All findings tagged as `new`. No suppressions file → no suppressions. Lifecycle features are invisible until the second review. |
+| Recurring detection | Findings matching a previous review (by exact fingerprint or fuzzy match) are tagged as `recurring`. `lifecycle_summary.recurring` reflects the count. |
+| Rejected suppression | Finding matching a `rejected` suppression is moved to `suppressed_findings[]` with `lifecycle_status: "rejected"`. It does not appear in `findings[]` or the report. |
+| Deferred suppression (`deferred_scope: "file"`, default) | Deferred finding is suppressed unless the file is in CHANGED_FILES, in which case it resurfaces as a normal finding. |
+| Deferred suppression (`deferred_scope: "pass"`) | Deferred finding resurfaces only if the file is in CHANGED_FILES AND the current finding's `pass` matches the suppression's `pass`. |
+| Deferred suppression (`deferred_scope: "exact"`) | Deferred finding resurfaces only on exact fingerprint match. Fuzzy-matched findings stay suppressed. |
+| Expired suppression | Suppression with `expires_at` in the past is ignored. Finding resurfaces as `new` or `recurring` depending on whether it appeared in the previous review. |
+| Malformed suppressions file | Warn on stderr, skip all suppressions. Review continues normally — fail-open behavior. |
+| `--raw` mode | Accepts raw judge output without enrichment fields (`action_tier`, `source`, `id`). Fingerprinting and lifecycle tagging still work. |
+| Fingerprint stability | Fingerprints are 12 hex chars (SHA-256 truncated). Same finding across runs produces the same fingerprint if file, pass, severity, and normalized summary match. |
+| Suppressed findings in JSON envelope | `suppressed_findings[]` array present in output with same shape as `findings[]` but `lifecycle_status` is `rejected` or `deferred`. |
+| Lifecycle summary | `lifecycle_summary` object with `new`, `recurring`, `rejected`, `deferred`, `deferred_resurfaced` counts. All counts are non-negative integers. |
+
 ## Pipeline Scripts
 
 | Scenario | Expected Behavior |

@@ -23,6 +23,8 @@
 #  10b. review_mode field validation (standard/chunked)
 #  10c. Chunked mode: chunk metadata validation (chunk_count, chunks array, required fields, risk_tier)
 #  11. Report markdown: verdict, strengths, tier sections, summary
+#  11b. lifecycle_status validation (if present on findings, must be new/recurring)
+#  11c. suppressed_findings validation (if present, must be array with lifecycle_status rejected/deferred)
 #  12. spec_requirements array validation (if present)
 #  12a. Required fields (id, text, source_section, impl_status)
 #  12b. Valid impl_status values
@@ -290,6 +292,34 @@ if [ "$(jq 'has("review_mode")' "$FINDINGS")" = "true" ]; then
 else
   echo "FAIL: Missing review_mode field (must be 'standard' or 'chunked')"
   ERRORS=$((ERRORS + 1))
+fi
+
+# 11b. lifecycle_status validation (optional field)
+BAD_LIFECYCLE=$(jq '[.findings[] | select(has("lifecycle_status") and (.lifecycle_status | IN("new","recurring") | not))] | length' "$FINDINGS")
+if [ "$BAD_LIFECYCLE" -gt 0 ]; then
+  echo "FAIL: $BAD_LIFECYCLE findings with invalid lifecycle_status (must be new/recurring)"
+  ERRORS=$((ERRORS + 1))
+else
+  echo "PASS: lifecycle_status values valid"
+fi
+
+# 11c. suppressed_findings validation (optional field)
+if [ "$(jq 'has("suppressed_findings")' "$FINDINGS")" = "true" ]; then
+  if [ "$(jq '.suppressed_findings | type' "$FINDINGS")" != '"array"' ]; then
+    echo "FAIL: suppressed_findings must be an array"
+    ERRORS=$((ERRORS + 1))
+  else
+    SUPP_COUNT=$(jq '.suppressed_findings | length' "$FINDINGS")
+    echo "INFO: $SUPP_COUNT suppressed findings"
+
+    BAD_SUPP_STATUS=$(jq '[.suppressed_findings[] | select(.lifecycle_status | IN("rejected","deferred") | not)] | length' "$FINDINGS")
+    if [ "$BAD_SUPP_STATUS" -gt 0 ]; then
+      echo "FAIL: $BAD_SUPP_STATUS suppressed_findings with invalid lifecycle_status (must be rejected/deferred)"
+      ERRORS=$((ERRORS + 1))
+    else
+      echo "PASS: suppressed_findings lifecycle_status values valid"
+    fi
+  fi
 fi
 
 # 12. spec_requirements validation

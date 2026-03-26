@@ -21,6 +21,8 @@ description: 'Use when reviewing local code changes — staged files, branches, 
 /codereview --base main --spec plan.md  # branch review with spec check
 /codereview --base main --no-chunk     # force standard mode (skip chunking)
 /codereview --force-chunk              # force chunked mode for testing
+/codereview suppress <finding-id> --status rejected --reason "explanation"
+/codereview suppress <finding-id> --status deferred --defer-days 30 --reason "next sprint"
 ```
 
 ---
@@ -920,6 +922,22 @@ The script mechanically performs:
 - Computes `tier_summary` counts
 
 If `python3` is not available or the script fails, fall back to performing these steps manually per the rules below.
+
+**5c. Finding lifecycle (implemented by `scripts/lifecycle.py` — do not reimplement):**
+
+Run the lifecycle script on enriched findings:
+```bash
+python3 scripts/lifecycle.py \
+  --findings /tmp/codereview-enriched.json \
+  --suppressions .codereview-suppressions.json \
+  --changed-files /tmp/codereview-changed-files.txt \
+  --scope "$SCOPE" --base-ref "$BASE_REF" \
+  > /tmp/codereview-lifecycle.json
+```
+
+The script computes fingerprints, tags findings as `new` or `recurring` (by comparing against the most recent previous review), and filters out suppressed findings (rejected/deferred). Output replaces the enriched findings for report generation.
+
+If the script or python3 is not available, skip lifecycle tagging — all findings are treated as new.
 
 **Action tier rules** (reference — implemented by script):
 

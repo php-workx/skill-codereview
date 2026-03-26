@@ -47,12 +47,12 @@ This file contains the full markdown report template for Step 6 of the coderevie
 
 Issues that should block merge or be fixed immediately.
 
-| # | Sev | Source | File | Line | Summary | Fix |
-|---|-----|--------|------|------|---------|-----|
-| 1 | critical | AI:security | path/file.py | 42 | SQL injection | Use parameterized query |
+| # | Sev | Lifecycle | Source | File | Line | Summary | Fix |
+|---|-----|-----------|--------|------|------|---------|-----|
+| 1 | critical | [NEW] | AI:security | path/file.py | 42 | SQL injection | Use parameterized query |
 
 ### Finding 1: <summary>
-**Category:** security | **Confidence:** 0.92 | **Source:** AI:security
+**Category:** security | **Confidence:** 0.92 | **Source:** AI:security | **[NEW]**
 **Failure mode:** <what breaks and when>
 **Fix:** <smallest safe remediation>
 
@@ -62,8 +62,8 @@ Issues that should block merge or be fixed immediately.
 
 Worth addressing in this PR — fast for code agents.
 
-| # | Sev | Source | File | Line | Summary | Fix |
-|---|-----|--------|------|------|---------|-----|
+| # | Sev | Lifecycle | Source | File | Line | Summary | Fix |
+|---|-----|-----------|--------|------|------|---------|-----|
 | ... |
 
 ---
@@ -72,8 +72,8 @@ Worth addressing in this PR — fast for code agents.
 
 Fix if convenient, or defer to a follow-up.
 
-| # | Sev | Source | File | Line | Summary |
-|---|-----|--------|------|------|---------|
+| # | Sev | Lifecycle | Source | File | Line | Summary |
+|---|-----|-----------|--------|------|------|---------|
 | ... |
 
 ---
@@ -119,6 +119,15 @@ Suggested fix order for code agents:
 **Pushback hints:** Findings marked with confidence < 0.75 may warrant
 verification before fixing. Check the codebase context — the reviewer
 may have missed something. Use your judgment.
+
+---
+
+## Suppressed Findings (N)
+- X rejected, Y deferred
+- To review suppressions, see `.codereview-suppressions.json`
+- To un-suppress: remove the entry from `.codereview-suppressions.json`
+
+To suppress a finding: `/codereview suppress <finding-id> --status rejected --reason 'reason'`
 
 ---
 
