@@ -400,6 +400,7 @@ If a spec is found, include it in the context packet for requirements completene
 - Dead code flags (functions with no callers)
 - Complexity hotspots (from `scripts/complexity.sh` output at `/tmp/codereview-complexity.json`)
 - Git history risk scores (from `scripts/git-risk.sh` output at `/tmp/codereview-git-risk.json`)
+- Test coverage data (from `scripts/coverage-collect.py` output at `/tmp/codereview-coverage.json`)
 - Project tooling profile (from `scripts/discover-project.py` + agent interpretation)
 - Language standards (if loaded)
 - Spec/plan content (if available)
@@ -416,6 +417,17 @@ The script computes churn frequency and bug-related commit counts for each chang
 
 If the script is not available, skip git history risk — explorers still work without it.
 
+**2j. Test coverage data (implemented by `scripts/coverage-collect.py` — do not reimplement):**
+
+Run the coverage collection script:
+```bash
+echo "$CHANGED_FILES" | python3 scripts/coverage-collect.py > /tmp/codereview-coverage.json
+```
+
+The script detects languages from file extensions, checks for existing coverage artifacts, and optionally runs tests with `--run-tests`. Output is JSON with per-file coverage data. Include in the context packet (Step 2h).
+
+Note: Coverage shows test execution, not correctness. Review all code thoroughly regardless of coverage.
+
 #### Step 2-L: Tiered Context Gathering (Large-Diff Mode Only)
 
 When `REVIEW_MODE = "chunked"`, replace the monolithic context gathering (Steps 2a–2h) with a two-phase approach that controls context budget.
@@ -426,9 +438,10 @@ When `REVIEW_MODE = "chunked"`, replace the monolithic context gathering (Steps 
 2. **Dead code check (scoped)** — Only check *newly added* public functions (not modified functions — if they existed before, they presumably have callers). This dramatically reduces Grep calls for large diffs.
 3. **Complexity analysis (hotspots only)** — Run radon/gocyclo but only report functions rated **C or worse** (complexity >= 11). Skip A/B ratings to keep context compact.
 4. **Git history risk scoring** — Run `scripts/git-risk.sh` once globally. Per-file risk scores apply across all chunks (~1-2k tokens).
-5. **Repo-level review instructions** — Same as Step 2e (fixed-size, regardless of diff size).
-6. **Language standards** — Same as Step 2f (fixed-size per language).
-7. **Spec/plan** — Same as Step 2g (fixed-size).
+5. **Test coverage data** — Run `scripts/coverage-collect.py` once globally. Only include files with < 50% coverage to keep token budget compact. Full coverage table goes to Phase B (per-chunk context) for files in that chunk.
+6. **Repo-level review instructions** — Same as Step 2e (fixed-size, regardless of diff size).
+7. **Language standards** — Same as Step 2f (fixed-size per language).
+8. **Spec/plan** — Same as Step 2g (fixed-size).
 
 Store as `GLOBAL_CONTEXT`.
 

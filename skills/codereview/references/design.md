@@ -130,6 +130,7 @@ This document contains background context for the codereview skill. It is not ne
 | Best-effort degradation | Skip unavailable tools with explicit status rather than failing | Previous plan |
 | Repo-level config file | Teams customize passes, cadence, pushback, paths, thresholds | CodeRabbit `.coderabbit.yaml`, Gemini `config.yaml` |
 | Historical risk scoring | Git log churn + bug frequency provides a per-file risk signal. Files with recent bug history get extra explorer attention. | Complements path-based risk heuristics with data-driven signal |
+| Test coverage data integration | Collect measured line/function coverage from language-native tools (go cover, coverage.py, tarpaulin, c8/nyc) and feed it as context to explorers. Replaces inference-based coverage guessing with data. Best-effort: skips gracefully when tools are absent. | Measured coverage is strictly more accurate than AI inference for determining which code is exercised by tests |
 
 ---
 

@@ -207,6 +207,21 @@ Force chunked review mode even when the diff is below thresholds. Useful for tes
 /codereview --force-chunk
 ```
 
+### `coverage`
+
+Settings for test coverage data collection. The skill detects languages from changed file extensions and checks for existing coverage artifacts. By default, it only parses pre-existing data — it does not run your test suite.
+
+```yaml
+coverage:
+  run_tests: false        # default: only parse existing coverage data
+  test_timeout: 300       # seconds, only applies when run_tests: true
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `run_tests` | `false` | When `false`, only parse existing coverage artifacts. When `true`, run the test suite to generate fresh coverage if no existing data is found. |
+| `test_timeout` | `300` | Timeout in seconds for test suite execution. Only applies when `run_tests: true`. Prevents the review from hanging on slow test suites. |
+
 ## Precedence
 
 If multiple configuration sources exist:

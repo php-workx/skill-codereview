@@ -90,6 +90,25 @@ Validation criteria for the codereview skill. Not needed at runtime — use for 
 | New files (no git history) | New files have churn=0, bug_commits=0, risk="low" — correct default for files with no history |
 | `--months` flag | Custom lookback period used; `lookback_months` in output reflects the specified value |
 
+## Test Coverage Data Integration
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| Go files in diff, `cover.out` exists | `scripts/coverage-collect.py` parses Go coverage, outputs per-file line coverage and uncovered functions for changed files |
+| Python files in diff, `.coverage` exists | Script parses Python coverage database (via `coverage json` export), outputs per-file data for changed files |
+| Rust files in diff, `tarpaulin-report.json` exists | Script parses Tarpaulin JSON report, outputs per-file data for changed files |
+| TypeScript files in diff, `coverage/` directory exists | Script parses Istanbul/c8/nyc JSON coverage, outputs per-file data for changed files |
+| No coverage tool installed | `tool_status` entry has `status: "not_installed"`, script does not fail |
+| No existing coverage data, `run_tests: false` (default) | `tool_status` entry has `status: "skipped"` with note about setting `run_tests: true` |
+| Stale coverage artifact (older than recent commits) | Warning included: "Coverage data may be stale (predates recent changes)" |
+| `run_tests: true`, tests fail | Partial coverage reported if available, `tool_status: "partial"` with note about test failures |
+| `run_tests: true`, test suite times out | Partial coverage reported, note about timeout |
+| Multi-language repo (e.g., Go + Python) | Each language processed independently, separate `tool_status` entries (`coverage_go`, `coverage_python`) |
+| Empty CHANGED_FILES | Valid JSON with empty `languages_detected`, `coverage_data`, `tool_status` |
+| Only test files in CHANGED_FILES | Test files excluded from coverage output, `coverage_data` is empty |
+| Script not available | Coverage collection skipped, explorers still work without measured coverage data |
+| Script fails (non-zero exit) | Agent logs stderr, skips coverage data, continues with remaining context gathering |
+
 ## Pipeline Scripts
 
 | Scenario | Expected Behavior |
@@ -104,6 +123,8 @@ Validation criteria for the codereview skill. Not needed at runtime — use for 
 | `scripts/complexity.sh` not available | Agent runs radon/gocyclo manually or skips complexity analysis |
 | `scripts/discover-project.py` available | Step 2a-1 discovers project tooling, agent interprets build files |
 | `scripts/discover-project.py` not available | Project discovery skipped, `run-scans.sh` uses Tier 1 + Tier 2 only (no Tier 3 project commands) |
+| `scripts/coverage-collect.py` available | Step 2j runs the script, includes per-file coverage data in context packet |
+| `scripts/coverage-collect.py` not available | Coverage collection skipped. Explorers still work without measured coverage data. |
 | Script exits non-zero | Agent logs stderr, falls back to manual execution for that step |
 | Script produces invalid JSON | Agent validates with `jq`, falls back to manual execution if invalid |
 | `--project-profile` with valid JSON | `run-scans.sh` executes Tier 3 project commands from profile |

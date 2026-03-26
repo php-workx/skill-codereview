@@ -68,7 +68,7 @@ for script in run-scans.sh complexity.sh validate_output.sh git-risk.sh; do
 done
 
 # 1b. Python scripts parse cleanly
-for script in enrich-findings.py discover-project.py; do
+for script in enrich-findings.py discover-project.py coverage-collect.py; do
   if python3 -c "import ast; ast.parse(open('$SCRIPTS/$script').read())" 2>/dev/null; then
     pass "$script syntax valid"
   else
@@ -335,7 +335,83 @@ fi
 
 # ============================================================
 echo ""
-echo "=== 8. Integration: enrich-findings.py → validate_output.sh pipeline ==="
+echo "=== 8. coverage-collect.py ==="
+echo ""
+
+# 8a. Empty input produces valid output
+COVERAGE_EMPTY=$(echo "" | python3 "$SCRIPTS/coverage-collect.py" 2>/dev/null)
+assert_json_valid "coverage-collect empty input produces valid JSON" "$COVERAGE_EMPTY"
+assert_json_field "empty input has empty languages_detected" "$COVERAGE_EMPTY" \
+  "d['languages_detected'] == []"
+assert_json_field "empty input has empty coverage_data" "$COVERAGE_EMPTY" \
+  "d['coverage_data'] == []"
+assert_json_field "empty input has empty tool_status" "$COVERAGE_EMPTY" \
+  "d['tool_status'] == {}"
+assert_json_field "empty input has empty warnings" "$COVERAGE_EMPTY" \
+  "d['warnings'] == []"
+
+# 8b. Output structure with non-code files
+COVERAGE_NOCODE=$(echo "README.md" | python3 "$SCRIPTS/coverage-collect.py" 2>/dev/null)
+assert_json_valid "coverage-collect non-code file produces valid JSON" "$COVERAGE_NOCODE"
+assert_json_field "non-code file has empty languages_detected" "$COVERAGE_NOCODE" \
+  "d['languages_detected'] == []"
+
+# 8c. Python file detected
+COVERAGE_PY=$(echo "src/auth/login.py" | python3 "$SCRIPTS/coverage-collect.py" 2>/dev/null)
+assert_json_valid "coverage-collect with .py file produces valid JSON" "$COVERAGE_PY"
+assert_json_field "python detected in languages_detected" "$COVERAGE_PY" \
+  "'python' in d['languages_detected']"
+assert_json_field "has coverage_data array" "$COVERAGE_PY" "'coverage_data' in d"
+assert_json_field "has tool_status object" "$COVERAGE_PY" "'tool_status' in d"
+assert_json_field "has warnings array" "$COVERAGE_PY" "'warnings' in d"
+
+# 8d. Go file detected
+COVERAGE_GO=$(echo "src/api/handler.go" | python3 "$SCRIPTS/coverage-collect.py" 2>/dev/null)
+assert_json_valid "coverage-collect with .go file produces valid JSON" "$COVERAGE_GO"
+assert_json_field "go detected in languages_detected" "$COVERAGE_GO" \
+  "'go' in d['languages_detected']"
+
+# 8e. TypeScript file detected
+COVERAGE_TS=$(echo "src/app/index.ts" | python3 "$SCRIPTS/coverage-collect.py" 2>/dev/null)
+assert_json_valid "coverage-collect with .ts file produces valid JSON" "$COVERAGE_TS"
+assert_json_field "typescript detected in languages_detected" "$COVERAGE_TS" \
+  "'typescript' in d['languages_detected']"
+
+# 8f. Rust file detected
+COVERAGE_RS=$(echo "src/main.rs" | python3 "$SCRIPTS/coverage-collect.py" 2>/dev/null)
+assert_json_valid "coverage-collect with .rs file produces valid JSON" "$COVERAGE_RS"
+assert_json_field "rust detected in languages_detected" "$COVERAGE_RS" \
+  "'rust' in d['languages_detected']"
+
+# 8g. Multi-language detection
+COVERAGE_MULTI=$(printf "src/auth/login.py\nsrc/api/handler.go\nsrc/app/index.ts" | \
+  python3 "$SCRIPTS/coverage-collect.py" 2>/dev/null)
+assert_json_valid "coverage-collect multi-language produces valid JSON" "$COVERAGE_MULTI"
+assert_json_field "detects all 3 languages" "$COVERAGE_MULTI" \
+  "len(d['languages_detected']) == 3"
+assert_json_field "multi-language has go" "$COVERAGE_MULTI" \
+  "'go' in d['languages_detected']"
+assert_json_field "multi-language has python" "$COVERAGE_MULTI" \
+  "'python' in d['languages_detected']"
+assert_json_field "multi-language has typescript" "$COVERAGE_MULTI" \
+  "'typescript' in d['languages_detected']"
+
+# 8h. Test files excluded from coverage data (only test files → no coverage entries)
+COVERAGE_TESTONLY=$(printf "test_auth.py\nhandler_test.go\napp.test.ts" | \
+  python3 "$SCRIPTS/coverage-collect.py" 2>/dev/null)
+assert_json_valid "coverage-collect test-only files produces valid JSON" "$COVERAGE_TESTONLY"
+assert_json_field "test-only files has empty coverage_data" "$COVERAGE_TESTONLY" \
+  "d['coverage_data'] == []"
+
+# 8i. tool_status keys use correct naming convention
+COVERAGE_KEYS=$(printf "src/auth.py\nsrc/handler.go" | python3 "$SCRIPTS/coverage-collect.py" 2>/dev/null)
+assert_json_valid "coverage tool_status key check produces valid JSON" "$COVERAGE_KEYS"
+assert_json_field "tool_status keys follow coverage_<lang> pattern" "$COVERAGE_KEYS" \
+  "all(k.startswith('coverage_') for k in d['tool_status'].keys())"
+
+# ============================================================
+echo ""
+echo "=== 9. Integration: enrich-findings.py → validate_output.sh pipeline ==="
 echo ""
 
 # Build a complete review envelope from enriched findings

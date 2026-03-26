@@ -190,14 +190,14 @@
     },
     "tool_status": {
       "type": "object",
-      "description": "Status of each tool/pass that was attempted",
+      "description": "Status of each tool/pass that was attempted. Keys include deterministic scan tools (semgrep, trivy, etc.), AI passes (ai_correctness, ai_security, etc.), and coverage tools (coverage_go, coverage_python, coverage_rust, coverage_typescript).",
       "additionalProperties": {
         "type": "object",
         "required": ["status"],
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["ran", "skipped", "failed", "not_installed", "sandbox_blocked"]
+            "enum": ["ran", "skipped", "failed", "not_installed", "sandbox_blocked", "partial"]
           },
           "version": {
             "type": ["string", "null"]
