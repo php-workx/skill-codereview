@@ -111,7 +111,7 @@ When the diff sets environment variables from dynamic sources (user config, matr
   "summary": "Step output values injected into shell expression without escaping",
   "evidence": "Line 189: shell command built with fmt.Sprintf(\"echo %s >> $CLAI_OUTPUT\", outputValue). The outputValue comes from parsing a previous step's $CLAI_OUTPUT file (runner.go:145), not from direct user input. However, a malicious or buggy step could write output containing shell metacharacters (;, |, $(), backticks). No escaping or quoting applied before shell interpolation.",
   "failure_mode": "A compromised or buggy workflow step can inject arbitrary shell commands into subsequent steps via crafted output values. Attacker who controls one step's output gains code execution in the next step's shell context.",
-  "fix": "Use shellescape/shlex.quote on outputValue before interpolation, or pass as an environment variable instead of inline shell interpolation.",
+  "fix": "Use exec.Command with separate arguments instead of shell interpolation, or apply Go shell escaping (e.g., github.com/kballard/go-shellquote) before interpolation, or pass as an environment variable.",
   "tests_to_add": ["Test step output containing shell metacharacters does not execute as commands"]
 }
 ```

@@ -95,4 +95,5 @@ When reviewing a large changeset, you may be assigned a **chunk** — a subset o
    "evidence": "CROSS-CHUNK: depends on src/auth/session.py:validate_token(). This function's return type may have changed (it's in Chunk 1). If validate_token() now returns Optional[Session] instead of Session, the unchecked access at line 45 will raise AttributeError."
    ```
 4. **Investigation tools:** You still have full access to Grep, Read, and Glob across the entire codebase — not just your chunk's files. Use them to trace call paths into other chunks when needed, but report cross-chunk concerns with the CROSS-CHUNK tag rather than as standalone findings about other chunks' code.
+   > **Note:** CROSS-CHUNK tagged findings are collected for future processing by the cross-chunk synthesizer (see SKILL.md §4-L.3). Until the synthesizer is implemented, these tags serve as documentation for the judge to consider when evaluating cross-boundary interactions.
 5. **Chunk context:** Your prompt includes chunk-scoped context (callers/callees for your chunk's functions). For cross-chunk references, use the cross-chunk interface summary or investigate with tools.
