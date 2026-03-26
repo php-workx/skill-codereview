@@ -25,7 +25,7 @@
     "finding_b": { "file": "src/parser.py", "pass": "correctness", "severity": "medium", "summary": "Missing null check in render function" },
     "expected_exact_match": false,
     "expected_fuzzy_match": true,
-    "note": "Similar but nearly identical wording — only 'parse' vs 'render' differs, 4/5 = 80% overlap"
+    "note": "Known limitation: 80% token overlap matches despite parse/render being different functions. Algorithm improvement needed — see CodeRabbit Finding #4"
   },
   {
     "finding_a": { "file": "src/parser.py", "pass": "correctness", "severity": "medium", "summary": "Null pointer dereference in parse function" },

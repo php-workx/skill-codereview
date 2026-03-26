@@ -52,7 +52,14 @@ case "$cmd" in
       exit 0
     fi
     ts="$(get_ts_iso)"
-    printf '{"type":"start","name":"%s","ts":"%s"}\n' "$name" "$ts" >> "$TIMING_FILE" 2>/dev/null || true
+    # Use jq for safe JSON serialization (falls back to sanitized printf if jq unavailable)
+    if command -v jq >/dev/null 2>&1; then
+      jq -nc --arg t "start" --arg n "$name" --arg ts "$ts" \
+        '{"type":$t,"name":$n,"ts":$ts}' >> "$TIMING_FILE" 2>/dev/null || true
+    else
+      safe_name=$(printf '%s' "$name" | tr -d '"\\\n')
+      printf '{"type":"start","name":"%s","ts":"%s"}\n' "$safe_name" "$ts" >> "$TIMING_FILE" 2>/dev/null || true
+    fi
     exit 0
     ;;
 
@@ -62,7 +69,13 @@ case "$cmd" in
       exit 0
     fi
     ts="$(get_ts_iso)"
-    printf '{"type":"stop","name":"%s","ts":"%s"}\n' "$name" "$ts" >> "$TIMING_FILE" 2>/dev/null || true
+    if command -v jq >/dev/null 2>&1; then
+      jq -nc --arg t "stop" --arg n "$name" --arg ts "$ts" \
+        '{"type":$t,"name":$n,"ts":$ts}' >> "$TIMING_FILE" 2>/dev/null || true
+    else
+      safe_name=$(printf '%s' "$name" | tr -d '"\\\n')
+      printf '{"type":"stop","name":"%s","ts":"%s"}\n' "$safe_name" "$ts" >> "$TIMING_FILE" 2>/dev/null || true
+    fi
     exit 0
     ;;
 
@@ -73,10 +86,22 @@ case "$cmd" in
       exit 0
     fi
     ts="$(get_ts_iso)"
-    if [ -n "$value" ]; then
-      printf '{"type":"mark","name":"%s","value":"%s","ts":"%s"}\n' "$name" "$value" "$ts" >> "$TIMING_FILE" 2>/dev/null || true
+    if command -v jq >/dev/null 2>&1; then
+      if [ -n "$value" ]; then
+        jq -nc --arg t "mark" --arg n "$name" --arg v "$value" --arg ts "$ts" \
+          '{"type":$t,"name":$n,"value":$v,"ts":$ts}' >> "$TIMING_FILE" 2>/dev/null || true
+      else
+        jq -nc --arg t "mark" --arg n "$name" --arg ts "$ts" \
+          '{"type":$t,"name":$n,"ts":$ts}' >> "$TIMING_FILE" 2>/dev/null || true
+      fi
     else
-      printf '{"type":"mark","name":"%s","ts":"%s"}\n' "$name" "$ts" >> "$TIMING_FILE" 2>/dev/null || true
+      safe_name=$(printf '%s' "$name" | tr -d '"\\\n')
+      if [ -n "$value" ]; then
+        safe_value=$(printf '%s' "$value" | tr -d '"\\\n')
+        printf '{"type":"mark","name":"%s","value":"%s","ts":"%s"}\n' "$safe_name" "$safe_value" "$ts" >> "$TIMING_FILE" 2>/dev/null || true
+      else
+        printf '{"type":"mark","name":"%s","ts":"%s"}\n' "$safe_name" "$ts" >> "$TIMING_FILE" 2>/dev/null || true
+      fi
     fi
     exit 0
     ;;

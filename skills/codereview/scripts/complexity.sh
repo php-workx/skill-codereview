@@ -90,7 +90,7 @@ else
     # Format: "    F 42:0 function_name - C (15)"
     # or:     "    M 10:4 ClassName.method_name - D (25)"
     # Extract: function_name, rating letter, score
-    if echo "$line" | grep -qE '^\s+[FMCG]\s+[0-9]+:[0-9]+\s+.+ - [A-F] \([0-9]+\)'; then
+    if echo "$line" | grep -qE '^[[:space:]]+[FMCG][[:space:]]+[0-9]+:[0-9]+[[:space:]]+.+ - [A-F] \([0-9]+\)'; then
       # Parse the components
       FUNC_NAME=$(echo "$line" | sed -E 's/^[[:space:]]+[FMCG][[:space:]]+[0-9]+:[0-9]+[[:space:]]+(.+)[[:space:]]+-[[:space:]]+[A-F][[:space:]]+\([0-9]+\).*/\1/')
       RATING=$(echo "$line" | sed -E 's/.*[[:space:]]-[[:space:]]+([A-F])[[:space:]]+\([0-9]+\).*/\1/')

@@ -48,8 +48,7 @@ fi
 SHALLOW_CLONE="false"
 WARNING=""
 
-COMMIT_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo "0")
-if [ "$COMMIT_COUNT" -lt 50 ] 2>/dev/null; then
+if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
   SHALLOW_CLONE="true"
   WARNING="Shallow clone detected — git history risk scores may be incomplete"
 fi

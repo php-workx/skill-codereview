@@ -112,10 +112,16 @@ def find_project_root(filepath: str, repo_root: str) -> tuple:
 
     Returns (root_dir_relative, marker_file) or (".", None) if none found.
     The root is relative to repo_root.
+    Rejects paths that resolve outside the repo root (path traversal guard).
     """
     abs_repo = os.path.abspath(repo_root)
+    # Resolve the file path and verify it stays within the repo root
+    resolved = os.path.abspath(os.path.join(repo_root, filepath))
+    if not resolved.startswith(abs_repo + os.sep) and resolved != abs_repo:
+        print(f"WARNING: path escapes repo root, skipping: {filepath}", file=sys.stderr)
+        return (".", None)
     # Start from the directory containing the file
-    current = os.path.dirname(os.path.abspath(os.path.join(repo_root, filepath)))
+    current = os.path.dirname(resolved)
 
     while True:
         for marker in PROJECT_MARKERS:

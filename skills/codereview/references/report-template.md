@@ -52,7 +52,7 @@ Issues that should block merge or be fixed immediately.
 | 1 | critical | [NEW] | AI:security | path/file.py | 42 | SQL injection | Use parameterized query |
 
 ### Finding 1: <summary>
-**Category:** security | **Confidence:** 0.92 | **Source:** AI:security | **[NEW]**
+**Category:** security | **Confidence:** 0.92 | **Source:** AI:security | **Lifecycle:** NEW
 **Failure mode:** <what breaks and when>
 **Fix:** <smallest safe remediation>
 

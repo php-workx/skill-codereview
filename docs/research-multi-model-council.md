@@ -123,7 +123,7 @@ Each pass uses the same model but with a different constitution prompt. The mode
 - `fallback_models`: [o4-mini] — retry chain when primary model fails
 
 **Self-Reflection Flow (code suggestions only):**
-```
+```text
 Step 1: Generate suggestions with primary model (e.g., gpt-5.4)
 Step 2: Score each suggestion with reasoning model (e.g., o4-mini)
          → Each suggestion gets a 0-10 score + "why" explanation
@@ -356,7 +356,7 @@ Option C was tempting (cheapest) but the second model needs to *investigate the 
 
 ### Architecture
 
-```
+```text
 Step 4 (council mode):
 
   Explorer Wave (all launched in parallel, single message):
@@ -421,7 +421,7 @@ If `council.passes: "all"` is configured, ALL passes including extended are doub
 
 ### Cross-model judge prompt additions
 
-```
+```markdown
 ## Cross-Model Synthesis (Council Mode)
 
 You are receiving findings from two models (A and B) for each core pass.

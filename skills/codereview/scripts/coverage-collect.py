@@ -94,8 +94,8 @@ TEST_COMMANDS = {
         "cargo-llvm-cov": ["cargo", "llvm-cov", "--json", "--output-path", "{COVER_DIR}/lcov.json"],
     },
     "typescript": {
-        "c8": ["npx", "c8", "report", "--reporter=json", "--reports-dir={COVER_DIR}/"],
-        "nyc": ["npx", "nyc", "report", "--reporter=json", "--report-dir={COVER_DIR}/"],
+        "c8": ["npx", "c8", "--reporter=json", "--reports-dir={COVER_DIR}/", "npm", "test"],
+        "nyc": ["npx", "nyc", "--reporter=json", "--report-dir={COVER_DIR}/", "npm", "test"],
         "jest": ["npx", "jest", "--coverage", "--coverageDirectory={COVER_DIR}/"],
     },
 }

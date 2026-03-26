@@ -52,17 +52,20 @@ TIER_ORDER = {
 # Helpers
 # ---------------------------------------------------------------------------
 
-def file_hash_4(filename: str) -> str:
-    """Return the first 4 hex chars of the SHA-256 of *filename*."""
-    return hashlib.sha256(filename.encode("utf-8")).hexdigest()[:4]
-
-
 def generate_id(finding: dict) -> str:
-    """Generate a stable finding ID: <pass>-<file_hash_4chars>-<line>."""
+    """Generate a collision-resistant finding ID.
+
+    Shape: <pass>-<8 hex of sha256(file+summary)>-<line>
+    Uses 8 hex chars (32 bits) instead of 4 (16 bits) and includes the
+    summary in the hash to distinguish different findings on the same line.
+    """
     pass_name = finding.get("pass", "unknown")
     file_path = finding.get("file", "")
+    summary = finding.get("summary", "")
     line = finding.get("line", 0)
-    return f"{pass_name}-{file_hash_4(file_path)}-{line}"
+    hash_input = f"{file_path}:{summary}"
+    file_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()[:8]
+    return f"{pass_name}-{file_hash}-{line}"
 
 
 def load_findings(path: str) -> list:
