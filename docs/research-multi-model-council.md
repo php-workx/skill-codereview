@@ -336,6 +336,159 @@ This maps directly to what the judge already does (Steps 1-6 in `reviewer-judge.
 
 ---
 
+## Ready-to-Implement Design: Same-Family Council (Option B)
+
+This is the full implementation design produced during v1.2 planning. It was **deferred** because same-family model variants share training data and the quality improvement is uncertain. However, the design is complete and can be implemented if empirical evidence shows same-family diversity adds value, or if cross-vendor spawning becomes available.
+
+### Design approach
+
+**Options considered:**
+
+| Option | Approach | Cost | Pros | Cons |
+|--------|----------|------|------|------|
+| A | Full pipeline × 2 models | 2x everything | Maximum independence | Doubles cost AND latency; both pipelines catch same obvious issues |
+| B | Explorers × 2 models, single judge | 2x explorers, 1x judge | Diversity where it matters (exploration), centralized synthesis | Still doubles explorer cost |
+| C | Standard pipeline, then council validation on findings | 1x pipeline + 1 council call | Cheapest; leverages existing `/council` skill | Second model doesn't investigate code, only reviews findings |
+
+**Chosen approach: Option B** — Run each core explorer pass with two models in parallel, then feed all findings to a single cross-model judge. This gives diversity at the exploration stage (where different models notice different things) while keeping synthesis centralized. The judge already performs adversarial validation — extending it to cross-model synthesis is a natural fit.
+
+Option C was tempting (cheapest) but the second model needs to *investigate the code itself*, not just review someone else's findings. An LLM reviewing findings without reading the code can only assess plausibility, not correctness.
+
+### Architecture
+
+```
+Step 4 (council mode):
+
+  Explorer Wave (all launched in parallel, single message):
+  ├── correctness (model A)    correctness (model B)
+  ├── security (model A)       security (model B)
+  ├── reliability (model A)    reliability (model B)
+  ├── test-adequacy (model A)  test-adequacy (model B)
+  ├── (extended passes: model A only — not doubled)
+  └── (spec-verification: model A only — not doubled)
+           │
+           ▼
+  Cross-Model Judge (single agent, model A):
+  ├── Match findings across models (file + pass + summary similarity)
+  ├── Corroborated findings (both models) → confidence boost (+0.15, cap 0.98)
+  ├── Model-A-only findings → "single-source", standard adversarial validation
+  ├── Model-B-only findings → "single-source", standard adversarial validation
+  ├── Contradictions → severity floor "medium", flag for human attention
+  └── All standard judge duties: verdict, strengths, spec_gaps, dedup, tier
+```
+
+### CLI and configuration
+
+CLI flags: `--council` enables with defaults, `--council-model opus` overrides model B.
+
+```yaml
+# .codereview.yaml
+council:
+  enabled: false          # opt-in (default off — doubles core explorer cost)
+  model_b: "opus"         # second model for council mode
+  passes: "core"          # "core" (4 passes doubled) or "all" (8 passes doubled)
+```
+
+Default pairing: session's default model (model A) + configurable model B.
+
+| Config value | Model B | Notes |
+|-------------|---------|-------|
+| `opus` | Claude Opus | Same vendor, higher capability — catches subtler issues |
+| `sonnet` | Claude Sonnet | Use when session default is Opus — cheaper second opinion |
+| `haiku` | Claude Haiku | Same vendor, fast/cheap — diversity through capability difference |
+
+### How findings are matched across models
+
+The judge determines which findings from model A and model B refer to the same issue. Matching criteria (ordered by strength):
+
+1. **Exact file + line + pass** — same file, same line (±5 lines tolerance), same pass → corroborated
+2. **Same file + pass + similar summary** — same file, same pass, summary key terms overlap >= 50% → likely corroborated (judge verifies)
+3. **Same file, different pass** — e.g., model A flags as correctness, model B flags as reliability for the same code → judge merges into one finding with the more appropriate pass
+4. **No match** — single-source finding
+
+The judge performs this matching, not the orchestrator. The orchestrator labels each finding with `model_source: "A"` or `model_source: "B"` and passes all findings to the judge.
+
+If Feature 3 (fingerprinting) is implemented, the judge's cross-model matching can use fingerprints for more stable matching.
+
+### Extended passes
+
+Extended passes (error-handling, api-contract, concurrency, spec-verification) run with **model A only** in council mode. Reasons:
+- They're adaptive-skip and often don't run at all
+- Doubling them adds cost without proportional benefit
+- Core passes (correctness, security, reliability, test-adequacy) are where model diversity matters most
+
+If `council.passes: "all"` is configured, ALL passes including extended are doubled.
+
+### Cross-model judge prompt additions
+
+```
+## Cross-Model Synthesis (Council Mode)
+
+You are receiving findings from two models (A and B) for each core pass.
+Each finding includes a `model_source` field ("A" or "B").
+
+For each finding, determine its cross-model status:
+
+1. **Corroborated** — Both models flagged a similar issue (same file, same or
+   adjacent line ±5, same pass, similar description).
+   Boost confidence by +0.15 (cap at 0.98).
+   In evidence, note: "Corroborated by both models."
+
+2. **Single-source** — Only one model flagged this issue.
+   Keep original confidence. In evidence, note: "Single-model finding (A/B only)."
+   Apply EXTRA scrutiny in adversarial validation — single-source findings are
+   more likely to be false positives. Verify with Read/Grep before keeping.
+
+3. **Contradiction** — Models reached opposite conclusions about the same code
+   (e.g., A says "this is safe", B says "this is vulnerable").
+   Set severity floor to "medium". Include BOTH perspectives in evidence.
+   In evidence, note: "Models disagree — requires human review."
+   The contradiction itself is the finding — do not resolve it, surface it.
+
+After cross-model synthesis, proceed with standard judge duties (dedup, verdict,
+strengths, spec_gaps). The `model_source` field should be preserved in the
+output for auditability but is not shown in the report unless contradicted.
+```
+
+### Pipeline interaction
+
+- **Step 3.5 (Adaptive skip)**: Evaluated ONCE (not per model). Skipped = skipped for both.
+- **Step 4a (Explorer launch)**: 8 core explorer Tasks instead of 4, all in one parallel message. Each Task's `model` parameter set to either default (A) or configured `model_b` (B). Prompt content identical — only model differs.
+- **Step 4b (Judge)**: Receives all findings labeled with `model_source`. Judge model is always the session default (model A) — strongest model for synthesis.
+- **Step 5 (Merge)**: Adds `council_mode: true` to JSON envelope. `model_source` preserved.
+- **Large-diff chunked mode**: Compounds: 6 chunks × 8 = 48 core Tasks. **Safeguard:** Cap total Task calls at 36. If exceeded, council on Tier 1 chunks only.
+
+### Token budget
+
+| Component | Standard | Council (core) | Council (all) |
+|-----------|---------|---------------|--------------|
+| Core explorer Tasks | 4 | 8 | 8 |
+| Extended Tasks | 0-4 | 0-4 | 0-8 |
+| Judge Tasks | 1 | 1 | 1 |
+| **Total** | **5-9** | **9-13** | **9-17** |
+| **Cost multiplier** | **1x** | **~1.8x** | **~2.5x** |
+
+### Edge cases
+
+- **Model B unavailable/rate-limited**: Degrade to single-model for that pass. `tool_status` notes degradation.
+- **Model B invalid output**: Skip findings, note in evidence.
+- **All model B fail**: Set `council_mode: "degraded"` instead of `true`.
+- **Council + spec verification**: Spec verification single global pass (model A only).
+
+### Schema additions (when implemented)
+
+- Finding: `model_source` field (string, "A"/"B")
+- Envelope: `council_mode` (boolean or string "true"/"degraded"/"false")
+- Report: `[CORROBORATED]` and `[MODELS DISAGREE]` badges
+
+### Prerequisites for implementation
+
+1. **Empirical evidence** that same-family diversity (Sonnet↔Opus) catches meaningfully different bugs. Run the same review with both models on 10+ real diffs and compare finding sets.
+2. **Or:** Cross-vendor spawning mechanism (API calls to OpenAI/Google) becomes available in the agent runtime.
+3. The named expert panel (v1.2 implementation) should be validated first — it may reduce the need for multi-model by improving single-model reasoning quality.
+
+---
+
 ## Open Questions
 
 1. **How much diversity do same-family model variants actually provide?** Sonnet and Opus share training data — how often does Opus catch something Sonnet misses, and vice versa? We need empirical data.
