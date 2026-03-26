@@ -115,7 +115,7 @@ def assign_action_tier(finding: dict) -> str:
     # Rule 2 — Should Fix
     if severity == "medium":
         return "should_fix"
-    if severity == "high" and 0.65 <= confidence < 0.80:
+    if severity in ("critical", "high") and 0.65 <= confidence < 0.80:
         return "should_fix"
 
     # Rule 3 — Consider (everything else above floor — floor already applied)
