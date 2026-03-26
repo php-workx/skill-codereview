@@ -924,7 +924,95 @@ Format:
 
 ---
 
-## Feature 4: Multi-Model Council Review
+## Feature 4 (Replacement): Named Expert Panel for Judge
+
+**Goal:** Restructure the judge prompt as a panel of named experts who analyze findings sequentially, each with a distinct role. This improves reasoning quality at zero additional cost by forcing the judge through distinct analytical phases that can't be silently skipped.
+
+**Replaces:** Multi-Model Council Review (deferred to research — same-family model variants don't provide true diversity, cross-provider requires mechanisms not yet available).
+
+**Inspired by:** Kodus-AI's panel-of-experts pattern (see `docs/research-multi-model-council.md` Section 6). Their production code review platform uses named expert role-play within a single prompt to structure analysis, with a gatekeeper that pre-filters false positives.
+
+### The Expert Panel
+
+The judge's existing analysis steps (Steps 1-6 in `reviewer-judge.md`) are restructured as four named experts. The experts execute sequentially within a single prompt — each builds on the previous expert's output.
+
+| Expert | Current Step(s) | Role | Key additions from Kodus-AI pattern |
+|--------|----------------|------|-------------------------------------|
+| **Gatekeeper** | Step 1 (existence check) | Pre-filter triage — eliminate obvious false positives before expensive analysis | Explicit auto-discard rules for the top false positive categories: phantom knowledge claims (finding references code that doesn't exist), speculative concerns ("might cause issues" without evidence), framework-guaranteed behavior, findings about code outside the diff scope |
+| **Verifier** | Steps 2-3 (existence, contradiction, severity) | Evidence verification — for each finding that survived the gatekeeper, verify with Read/Grep | Must produce a verification annotation per finding: `verified` (code exists, evidence is real), `unverified` (couldn't confirm — downgrade confidence by 0.15), `disproven` (evidence contradicts the finding — drop it) |
+| **Calibrator** | Step 4 (cross-explorer synthesis) | Severity and confidence calibration — apply calibration rules, resolve contradictions between explorers | Cross-explorer root cause grouping (multiple findings about the same underlying issue → merge), contradiction resolution (two explorers disagree → surface the disagreement as a finding), severity adjustment based on verification annotations |
+| **Synthesizer** | Steps 5-6 (spec gaps, verdict) | Final synthesis — produce verdict, strengths, spec_gaps, and the final findings list | Produces the JSON output. Cannot add new findings — only merge, re-rank, and annotate. The synthesizer's job is to produce a coherent report, not to re-investigate. |
+
+### What changes in the judge prompt
+
+The existing `reviewer-judge.md` prompt is restructured but the *content* stays the same. The change is organizational:
+
+**Before (flat instruction list):**
+```
+Step 1: Check existence...
+Step 2: Check contradiction...
+Step 3: Calibrate severity...
+Step 4: Cross-explorer synthesis...
+Step 5: Spec gaps...
+Step 6: Verdict...
+```
+
+**After (named expert sequence):**
+```
+## Expert Panel
+
+You will analyze the explorer findings as a sequence of four experts.
+Each expert produces an annotated output that the next expert receives.
+
+### Gatekeeper (Pre-Filter)
+<existence check instructions + auto-discard rules>
+Output: findings[] with gatekeeper_action: "keep" | "discard" + reason
+
+### Verifier (Evidence Check)
+<Read/Grep verification instructions>
+Output: findings[] with verification: "verified" | "unverified" | "disproven"
+
+### Calibrator (Severity + Synthesis)
+<calibration rules, cross-explorer grouping, contradiction resolution>
+Output: findings[] with final severity, confidence, root_cause_group
+
+### Synthesizer (Verdict)
+<spec gaps, strengths, verdict reasoning>
+Output: final JSON response
+```
+
+### Gatekeeper auto-discard rules
+
+These are the top false positive categories observed in code review (adapted from Kodus-AI's Edward expert):
+
+1. **Phantom knowledge** — Finding references code, functions, or variables that don't exist in the diff or codebase. Discard with reason: "References non-existent code."
+2. **Speculative concern** — Finding says "might cause issues" or "could lead to problems" without concrete evidence of what breaks and when. Discard with reason: "Speculative — no concrete failure mode."
+3. **Framework-guaranteed** — Finding flags a concern that the framework handles by default (e.g., JSON response format in FastAPI, CSRF protection in Django, auto-escaping in React). Discard with reason: "Framework handles this."
+4. **Outside diff scope** — Finding is about code that was not changed in this diff and has no interaction with changed code. Discard with reason: "Outside diff scope."
+5. **Style/formatting only** — Finding is about code style, naming conventions, or formatting that a linter should handle. Discard with reason: "Style concern — defer to linter."
+6. **Duplicate of deterministic** — Finding restates what a deterministic tool (semgrep, shellcheck, etc.) already caught. Discard with reason: "Already caught by [tool]."
+
+### What stays the same
+
+- The judge still receives all explorer findings and deterministic scan results
+- The judge still uses Read/Grep/Glob to verify findings
+- The output JSON shape is unchanged
+- The adversarial validation protocol is unchanged (existence check, contradiction check, severity calibration)
+- Spec verification synthesis (Steps 5a-5e) is unchanged
+
+### Files to modify
+
+- `skills/codereview/prompts/reviewer-judge.md` — Restructure as named expert panel. Add gatekeeper auto-discard rules. Add verification annotations. No new content — reorganization of existing steps.
+- `skills/codereview/references/design.md` — Add rationale for named expert panel pattern
+- `skills/codereview/references/acceptance-criteria.md` — Add scenarios: gatekeeper discards phantom finding, verifier downgrades unverified finding, calibrator merges root cause group
+
+### Effort: Small
+
+---
+
+## Feature 4 (Original — DEFERRED): Multi-Model Council Review
+
+> **STATUS: DEFERRED TO RESEARCH.** Same-family model variants (Sonnet↔Opus) don't provide genuine diversity — they share training data. True cross-provider council (Claude + GPT + Gemini) requires spawning mechanisms not available in the current Task tool. See `docs/research-multi-model-council.md` for the full decision rationale. The design below is preserved for future reference.
 
 **Goal:** Run the review across multiple models and compare findings. When two models independently flag the same issue, confidence is very high. When they disagree, the disagreement itself is a signal worth attention. This is the single biggest quality improvement available.
 
@@ -1093,9 +1181,10 @@ The token cost multiplier is less than 2x because the judge, context gathering, 
 | 1 | Git History Risk Scoring | Small | Quick win, follows the `scripts/` pattern established by Feature 0 |
 | 2 | Test Coverage Data Integration | Medium | Deterministic signal, multi-language support, follows `scripts/` pattern |
 | 3 | Finding Lifecycle & Fingerprinting | Medium | Depends on `enrich-findings.py` from Feature 0 (lifecycle runs after enrichment). Also follows `scripts/` pattern. |
-| 4 | Multi-Model Council Review | Large | Biggest quality impact but also biggest scope — benefits from 0-3 being stable first. This is the only feature that is primarily agent-orchestrated (prompt changes, Task spawning). |
+| ~~4~~ | ~~Multi-Model Council Review~~ | ~~Large~~ | **DEFERRED to research.** Same-family model variants (Sonnet↔Opus) don't provide true diversity — they share training data. True multi-model (cross-provider) requires spawning mechanisms not yet available. Full design preserved in Feature 4 section below for future reference. See `docs/research-multi-model-council.md` for the decision rationale. |
+| 4 (replacement) | Named Expert Panel for Judge | Small | Free quality improvement from Kodus-AI pattern — restructures judge prompt as sequential expert passes (Gatekeeper → Verifier → Calibrator → Synthesizer). Zero cost, better reasoning structure. |
 
-Feature 0 should be done first — it establishes conventions that Features 1-3 build on. Features 1-3 are independent of each other. Feature 4 is independent but benefits from Feature 3's fingerprinting.
+Feature 0 should be done first — it establishes conventions that Features 1-3 build on. Features 1-3 are independent of each other.
 
 ### Inter-feature interactions
 
@@ -1157,5 +1246,7 @@ Existing `.agents/reviews/*.json` files from v1.1 will validate against the v1.2
 - **SKILL.md description fix** — Deferred per user decision
 - **False positive feedback loop** — No simple implementation path identified; Feature 3 (suppressions) provides a manual version
 - **Cross-repo dependency awareness** — Requires external tooling, not in scope for v1.2
-- **Cross-vendor models in council** — Task tool only supports Claude models; cross-vendor requires different spawning mechanism (v1.3)
+- **Multi-model council (same-family)** — Deferred to research. Same-family variants (Sonnet↔Opus) share training data; quality improvement is uncertain. See `docs/research-multi-model-council.md`.
+- **Multi-model council (cross-vendor)** — Deferred to research. Requires cross-vendor spawning mechanism (API calls to OpenAI/Google). See `docs/research-multi-model-council.md`.
+- **Self-reflection scoring** — PR-Agent's 0-10 scoring bands are promising but require calibration data we don't have yet. Candidate for v1.3 after named expert panel is validated.
 - **Automated suppression cleanup** — Stale suppressions (for deleted files) are harmless; manual pruning is sufficient for v1.2
