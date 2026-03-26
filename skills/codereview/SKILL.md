@@ -63,6 +63,51 @@ description: 'Use when reviewing local code changes — staged files, branches, 
 
 ## Execution Steps
 
+### Timing Protocol (Observability)
+
+Record timing for observability throughout the review. This data helps identify bottlenecks and optimize the pipeline.
+
+At the start of each review:
+```bash
+bash scripts/timing.sh reset
+bash scripts/timing.sh start "review_total"
+```
+
+Wrap each major step with timing calls:
+```bash
+bash scripts/timing.sh start "<step_name>"
+# ... step execution ...
+bash scripts/timing.sh stop "<step_name>"
+```
+
+Step names to use:
+- `step_1_target` — target detection and diff computation
+- `step_2a1_discover` — project tooling discovery
+- `step_2d_complexity` — complexity analysis
+- `step_2i_git_risk` — git history risk scoring
+- `step_2j_coverage` — test coverage collection
+- `step_2_context` — remaining context gathering (callers, types, dead code)
+- `step_3_scans` — deterministic scan execution
+- `step_4_explorers` — AI explorer sub-agent execution (start when launched, stop when all complete)
+- `step_4_judge` — AI judge execution
+- `step_5_enrich` — finding enrichment (enrich-findings.py)
+- `step_5_lifecycle` — finding lifecycle (lifecycle.py)
+- `step_6_report` — report formatting
+
+Use `mark` for point events:
+```bash
+bash scripts/timing.sh mark "files_reviewed" "$FILE_COUNT"
+bash scripts/timing.sh mark "findings_count" "$FINDING_COUNT"
+```
+
+After all steps:
+```bash
+bash scripts/timing.sh stop "review_total"
+bash scripts/timing.sh summary > /tmp/codereview-timing.json
+```
+
+Include the timing summary in the JSON review envelope as `_timing` and in the markdown report as a "Timing" section. If `timing.sh` is not available, skip timing — it must never block the review.
+
 ### Step 1: Determine Review Target
 
 Parse the argument to determine what to review:

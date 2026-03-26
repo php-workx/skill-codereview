@@ -59,7 +59,7 @@ echo "=== 1. Script Syntax Validation ==="
 echo ""
 
 # 1a. Bash scripts parse cleanly
-for script in run-scans.sh complexity.sh validate_output.sh git-risk.sh; do
+for script in run-scans.sh complexity.sh validate_output.sh git-risk.sh timing.sh; do
   if bash -n "$SCRIPTS/$script" 2>/dev/null; then
     pass "$script syntax valid"
   else
@@ -559,7 +559,112 @@ rm -f /tmp/test-enriched-for-lifecycle.json
 
 # ============================================================
 echo ""
-echo "=== 10. Integration: enrich-findings.py → validate_output.sh pipeline ==="
+echo "=== 10. timing.sh ==="
+echo ""
+
+TIMING_SCRIPT="$SCRIPTS/timing.sh"
+
+# 10a. reset produces no output and exits 0
+TIMING_RESET_OUT=$(bash "$TIMING_SCRIPT" reset 2>&1)
+TIMING_RESET_RC=$?
+if [ "$TIMING_RESET_RC" -eq 0 ] && [ -z "$TIMING_RESET_OUT" ]; then
+  pass "timing reset exits 0 with no output"
+else
+  fail "timing reset exits 0 with no output" "rc=$TIMING_RESET_RC output='$TIMING_RESET_OUT'"
+fi
+
+# 10b. start then stop produces valid JSONL entries
+TIMING_TEST_FILE="/tmp/test-timing-$$-b.jsonl"
+rm -f "$TIMING_TEST_FILE"
+CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" start "test_step_b" 2>/dev/null
+CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" stop "test_step_b" 2>/dev/null
+if [ -f "$TIMING_TEST_FILE" ]; then
+  LINE_COUNT=$(wc -l < "$TIMING_TEST_FILE" | tr -d ' ')
+  LINE1_VALID=$(head -1 "$TIMING_TEST_FILE" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['type']=='start' and d['name']=='test_step_b' and 'ts' in d; print('ok')" 2>/dev/null || echo "fail")
+  LINE2_VALID=$(tail -1 "$TIMING_TEST_FILE" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['type']=='stop' and d['name']=='test_step_b' and 'ts' in d; print('ok')" 2>/dev/null || echo "fail")
+  if [ "$LINE_COUNT" -eq 2 ] && [ "$LINE1_VALID" = "ok" ] && [ "$LINE2_VALID" = "ok" ]; then
+    pass "start+stop produces valid JSONL entries"
+  else
+    fail "start+stop produces valid JSONL entries" "lines=$LINE_COUNT line1=$LINE1_VALID line2=$LINE2_VALID"
+  fi
+else
+  fail "start+stop produces valid JSONL entries" "timing file not created"
+fi
+rm -f "$TIMING_TEST_FILE"
+
+# 10c. summary on empty file produces valid JSON with zero total
+TIMING_TEST_FILE="/tmp/test-timing-$$-c.jsonl"
+rm -f "$TIMING_TEST_FILE"
+TIMING_EMPTY_SUMMARY=$(CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" summary 2>/dev/null)
+assert_json_valid "timing summary on empty file produces valid JSON" "$TIMING_EMPTY_SUMMARY"
+assert_json_field "timing empty summary has zero total_ms" "$TIMING_EMPTY_SUMMARY" "d['total_ms'] == 0"
+assert_json_field "timing empty summary has empty steps" "$TIMING_EMPTY_SUMMARY" "d['steps'] == []"
+assert_json_field "timing empty summary has empty marks" "$TIMING_EMPTY_SUMMARY" "d['marks'] == []"
+rm -f "$TIMING_TEST_FILE"
+
+# 10d. summary after start+stop has correct step with positive duration_ms
+TIMING_TEST_FILE="/tmp/test-timing-$$-d.jsonl"
+rm -f "$TIMING_TEST_FILE"
+CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" start "my_step" 2>/dev/null
+sleep 1
+CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" stop "my_step" 2>/dev/null
+TIMING_STEP_SUMMARY=$(CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" summary 2>/dev/null)
+assert_json_valid "timing summary after start+stop is valid JSON" "$TIMING_STEP_SUMMARY"
+assert_json_field "timing summary has 1 step" "$TIMING_STEP_SUMMARY" "len(d['steps']) == 1"
+assert_json_field "timing step name is my_step" "$TIMING_STEP_SUMMARY" "d['steps'][0]['name'] == 'my_step'"
+assert_json_field "timing step has positive duration_ms" "$TIMING_STEP_SUMMARY" "d['steps'][0]['duration_ms'] > 0"
+assert_json_field "timing total_ms is positive" "$TIMING_STEP_SUMMARY" "d['total_ms'] > 0"
+rm -f "$TIMING_TEST_FILE"
+
+# 10e. mark records event with value
+TIMING_TEST_FILE="/tmp/test-timing-$$-e.jsonl"
+rm -f "$TIMING_TEST_FILE"
+CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" mark "files_reviewed" "42" 2>/dev/null
+if [ -f "$TIMING_TEST_FILE" ]; then
+  MARK_VALID=$(cat "$TIMING_TEST_FILE" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+assert d['type']=='mark' and d['name']=='files_reviewed' and d['value']=='42' and 'ts' in d
+print('ok')
+" 2>/dev/null || echo "fail")
+  if [ "$MARK_VALID" = "ok" ]; then
+    pass "mark records event with value"
+  else
+    fail "mark records event with value" "invalid mark entry"
+  fi
+else
+  fail "mark records event with value" "timing file not created"
+fi
+rm -f "$TIMING_TEST_FILE"
+
+# 10f. Multiple steps produce correct count in summary
+TIMING_TEST_FILE="/tmp/test-timing-$$-f.jsonl"
+rm -f "$TIMING_TEST_FILE"
+CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" start "step_a" 2>/dev/null
+CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" stop "step_a" 2>/dev/null
+CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" start "step_b" 2>/dev/null
+CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" stop "step_b" 2>/dev/null
+CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" start "step_c" 2>/dev/null
+CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" stop "step_c" 2>/dev/null
+TIMING_MULTI_SUMMARY=$(CODEREVIEW_TIMING_FILE="$TIMING_TEST_FILE" bash "$TIMING_SCRIPT" summary 2>/dev/null)
+assert_json_valid "timing summary with multiple steps is valid JSON" "$TIMING_MULTI_SUMMARY"
+assert_json_field "timing summary has 3 steps" "$TIMING_MULTI_SUMMARY" "len(d['steps']) == 3"
+rm -f "$TIMING_TEST_FILE"
+
+# 10g. Timing file is configurable via CODEREVIEW_TIMING_FILE env var
+TIMING_CUSTOM_FILE="/tmp/test-timing-$$-custom.jsonl"
+rm -f "$TIMING_CUSTOM_FILE"
+CODEREVIEW_TIMING_FILE="$TIMING_CUSTOM_FILE" bash "$TIMING_SCRIPT" start "custom_step" 2>/dev/null
+if [ -f "$TIMING_CUSTOM_FILE" ]; then
+  pass "timing file configurable via CODEREVIEW_TIMING_FILE"
+else
+  fail "timing file configurable via CODEREVIEW_TIMING_FILE" "custom file not created"
+fi
+rm -f "$TIMING_CUSTOM_FILE"
+
+# ============================================================
+echo ""
+echo "=== 11. Integration: enrich-findings.py → validate_output.sh pipeline ==="
 echo ""
 
 # Build a complete review envelope from enriched findings

@@ -185,6 +185,33 @@ The chunk summary shows how the review was distributed and how many findings sur
 
 For standard mode reviews, omit this section entirely.
 
+## Timing
+
+Add the following section at the end of the markdown report (before the JSON envelope), when timing data is available:
+
+```markdown
+## Timing
+
+| Step | Duration | % of Total |
+|------|----------|------------|
+| Target detection | 0.3s | 1% |
+| Project discovery | 1.2s | 3% |
+| Complexity analysis | 0.9s | 2% |
+| Git history risk | 2.1s | 5% |
+| Coverage collection | 3.4s | 8% |
+| Deterministic scans | 12.3s | 27% |
+| AI explorers | 18.5s | 41% |
+| AI judge | 8.2s | 18% |
+| Enrichment | 0.5s | 1% |
+| Lifecycle | 0.4s | 1% |
+| Report formatting | 1.2s | 3% |
+| **Total** | **45.2s** | **100%** |
+
+Timing data collected by `scripts/timing.sh`. Omit this section if timing data is unavailable.
+```
+
+---
+
 ## JSON Envelope Format (Step 7)
 
 Save to `.agents/reviews/YYYY-MM-DD-<target>.json`. Must conform to `findings-schema.json`.

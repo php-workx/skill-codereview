@@ -69,6 +69,7 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 SCRATCH="/tmp/codereview-scans-${RUN_ID}"
 mkdir -p "$SCRATCH"
 
+
 # ---------------------------------------------------------------------------
 # Language detection from CHANGED_FILES
 # ---------------------------------------------------------------------------
@@ -505,8 +506,21 @@ normalize_project_cmd() {
 # Tool runner: invokes a tool with timeout, captures output and status
 # Args: $1=tool_key, $2=timeout_seconds, $3...=command and args
 # Writes raw output to $SCRATCH/<tool_key>.out, stderr to $SCRATCH/<tool_key>.err
+# Also records elapsed time in $SCRATCH/<tool_key>.ms
 # Returns the exit code
 # ---------------------------------------------------------------------------
+
+# _get_epoch_ms: epoch time in milliseconds (for tool timing)
+_get_epoch_ms() {
+  local ms
+  ms="$(date +%s%3N 2>/dev/null)"
+  # On macOS, %3N is literal "3N" — detect and fall back
+  case "$ms" in
+    *[!0-9]*) ms="$(python3 -c "import time; print(int(time.time()*1000))" 2>/dev/null || echo 0)" ;;
+  esac
+  echo "$ms"
+}
+
 run_tool() {
   local key="$1"
   local tout="$2"
@@ -523,6 +537,9 @@ run_tool() {
     timeout_cmd="gtimeout"
   fi
 
+  local t_start t_end elapsed_ms
+  t_start="$(_get_epoch_ms)"
+
   local rc=0
   if [ -n "$timeout_cmd" ]; then
     $timeout_cmd "$tout" "$@" >"$SCRATCH/${key}.out" 2>"$SCRATCH/${key}.err" || rc=$?
@@ -531,13 +548,20 @@ run_tool() {
     "$@" >"$SCRATCH/${key}.out" 2>"$SCRATCH/${key}.err" || rc=$?
   fi
 
+  t_end="$(_get_epoch_ms)"
+  elapsed_ms=$((t_end - t_start))
+  echo "$elapsed_ms" > "$SCRATCH/${key}.ms"
+
   local status
   status="$(classify_status "$rc" "$SCRATCH/${key}.err")"
-  log "${key}: finished with status=${status} (rc=${rc})"
+  log "${key}: finished with status=${status} (rc=${rc}, ${elapsed_ms}ms)"
 
   echo "$status" > "$SCRATCH/${key}.status"
   return 0  # Always succeed — best-effort
 }
+
+# Record overall scan start time for _timing.total_ms
+SCAN_START_MS="$(_get_epoch_ms)"
 
 # ---------------------------------------------------------------------------
 # TIER 1: Baseline tools (always run if installed, in parallel)
@@ -1113,12 +1137,59 @@ for sfile in "$SCRATCH"/status/*.json; do
 done
 
 # ---------------------------------------------------------------------------
+# Build _timing object from per-tool .ms and .status files
+# ---------------------------------------------------------------------------
+SCAN_END_MS="$(_get_epoch_ms)"
+TIMING_JSON="$SCRATCH/timing.json"
+
+# Collect per-tool timing into a JSON object
+echo '{}' > "$TIMING_JSON"
+for ms_file in "$SCRATCH"/*.ms; do
+  [ -f "$ms_file" ] || continue
+  tkey="$(basename "$ms_file" .ms)"
+  tms="$(cat "$ms_file" 2>/dev/null || echo 0)"
+  case "$tms" in ''|*[!0-9]*) tms=0 ;; esac
+  # Determine status for this tool
+  tstatus="not_installed"
+  if [ -f "$SCRATCH/${tkey}.status" ]; then
+    tstatus="$(cat "$SCRATCH/${tkey}.status")"
+  elif [ -f "$SCRATCH/status/${tkey}.json" ]; then
+    tstatus="$(jq -r '.status // "unknown"' "$SCRATCH/status/${tkey}.json" 2>/dev/null || echo "unknown")"
+  fi
+  jq --arg k "$tkey" --argjson ms "$tms" --arg st "$tstatus" \
+    '. + {($k): {ms: $ms, status: $st}}' "$TIMING_JSON" \
+    > "$SCRATCH/timing_tmp.json" 2>/dev/null \
+    && mv "$SCRATCH/timing_tmp.json" "$TIMING_JSON"
+done
+
+# Also add tools that were not_installed/skipped (no .ms file) with ms=0
+for sfile in "$SCRATCH"/status/*.json; do
+  [ -f "$sfile" ] || continue
+  skey="$(basename "$sfile" .json)"
+  if [ ! -f "$SCRATCH/${skey}.ms" ]; then
+    sstatus="$(jq -r '.status // "unknown"' "$sfile" 2>/dev/null || echo "unknown")"
+    jq --arg k "$skey" --arg st "$sstatus" \
+      'if .[$k] then . else . + {($k): {ms: 0, status: $st}} end' "$TIMING_JSON" \
+      > "$SCRATCH/timing_tmp.json" 2>/dev/null \
+      && mv "$SCRATCH/timing_tmp.json" "$TIMING_JSON"
+  fi
+done
+
+TOTAL_SCAN_MS=$((SCAN_END_MS - SCAN_START_MS))
+case "$TOTAL_SCAN_MS" in ''|*[!0-9]*) TOTAL_SCAN_MS=0 ;; esac
+
+# ---------------------------------------------------------------------------
 # Final output: JSON to stdout
 # ---------------------------------------------------------------------------
 jq -n --slurpfile findings "$DEDUPED" --slurpfile status "$TOOL_STATUS" \
+  --slurpfile timing "$TIMING_JSON" --argjson total_ms "$TOTAL_SCAN_MS" \
   '{
     findings: $findings[0],
-    tool_status: $status[0]
+    tool_status: $status[0],
+    _timing: {
+      total_ms: $total_ms,
+      tools: $timing[0]
+    }
   }'
 
 log "=== run-scans.sh complete ==="

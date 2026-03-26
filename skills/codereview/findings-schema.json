@@ -345,6 +345,34 @@
         "should_fix": { "type": "integer" },
         "consider": { "type": "integer" }
       }
+    },
+    "_timing": {
+      "type": ["object", "null"],
+      "description": "Observability timing data for the review pipeline. Optional — omit if timing.sh was not available.",
+      "properties": {
+        "total_ms": { "type": "integer" },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "duration_ms": { "type": "integer" }
+            }
+          }
+        },
+        "marks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "value": { "type": "string" },
+              "ts": { "type": "string" }
+            }
+          }
+        }
+      }
     }
   }
 }
