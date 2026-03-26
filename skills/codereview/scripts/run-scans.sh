@@ -937,8 +937,8 @@ if [ -n "$PROJECT_PROFILE" ] && [ -f "$PROJECT_PROFILE" ]; then
       log "project command ${PROJ_CMD_INDEX}: ${cmd}"
       (
         # Run each project command with a 120s timeout
-        # Use eval since the command is a string from JSON
-        eval "run_tool \"$proj_key\" 120 $cmd"
+        # Use bash -c for isolation — cmd comes from agent-interpreted profile
+        run_tool "$proj_key" 120 bash -c "$cmd"
       ) &
       TIER3_PIDS="$TIER3_PIDS $!"
     done <<PROJEOF

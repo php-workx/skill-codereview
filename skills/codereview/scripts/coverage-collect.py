@@ -104,6 +104,15 @@ TEST_COMMANDS = {
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+def _safe_int(value, default=0):
+    """Convert value to int, returning default on failure."""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
 def is_test_file(filepath):
     """Check if a filepath matches test file patterns."""
     for pattern in TEST_PATTERNS:
@@ -463,9 +472,12 @@ def parse_lcov(artifact_path, changed_files):
                 elif line.startswith("DA:"):
                     parts = line[3:].split(",")
                     if len(parts) >= 2:
-                        total_lines += 1
-                        if int(parts[1]) > 0:
-                            covered_lines += 1
+                        try:
+                            total_lines += 1
+                            if int(parts[1]) > 0:
+                                covered_lines += 1
+                        except (ValueError, IndexError):
+                            pass  # skip malformed DA line
                 elif line.startswith("FNDA:"):
                     parts = line[5:].split(",")
                     if len(parts) >= 2 and parts[0] == "0":
@@ -508,8 +520,10 @@ def parse_istanbul_json(artifact_path, changed_files):
         # Compute line coverage from statement map
         stmt_map = file_info.get("statementMap", {})
         stmt_hits = file_info.get("s", {})
+        if not isinstance(stmt_hits, dict):
+            stmt_hits = {}
         total = len(stmt_map)
-        covered = sum(1 for k in stmt_hits if int(stmt_hits[k]) > 0)
+        covered = sum(1 for k in stmt_hits if _safe_int(stmt_hits[k]) > 0)
         coverage_pct = int((covered / total * 100)) if total > 0 else 0
 
         # Identify uncovered functions

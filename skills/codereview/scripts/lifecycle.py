@@ -42,7 +42,7 @@ import os
 import re
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 # ---------------------------------------------------------------------------
@@ -554,7 +554,6 @@ def run_suppress(args) -> None:
         if args.defer_scope:
             suppression["deferred_scope"] = args.defer_scope
         if args.defer_days:
-            from datetime import timedelta
             expires = datetime.now(timezone.utc) + timedelta(days=args.defer_days)
             suppression["expires_at"] = expires.strftime("%Y-%m-%dT%H:%M:%SZ")
 
