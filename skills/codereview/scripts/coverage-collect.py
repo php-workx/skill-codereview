@@ -79,23 +79,24 @@ TOOL_DETECTION = {
     ],
 }
 
-# Test generation commands, per language+tool
+# Test generation commands, per language+tool.
+# {COVER_DIR} is replaced at runtime with a per-invocation temp directory.
 TEST_COMMANDS = {
     "go": {
-        "go tool cover": ["go", "test", "-coverprofile=/tmp/codereview-cover.out", "./..."],
+        "go tool cover": ["go", "test", "-coverprofile={COVER_DIR}/cover.out", "./..."],
     },
     "python": {
         "coverage": ["coverage", "run", "-m", "pytest"],
-        "pytest-cov": ["pytest", "--cov", "--cov-report=json:/tmp/codereview-cover.json"],
+        "pytest-cov": ["pytest", "--cov", "--cov-report=json:{COVER_DIR}/cover.json"],
     },
     "rust": {
-        "cargo-tarpaulin": ["cargo", "tarpaulin", "--out", "json", "--output-dir", "/tmp/codereview-cover/"],
-        "cargo-llvm-cov": ["cargo", "llvm-cov", "--json", "--output-path", "/tmp/codereview-cover/lcov.json"],
+        "cargo-tarpaulin": ["cargo", "tarpaulin", "--out", "json", "--output-dir", "{COVER_DIR}/"],
+        "cargo-llvm-cov": ["cargo", "llvm-cov", "--json", "--output-path", "{COVER_DIR}/lcov.json"],
     },
     "typescript": {
-        "c8": ["npx", "c8", "report", "--reporter=json", "--reports-dir=/tmp/codereview-cover/"],
-        "nyc": ["npx", "nyc", "report", "--reporter=json", "--report-dir=/tmp/codereview-cover/"],
-        "jest": ["npx", "jest", "--coverage", "--coverageDirectory=/tmp/codereview-cover/"],
+        "c8": ["npx", "c8", "report", "--reporter=json", "--reports-dir={COVER_DIR}/"],
+        "nyc": ["npx", "nyc", "report", "--reporter=json", "--report-dir={COVER_DIR}/"],
+        "jest": ["npx", "jest", "--coverage", "--coverageDirectory={COVER_DIR}/"],
     },
 }
 
@@ -222,12 +223,15 @@ def check_staleness(artifact_path, changed_files):
     return False, None
 
 
-def run_tests(language, tool_name, timeout):
+def run_tests(language, tool_name, timeout, cover_dir="/tmp"):
     """Run tests with coverage for a language. Returns (success, partial, note)."""
     commands = TEST_COMMANDS.get(language, {})
-    cmd = commands.get(tool_name)
-    if not cmd:
+    cmd_template = commands.get(tool_name)
+    if not cmd_template:
         return False, False, f"No test command configured for {tool_name}"
+
+    # Substitute {COVER_DIR} with the per-invocation temp directory
+    cmd = [arg.replace("{COVER_DIR}", cover_dir) for arg in cmd_template]
 
     try:
         result = subprocess.run(
@@ -365,18 +369,25 @@ def parse_python_coverage_json(artifact_path, changed_files):
 
 def parse_python_coverage_db(changed_files):
     """Parse Python .coverage database using coverage json export. Returns list of coverage entries."""
-    # Try to generate JSON from the .coverage database
+    import tempfile as _tempfile
+    export_fd, export_path = _tempfile.mkstemp(suffix=".json", prefix="codereview-cov-")
+    os.close(export_fd)
     try:
         result = subprocess.run(
-            ["coverage", "json", "-o", "/tmp/codereview-coverage-export.json"],
+            ["coverage", "json", "-o", export_path],
             capture_output=True,
             text=True,
             timeout=30,
         )
         if result.returncode == 0:
-            return parse_python_coverage_json("/tmp/codereview-coverage-export.json", changed_files)
+            return parse_python_coverage_json(export_path, changed_files)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
+    finally:
+        try:
+            os.unlink(export_path)
+        except OSError:
+            pass
     return []
 
 
@@ -575,8 +586,22 @@ def collect_coverage_for_language(language, changed_files, run_tests_flag, timeo
     """Collect coverage data for a single language.
     Returns (coverage_entries, tool_status_dict, warnings_list).
     """
+    import tempfile as _tempfile
+    import shutil as _shutil
+
     tool_key = f"coverage_{language}"
     lang_files = filter_changed_files(changed_files, language)
+    # Per-invocation temp directory for coverage artifacts
+    cover_dir = _tempfile.mkdtemp(prefix="codereview-cover-")
+    try:
+        return _collect_coverage_impl(language, changed_files, run_tests_flag, timeout, lang_files, tool_key, cover_dir)
+    finally:
+        _shutil.rmtree(cover_dir, ignore_errors=True)
+
+
+def _collect_coverage_impl(language, changed_files, run_tests_flag, timeout, lang_files, tool_key, cover_dir):
+    """Inner implementation for collect_coverage_for_language."""
+    warnings = []
 
     if not lang_files:
         return [], {tool_key: {
@@ -585,8 +610,6 @@ def collect_coverage_for_language(language, changed_files, run_tests_flag, timeo
             "finding_count": 0,
             "note": f"No non-test {language} files in changed files",
         }}, []
-
-    warnings = []
 
     # Step 1: Check for existing coverage artifacts
     artifact_path = find_existing_artifact(language)
@@ -603,7 +626,7 @@ def collect_coverage_for_language(language, changed_files, run_tests_flag, timeo
                 "note": f"No coverage tool found for {language}",
             }}, []
 
-        success, partial, note = run_tests(language, tool_name, timeout)
+        success, partial, note = run_tests(language, tool_name, timeout, cover_dir)
         if not success and not partial:
             return [], {tool_key: {
                 "status": "failed",

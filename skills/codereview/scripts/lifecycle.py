@@ -329,8 +329,8 @@ def apply_suppressions(
     findings: list,
     suppressions: list,
     changed_files: set,
-) -> tuple[list, list]:
-    """Apply suppressions to findings, returning (active_findings, suppressed_findings).
+) -> tuple[list, list, int]:
+    """Apply suppressions to findings, returning (active_findings, suppressed_findings, deferred_resurfaced_count).
 
     For each finding:
     1. Exact fingerprint match against suppressions -> candidate

@@ -2,8 +2,8 @@
 """enrich-findings.py — Mechanical finding enrichment and classification.
 
 Combines judge (AI) and scan (deterministic) findings into a single enriched
-list with stable IDs, confidence gating, evidence checks, action-tier
-classification, and intra-tier ranking.
+list with stable IDs, confidence gating, action-tier classification, and
+intra-tier ranking.
 
 Usage:
     python3 scripts/enrich-findings.py \
@@ -19,7 +19,8 @@ Input format (both files):
 Output (stdout):
     {
       "findings": [ ... enriched findings sorted by tier then rank ... ],
-      "tier_summary": { "must_fix": N, "should_fix": N, "consider": N }
+      "tier_summary": { "must_fix": N, "should_fix": N, "consider": N },
+      "dropped": { "below_confidence_floor": N }
     }
 """
 
@@ -92,17 +93,6 @@ def apply_confidence_floor(findings: list, floor: float) -> list:
                 continue
         kept.append(f)
     return kept
-
-
-def apply_evidence_check(findings: list) -> list:
-    """Downgrade high/critical findings that lack a failure_mode to medium."""
-    for f in findings:
-        severity = f.get("severity", "").lower()
-        if severity in ("high", "critical"):
-            failure_mode = f.get("failure_mode")
-            if not failure_mode:  # None, empty string, or missing
-                f["severity"] = "medium"
-    return findings
 
 
 def assign_action_tier(finding: dict) -> str:
@@ -194,25 +184,27 @@ def main():
         f["id"] = generate_id(f)
 
     # 5. Confidence floor — drop AI findings below threshold
+    pre_floor_count = len(combined)
     combined = apply_confidence_floor(combined, args.confidence_floor)
+    below_confidence_floor = pre_floor_count - len(combined)
 
-    # 6. Evidence check — downgrade high/critical without failure_mode
-    combined = apply_evidence_check(combined)
-
-    # 7. Assign action_tier
+    # 6. Assign action_tier
     for f in combined:
         f["action_tier"] = assign_action_tier(f)
 
-    # 8. Rank within each tier by severity_weight * confidence
+    # 7. Rank within each tier by severity_weight * confidence
     combined.sort(key=rank_key)
 
-    # 9. Compute tier_summary
+    # 8. Compute tier_summary
     tier_summary = compute_tier_summary(combined)
 
-    # 10. Output enriched JSON
+    # 9. Output enriched JSON
     output = {
         "findings": combined,
         "tier_summary": tier_summary,
+        "dropped": {
+            "below_confidence_floor": below_confidence_floor,
+        },
     }
     json.dump(output, sys.stdout, indent=2)
     print()  # trailing newline
