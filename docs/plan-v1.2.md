@@ -351,16 +351,16 @@ echo "src/auth/login.py" | bash scripts/complexity.sh | jq .
 
 ### Files to create
 
-- `skill/scripts/discover-project.py` — Project tooling discovery (monorepo-aware)
-- `skill/scripts/run-scans.sh` — Deterministic scan orchestration (3-tier: baseline + language + project)
-- `skill/scripts/enrich-findings.py` — Finding enrichment and classification
-- `skill/scripts/complexity.sh` — Complexity analysis
+- `skills/codereview/scripts/discover-project.py` — Project tooling discovery (monorepo-aware)
+- `skills/codereview/scripts/run-scans.sh` — Deterministic scan orchestration (3-tier: baseline + language + project)
+- `skills/codereview/scripts/enrich-findings.py` — Finding enrichment and classification
+- `skills/codereview/scripts/complexity.sh` — Complexity analysis
 
 ### Files to modify
 
-- `skill/SKILL.md` — Update Steps 2d, 3, and 5 to invoke scripts. Keep logic descriptions as documentation, clearly marked "implemented by script."
-- `skill/references/deterministic-scans.md` — Mark as reference-only, add pointer to `scripts/run-scans.sh`
-- `skill/references/acceptance-criteria.md` — Add scenarios: script available, python3 missing fallback, script failure fallback, script invalid output
+- `skills/codereview/SKILL.md` — Update Steps 2d, 3, and 5 to invoke scripts. Keep logic descriptions as documentation, clearly marked "implemented by script."
+- `skills/codereview/references/deterministic-scans.md` — Mark as reference-only, add pointer to `scripts/run-scans.sh`
+- `skills/codereview/references/acceptance-criteria.md` — Add scenarios: script available, python3 missing fallback, script failure fallback, script invalid output
 
 ### Effort: Medium
 
@@ -461,13 +461,13 @@ Low-risk files (4) omitted — no recent bug-related commits.
 
 ### Files to create
 
-- `skill/scripts/git-risk.sh` — Git history risk scoring script
+- `skills/codereview/scripts/git-risk.sh` — Git history risk scoring script
 
 ### Files to modify
 
-- `skill/SKILL.md` — Add Step 2i: "Run `scripts/git-risk.sh`, include output in context packet." Add to Step 2h context packet, Step 2-L Phase A, and Step 1.5c Tier 1 promotion criteria.
-- `skill/references/design.md` — Add rationale entry to design decisions table
-- `skill/references/acceptance-criteria.md` — Add scenarios: git history available, shallow clone, all files low-risk, file promotion from Tier 2 to Tier 1, script failure fallback
+- `skills/codereview/SKILL.md` — Add Step 2i: "Run `scripts/git-risk.sh`, include output in context packet." Add to Step 2h context packet, Step 2-L Phase A, and Step 1.5c Tier 1 promotion criteria.
+- `skills/codereview/references/design.md` — Add rationale entry to design decisions table
+- `skills/codereview/references/acceptance-criteria.md` — Add scenarios: git history available, shallow clone, all files low-risk, file promotion from Tier 2 to Tier 1, script failure fallback
 
 ### Effort: Small
 
@@ -584,16 +584,16 @@ echo "$CHANGED_FILES" | python3 scripts/coverage-collect.py \
 
 ### Files to create
 
-- `skill/scripts/coverage-collect.py` — Coverage data collection and parsing script
+- `skills/codereview/scripts/coverage-collect.py` — Coverage data collection and parsing script
 
 ### Files to modify
 
-- `skill/SKILL.md` — Add Step 2j: "Run `scripts/coverage-collect.py`, include output in context packet." Add to Step 2h and Step 2-L Phase A.
-- `skill/prompts/reviewer-test-adequacy-pass.md` — Add instructions for using measured coverage data when available
+- `skills/codereview/SKILL.md` — Add Step 2j: "Run `scripts/coverage-collect.py`, include output in context packet." Add to Step 2h and Step 2-L Phase A.
+- `skills/codereview/prompts/reviewer-test-adequacy-pass.md` — Add instructions for using measured coverage data when available
 - `docs/CONFIGURATION.md` — Add `coverage` config section (`run_tests`, `test_timeout`)
-- `skill/references/design.md` — Add rationale entry
-- `skill/references/acceptance-criteria.md` — Add scenarios: each language, no tool, stale data, run_tests true + test failure, multi-language, script failure fallback
-- `skill/findings-schema.json` — Add `tool_status` keys for coverage tools
+- `skills/codereview/references/design.md` — Add rationale entry
+- `skills/codereview/references/acceptance-criteria.md` — Add scenarios: each language, no tool, stale data, run_tests true + test failure, multi-language, script failure fallback
+- `skills/codereview/findings-schema.json` — Add `tool_status` keys for coverage tools
 
 ### Effort: Medium
 
@@ -907,18 +907,18 @@ Format:
 
 ### Files to create
 
-- `skill/scripts/lifecycle.py` — Fingerprinting, lifecycle tagging, suppression management, suppress subcommand, test-fixtures runner
+- `skills/codereview/scripts/lifecycle.py` — Fingerprinting, lifecycle tagging, suppression management, suppress subcommand, test-fixtures runner
 - `tests/fixtures/fuzzy-match-pairs.json` — Fuzzy match test fixture (20+ pairs)
 
 ### Files to modify
 
-- `skill/SKILL.md` — Add Step 5a.5: "Run `scripts/lifecycle.py`, include output in report." Add `suppress` subcommand to Quick Start and Step 1.
-- `skill/findings-schema.json` — Add `fingerprint`, `lifecycle_status` to finding schema, add `suppressed_findings` array to envelope
-- `skill/references/report-template.md` — Add lifecycle badges, suppressed section, post-review action hint
-- `skill/references/acceptance-criteria.md` — Add scenarios: first review, recurring, rejected, deferred, deferred-but-file-touched, deferred-scope (file/pass/exact), expired suppression, malformed suppressions file, fuzzy match, --raw mode, script failure fallback
-- `skill/references/design.md` — Add rationale for fingerprinting approach, suffix stemming, fuzzy match tradeoff, deferred_scope design, atomic writes
+- `skills/codereview/SKILL.md` — Add Step 5a.5: "Run `scripts/lifecycle.py`, include output in report." Add `suppress` subcommand to Quick Start and Step 1.
+- `skills/codereview/findings-schema.json` — Add `fingerprint`, `lifecycle_status` to finding schema, add `suppressed_findings` array to envelope
+- `skills/codereview/references/report-template.md` — Add lifecycle badges, suppressed section, post-review action hint
+- `skills/codereview/references/acceptance-criteria.md` — Add scenarios: first review, recurring, rejected, deferred, deferred-but-file-touched, deferred-scope (file/pass/exact), expired suppression, malformed suppressions file, fuzzy match, --raw mode, script failure fallback
+- `skills/codereview/references/design.md` — Add rationale for fingerprinting approach, suffix stemming, fuzzy match tradeoff, deferred_scope design, atomic writes
 - `docs/CONFIGURATION.md` — Document `.codereview-suppressions.json` format and `suppress` subcommand
-- `skill/scripts/validate_output.sh` — Validate `lifecycle_status` values, validate `suppressed_findings` array
+- `skills/codereview/scripts/validate_output.sh` — Validate `lifecycle_status` values, validate `suppressed_findings` array
 
 ### Effort: Medium
 
@@ -1072,14 +1072,14 @@ The token cost multiplier is less than 2x because the judge, context gathering, 
 
 ### Files to modify
 
-- `skill/SKILL.md` — Add `--council` and `--council-model` flags to Quick Start and Step 1 argument parsing. Add council mode to Step 4a (doubled core explorers), Step 4b (cross-model judge synthesis). Add Task cap safeguard for chunked + council.
-- `skill/prompts/reviewer-judge.md` — Add "Cross-Model Synthesis" section (conditional on council mode)
-- `skill/findings-schema.json` — Add `model_source` field (string, "A"/"B") to findings, add `council_mode` (boolean or string "true"/"degraded"/"false") to envelope
+- `skills/codereview/SKILL.md` — Add `--council` and `--council-model` flags to Quick Start and Step 1 argument parsing. Add council mode to Step 4a (doubled core explorers), Step 4b (cross-model judge synthesis). Add Task cap safeguard for chunked + council.
+- `skills/codereview/prompts/reviewer-judge.md` — Add "Cross-Model Synthesis" section (conditional on council mode)
+- `skills/codereview/findings-schema.json` — Add `model_source` field (string, "A"/"B") to findings, add `council_mode` (boolean or string "true"/"degraded"/"false") to envelope
 - `docs/CONFIGURATION.md` — Add `council` config section with `enabled`, `model_b`, `passes`
-- `skill/references/design.md` — Replace "Future: Multi-Model Consensus (v2)" with full design section including architecture, options considered, tradeoffs
-- `skill/references/acceptance-criteria.md` — Add scenarios: council standard, council + chunked, model B failure, contradiction detection, corroboration boost, all passes mode
-- `skill/references/report-template.md` — Add model attribution format, corroboration badge `[CORROBORATED]`, contradiction badge `[MODELS DISAGREE]`
-- `skill/scripts/validate_output.sh` — Validate `council_mode` field, validate `model_source` values when present
+- `skills/codereview/references/design.md` — Replace "Future: Multi-Model Consensus (v2)" with full design section including architecture, options considered, tradeoffs
+- `skills/codereview/references/acceptance-criteria.md` — Add scenarios: council standard, council + chunked, model B failure, contradiction detection, corroboration boost, all passes mode
+- `skills/codereview/references/report-template.md` — Add model attribution format, corroboration badge `[CORROBORATED]`, contradiction badge `[MODELS DISAGREE]`
+- `skills/codereview/scripts/validate_output.sh` — Validate `council_mode` field, validate `model_source` values when present
 
 ### Effort: Large
 

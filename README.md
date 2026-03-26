@@ -111,7 +111,7 @@ See `docs/CONFIGURATION.md` for the full schema reference.
 
 ## Repository Layout
 
-- `skill/` — canonical skill source (SKILL.md, prompts, scripts, schema, references)
+- `skills/codereview/` — canonical skill source for indexers and installers (SKILL.md, prompts, scripts, schema, references)
 - `prompts/codereview.md` — Codex slash command dispatcher
 - `scripts/install-codereview-skill.sh` — copies skill to Claude and Codex directories
 - `docs/` — configuration reference, release process

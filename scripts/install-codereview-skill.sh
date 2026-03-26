@@ -4,7 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 SKILL_NAME="codereview"
 
-SRC_SKILL="$REPO_ROOT/skill"
+SRC_SKILL="$REPO_ROOT/skills/codereview"
 SRC_PROMPT="$REPO_ROOT/prompts/codereview.md"
 
 if [[ ! -d "$SRC_SKILL" ]]; then

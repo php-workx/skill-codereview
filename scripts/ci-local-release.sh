@@ -15,7 +15,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-SKILL_DIR="$REPO_ROOT/skill"
+SKILL_DIR="$REPO_ROOT/skills/codereview"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 ARTIFACT_DIR="$REPO_ROOT/.agents/releases/local-ci/$TIMESTAMP"
 RELEASE_VERSION="${2:-unreleased}"
@@ -153,9 +153,9 @@ INSTALL_SCRIPT="$REPO_ROOT/scripts/install-codereview-skill.sh"
 if [ -f "$INSTALL_SCRIPT" ]; then
   # The install script copies $REPO_ROOT/skill and $REPO_ROOT/prompts/codereview.md
   if [ -d "$SKILL_DIR" ] && [ -f "$REPO_ROOT/prompts/codereview.md" ]; then
-    pass "Install script source files exist (skill/, prompts/codereview.md)"
+    pass "Install script source files exist (skills/codereview/, prompts/codereview.md)"
   else
-    [ ! -d "$SKILL_DIR" ] && fail "Install script references skill/ but it doesn't exist"
+    [ ! -d "$SKILL_DIR" ] && fail "Install script references skills/codereview/ but it doesn't exist"
     [ ! -f "$REPO_ROOT/prompts/codereview.md" ] && fail "Install script references prompts/codereview.md but it doesn't exist"
   fi
 else

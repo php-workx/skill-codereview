@@ -435,18 +435,18 @@ echo "src/auth/login.py" | bash scripts/run-scans.sh --base-ref HEAD~1 | jq .
 
 ### Files to create
 
-- `skill/scripts/run-scans.sh` — Deterministic scan orchestration
-- `skill/scripts/enrich-findings.py` — Finding enrichment and classification
-- `skill/scripts/code_intel.py` — Shared code intelligence module (replaces `complexity.sh`)
+- `skills/codereview/scripts/run-scans.sh` — Deterministic scan orchestration
+- `skills/codereview/scripts/enrich-findings.py` — Finding enrichment and classification
+- `skills/codereview/scripts/code_intel.py` — Shared code intelligence module (replaces `complexity.sh`)
 - `tests/fixtures/judge-output.json` — Sample judge output for testing enrich-findings.py (minimum: 5 findings across 3 passes, including one high-severity without failure_mode to test downgrade, one below confidence floor to test filtering)
 - `tests/fixtures/scan-output.json` — Sample run-scans.sh output for testing enrich-findings.py (minimum: 3 deterministic findings from 2 different tools, including one that would collide with a judge finding to test dedup-by-agent scenario)
 - `tests/fixtures/code_intel/` — Multi-language fixture files for testing each subcommand (Python, Go, TypeScript at minimum; one file per language with known functions, imports, complexity hotspots, and pattern violations)
 
 ### Files to modify
 
-- `skill/SKILL.md` — Update Steps 2a-2b (optional code_intel integration), 2d (code_intel.py complexity), 3 (run-scans.sh, code_intel.py patterns fallback), 3.5 (code_intel.py exports for adaptive pass selection), 5 (enrich-findings.py). Update Step 2-L Phase A (code_intel.py imports for cross-chunk interfaces). Keep logic descriptions as documentation, clearly marked "implemented by script."
-- `skill/references/deterministic-scans.md` — Mark as reference-only, add pointer to `scripts/run-scans.sh`, document `code_intel.py patterns` as semgrep fallback
-- `skill/references/acceptance-criteria.md` — Add scenarios: tree-sitter available vs not, radon/gocyclo fallback, semgrep fallback patterns, python3 missing, jq missing, script failure fallback, script invalid output, per-language code_intel output
+- `skills/codereview/SKILL.md` — Update Steps 2a-2b (optional code_intel integration), 2d (code_intel.py complexity), 3 (run-scans.sh, code_intel.py patterns fallback), 3.5 (code_intel.py exports for adaptive pass selection), 5 (enrich-findings.py). Update Step 2-L Phase A (code_intel.py imports for cross-chunk interfaces). Keep logic descriptions as documentation, clearly marked "implemented by script."
+- `skills/codereview/references/deterministic-scans.md` — Mark as reference-only, add pointer to `scripts/run-scans.sh`, document `code_intel.py patterns` as semgrep fallback
+- `skills/codereview/references/acceptance-criteria.md` — Add scenarios: tree-sitter available vs not, radon/gocyclo fallback, semgrep fallback patterns, python3 missing, jq missing, script failure fallback, script invalid output, per-language code_intel output
 
 ### Effort: Medium-Large (largest feature in the plan — but it provides infrastructure used by Features 1, 2, and the pipeline itself)
 
@@ -648,14 +648,14 @@ Unit tests should cover:
 
 ### Files to create
 
-- `skill/scripts/prescan.py` — Multi-language static pattern prescan
+- `skills/codereview/scripts/prescan.py` — Multi-language static pattern prescan
 - `tests/fixtures/prescan/` — Fixture files for each language × each pattern (see Testing section)
 
 ### Files to modify
 
-- `skill/SKILL.md` — Add Step 2k, include prescan output in context packet assembly (Step 2h), add step numbering note
-- `skill/references/acceptance-criteria.md` — Add prescan scenarios: tree-sitter mode, regex fallback, per-language checks, no python3, empty files
-- `skill/references/design.md` — Add rationale entry (why Python not bash, why tree-sitter optional, why prescan is context not findings)
+- `skills/codereview/SKILL.md` — Add Step 2k, include prescan output in context packet assembly (Step 2h), add step numbering note
+- `skills/codereview/references/acceptance-criteria.md` — Add prescan scenarios: tree-sitter mode, regex fallback, per-language checks, no python3, empty files
+- `skills/codereview/references/design.md` — Add rationale entry (why Python not bash, why tree-sitter optional, why prescan is context not findings)
 
 ### Effort: Medium
 
@@ -751,15 +751,15 @@ No changes to explorer prompt files. Checklists are injected as context, not as 
 
 ### Files to create
 
-- `skill/references/checklist-sql-safety.md` — SQL/ORM safety checklist (~15 items)
-- `skill/references/checklist-llm-trust.md` — LLM trust boundary checklist (~12 items)
-- `skill/references/checklist-concurrency.md` — Concurrency safety checklist (~15 items)
+- `skills/codereview/references/checklist-sql-safety.md` — SQL/ORM safety checklist (~15 items)
+- `skills/codereview/references/checklist-llm-trust.md` — LLM trust boundary checklist (~12 items)
+- `skills/codereview/references/checklist-concurrency.md` — Concurrency safety checklist (~15 items)
 
 ### Files to modify
 
-- `skill/SKILL.md` — Add Step 2i: domain checklist detection and loading. Add to Step 2h context packet and Step 2-L Phase A.
-- `skill/references/design.md` — Add rationale entry
-- `skill/references/acceptance-criteria.md` — Add scenarios: SQL detected, LLM detected, concurrency detected, multiple match, none match
+- `skills/codereview/SKILL.md` — Add Step 2i: domain checklist detection and loading. Add to Step 2h context packet and Step 2-L Phase A.
+- `skills/codereview/references/design.md` — Add rationale entry
+- `skills/codereview/references/acceptance-criteria.md` — Add scenarios: SQL detected, LLM detected, concurrency detected, multiple match, none match
 
 ### Effort: Small
 
@@ -824,13 +824,13 @@ Risk tier assignment:
 
 ### Files to create
 
-- `skill/scripts/git-risk.sh` — Git history risk scoring
+- `skills/codereview/scripts/git-risk.sh` — Git history risk scoring
 
 ### Files to modify
 
-- `skill/SKILL.md` — Add Step 2j, include in context packet, add Tier 1 promotion criterion
-- `skill/references/design.md` — Add rationale entry
-- `skill/references/acceptance-criteria.md` — Add scenarios
+- `skills/codereview/SKILL.md` — Add Step 2j, include in context packet, add Tier 1 promotion criterion
+- `skills/codereview/references/design.md` — Add rationale entry
+- `skills/codereview/references/acceptance-criteria.md` — Add scenarios
 
 ### Effort: Small
 
@@ -923,9 +923,9 @@ These are optional — only populated by test-adequacy findings. Other passes do
 
 ### Files to modify
 
-- `skill/prompts/reviewer-test-adequacy-pass.md` — Add pyramid vocabulary, gap analysis instructions, calibration examples
-- `skill/findings-schema.json` — Add optional `test_level`, `bug_finding_level`, `gap_reason` fields
-- `skill/references/design.md` — Add rationale entry
+- `skills/codereview/prompts/reviewer-test-adequacy-pass.md` — Add pyramid vocabulary, gap analysis instructions, calibration examples
+- `skills/codereview/findings-schema.json` — Add optional `test_level`, `bug_finding_level`, `gap_reason` fields
+- `skills/codereview/references/design.md` — Add rationale entry
 
 ### Effort: Small
 
@@ -1014,10 +1014,10 @@ The certification object is consumed by the judge and NOT included in the final 
 
 ### Files to modify
 
-- `skill/prompts/reviewer-global-contract.md` — Replace empty-return instruction with certification requirement
-- `skill/prompts/reviewer-judge.md` — Add Step 0.5 (certification review)
-- `skill/references/design.md` — Add rationale entry
-- `skill/references/acceptance-criteria.md` — Add scenarios: explorer certifies clean, explorer returns bare [], explorer certifies but judge finds issue
+- `skills/codereview/prompts/reviewer-global-contract.md` — Replace empty-return instruction with certification requirement
+- `skills/codereview/prompts/reviewer-judge.md` — Add Step 0.5 (certification review)
+- `skills/codereview/references/design.md` — Add rationale entry
+- `skills/codereview/references/acceptance-criteria.md` — Add scenarios: explorer certifies clean, explorer returns bare [], explorer certifies but judge finds issue
 
 ### Effort: Small
 
@@ -1169,11 +1169,11 @@ If the spec-verification explorer returned a `completeness_gate` object:
 
 ### Files to modify
 
-- `skill/prompts/reviewer-spec-verification-pass.md` — Add Phase 6 (contract completeness gate)
-- `skill/prompts/reviewer-judge.md` — Add Step 5c.5 (gate evaluation)
-- `skill/references/report-template.md` — Add gate summary table to spec verification section
-- `skill/references/design.md` — Add rationale entry
-- `skill/references/acceptance-criteria.md` — Add scenarios: gate all PASS, gate with gaps, no spec, vague spec
+- `skills/codereview/prompts/reviewer-spec-verification-pass.md` — Add Phase 6 (contract completeness gate)
+- `skills/codereview/prompts/reviewer-judge.md` — Add Step 5c.5 (gate evaluation)
+- `skills/codereview/references/report-template.md` — Add gate summary table to spec verification section
+- `skills/codereview/references/design.md` — Add rationale entry
+- `skills/codereview/references/acceptance-criteria.md` — Add scenarios: gate all PASS, gate with gaps, no spec, vague spec
 
 ### Effort: Small-Medium
 
@@ -1281,10 +1281,10 @@ output_batching:
 
 ### Files to modify
 
-- `skill/SKILL.md` — Update Steps 4a and 4b with file batching logic and activation threshold. Update Step 4-L to always use file batching.
-- `skill/prompts/reviewer-judge.md` — Add instruction for reading findings from files when paths are provided
-- `skill/references/design.md` — Add rationale entry
-- `skill/references/acceptance-criteria.md` — Add scenarios: threshold exceeded, chunked mode, inline mode, Read failure fallback
+- `skills/codereview/SKILL.md` — Update Steps 4a and 4b with file batching logic and activation threshold. Update Step 4-L to always use file batching.
+- `skills/codereview/prompts/reviewer-judge.md` — Add instruction for reading findings from files when paths are provided
+- `skills/codereview/references/design.md` — Add rationale entry
+- `skills/codereview/references/acceptance-criteria.md` — Add scenarios: threshold exceeded, chunked mode, inline mode, Read failure fallback
 
 ### Effort: Small
 
@@ -1327,16 +1327,16 @@ Feature 0 (script extraction)           ← do first, establishes scripting patt
 
 | File | Feature | Notes |
 |------|---------|-------|
-| `skill/scripts/run-scans.sh` | 0a | Requires jq; calls code_intel.py patterns when semgrep missing |
-| `skill/scripts/enrich-findings.py` | 0b | Requires python3 |
-| `skill/scripts/code_intel.py` | 0c | Shared code intelligence; tree-sitter optional |
-| `skill/scripts/prescan.py` | 1 | Imports code_intel.py |
+| `skills/codereview/scripts/run-scans.sh` | 0a | Requires jq; calls code_intel.py patterns when semgrep missing |
+| `skills/codereview/scripts/enrich-findings.py` | 0b | Requires python3 |
+| `skills/codereview/scripts/code_intel.py` | 0c | Shared code intelligence; tree-sitter optional |
+| `skills/codereview/scripts/prescan.py` | 1 | Imports code_intel.py |
 | `tests/fixtures/prescan/*.py,*.go,*.ts` | 1 | Pattern fixtures per language |
 | `tests/fixtures/code_intel/` | 0c | Multi-language fixtures for each subcommand |
-| `skill/scripts/git-risk.sh` | 3 | — |
-| `skill/references/checklist-sql-safety.md` | 2 | ~15 checklist items |
-| `skill/references/checklist-llm-trust.md` | 2 | ~12 checklist items |
-| `skill/references/checklist-concurrency.md` | 2 | ~15 checklist items |
+| `skills/codereview/scripts/git-risk.sh` | 3 | — |
+| `skills/codereview/references/checklist-sql-safety.md` | 2 | ~15 checklist items |
+| `skills/codereview/references/checklist-llm-trust.md` | 2 | ~12 checklist items |
+| `skills/codereview/references/checklist-concurrency.md` | 2 | ~15 checklist items |
 | `tests/fixtures/judge-output.json` | 0b | Test fixture |
 | `tests/fixtures/scan-output.json` | 0b | Test fixture |
 
@@ -1344,13 +1344,13 @@ Feature 0 (script extraction)           ← do first, establishes scripting patt
 
 | File | Features | Conflict risk |
 |------|----------|---------------|
-| `skill/SKILL.md` | 0, 1, 2, 3, 7 | **High** — do Feature 0 first (Steps 2a-2d, 3, 3.5, 5, 2-L all updated for code_intel.py), then Group A sequentially; Feature 7 touches Steps 4a/4b (different section) |
-| `skill/references/deterministic-scans.md` | 0 | Low |
-| `skill/references/design.md` | 0, 1, 2, 3, 4, 5, 6, 7 | Medium — each feature adds one row to the rationale table |
-| `skill/references/acceptance-criteria.md` | 0, 1, 2, 3, 5, 6, 7 | Medium — each feature adds a section |
-| `skill/references/report-template.md` | 6 | Low — adds gate summary table |
-| `skill/prompts/reviewer-global-contract.md` | 5, 7 | Medium — Feature 5 adds certification, Feature 7 adds file-reading note |
-| `skill/prompts/reviewer-judge.md` | 5, 6, 7 | **Medium** — Feature 5 adds Step 0.5, Feature 6 adds Step 5c.5, Feature 7 adds file-reading instructions |
-| `skill/prompts/reviewer-test-adequacy-pass.md` | 4 | Low |
-| `skill/prompts/reviewer-spec-verification-pass.md` | 6 | Low — adds Phase 6 |
-| `skill/findings-schema.json` | 4 | Low — adds 3 optional fields |
+| `skills/codereview/SKILL.md` | 0, 1, 2, 3, 7 | **High** — do Feature 0 first (Steps 2a-2d, 3, 3.5, 5, 2-L all updated for code_intel.py), then Group A sequentially; Feature 7 touches Steps 4a/4b (different section) |
+| `skills/codereview/references/deterministic-scans.md` | 0 | Low |
+| `skills/codereview/references/design.md` | 0, 1, 2, 3, 4, 5, 6, 7 | Medium — each feature adds one row to the rationale table |
+| `skills/codereview/references/acceptance-criteria.md` | 0, 1, 2, 3, 5, 6, 7 | Medium — each feature adds a section |
+| `skills/codereview/references/report-template.md` | 6 | Low — adds gate summary table |
+| `skills/codereview/prompts/reviewer-global-contract.md` | 5, 7 | Medium — Feature 5 adds certification, Feature 7 adds file-reading note |
+| `skills/codereview/prompts/reviewer-judge.md` | 5, 6, 7 | **Medium** — Feature 5 adds Step 0.5, Feature 6 adds Step 5c.5, Feature 7 adds file-reading instructions |
+| `skills/codereview/prompts/reviewer-test-adequacy-pass.md` | 4 | Low |
+| `skills/codereview/prompts/reviewer-spec-verification-pass.md` | 6 | Low — adds Phase 6 |
+| `skills/codereview/findings-schema.json` | 4 | Low — adds 3 optional fields |

@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-03-26
+
+### Added
+- **Chunked review mode for large diffs** — automatically split reviews exceeding 80 files or 8000 lines into risk-tiered chunks with cross-chunk analysis
+  - Directory-based clustering with test file pairing and diff offloading
+  - Tiered context gathering (lightweight global + deep per-chunk) with cross-chunk interface summaries
+  - `review_mode`, `chunk_count`, and `chunks` array in findings schema
+  - `large_diff.*` config settings, `--no-chunk` / `--force-chunk` CLI flags
+  - CROSS-CHUNK flagging protocol for cross-boundary findings
+- **Spec behavioral verification** — verify that code behavior matches spec requirements (decision rules, parameter constraints, edge cases), not just that a matching function exists
+  - Judge step 5b: spot-check implementation claims with behavioral verification
+- **Correctness pass: skip path and serialization analysis** (Phases 6–7):
+  - Detect nil maps, nil slices, and partial objects on skip/error paths that cause panics downstream
+  - Detect type mismatches across marshal/unmarshal boundaries (array vs map, string vs int)
+- **Security pass: inter-component injection and env var pollution** (Phases 6–7):
+  - Trace inter-component data (step outputs, RPC responses, pipeline values) into dangerous sinks
+  - Detect unrestricted env var key names that allow PATH/LD_PRELOAD hijacking
+- **Structured references** — acceptance criteria, deterministic scan definitions, and report templates extracted into standalone reference files
+- **Local CI release gate** (`ci-local-release.sh`) — structural integrity, schema-prompt consistency, shellcheck, secret scanning, and skill manifest generation
+
+### Changed
+- Spec verification now surfaces an explicit finding when a provided spec yields no extractable requirements instead of silently passing
+- Remediation guidance recommends only allowlists and prefix-scoping (not blocklists) for env var namespace pollution
+- Security pass calibration examples use language-appropriate libraries (Go-specific for Go examples)
+- README updated with chunked review, deep analysis features, and new CLI flags
+- Validation script enforces `review_mode` and `spec_requirements` as required fields, cross-checks `chunk_count` against `chunks` array length
+- Index-friendly skill layout: canonical source moved from `skill/` to `skills/codereview/` for OpenSkills and skills.sh marketplace discovery
+- Dual npm publishing (npmjs.org with OIDC provenance + GitHub Packages) and per-job CI permissions
+
 ## [1.1.0] - 2026-02-09
 
 ### Added
