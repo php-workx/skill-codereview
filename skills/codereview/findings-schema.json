@@ -197,7 +197,7 @@
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["ran", "skipped", "failed", "not_installed", "sandbox_blocked", "partial"]
+            "enum": ["ran", "skipped", "failed", "not_installed", "sandbox_blocked", "partial", "timeout"]
           },
           "version": {
             "type": ["string", "null"]
@@ -304,6 +304,7 @@
       "description": "Findings suppressed via .codereview-suppressions.json (rejected or deferred). Same shape as findings but with lifecycle_status of rejected or deferred.",
       "items": {
         "type": "object",
+        "required": ["id", "source", "pass", "severity", "confidence", "file", "line", "summary", "lifecycle_status"],
         "properties": {
           "id": { "type": "string" },
           "source": { "type": "string", "enum": ["deterministic", "ai"] },

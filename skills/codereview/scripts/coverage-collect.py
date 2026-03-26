@@ -54,8 +54,8 @@ TEST_PATTERNS = [
 # Coverage artifact paths to check, per language (checked in order)
 COVERAGE_ARTIFACTS = {
     "go": ["cover.out", "coverage.out"],
-    "python": [".coverage", "coverage.json", "htmlcov/"],
-    "rust": ["tarpaulin-report.json", "lcov.info"],
+    "python": [".coverage", "coverage.json", "cover.json", "htmlcov/"],
+    "rust": ["tarpaulin-report.json", "lcov.info", "lcov.json"],
     "typescript": ["coverage/", ".nyc_output/", "coverage-final.json"],
 }
 
@@ -144,13 +144,21 @@ def filter_changed_files(changed_files, language):
     return result
 
 
-def find_existing_artifact(language):
-    """Check for existing coverage artifacts for a language. Returns path or None."""
+def find_existing_artifact(language, cover_dir=None):
+    """Check for existing coverage artifacts for a language. Returns path or None.
+
+    Searches both the repo root and cover_dir (if provided) since test commands
+    write artifacts to cover_dir but users may also have pre-existing artifacts.
+    """
     artifacts = COVERAGE_ARTIFACTS.get(language, [])
-    for artifact in artifacts:
-        path = Path(artifact)
-        if path.exists():
-            return str(path)
+    search_dirs = [Path(".")]
+    if cover_dir:
+        search_dirs.insert(0, Path(cover_dir))
+    for search_dir in search_dirs:
+        for artifact in artifacts:
+            path = search_dir / artifact
+            if path.exists():
+                return str(path)
     return None
 
 
@@ -635,8 +643,8 @@ def _collect_coverage_impl(language, changed_files, run_tests_flag, timeout, lan
                 "note": note,
             }}, []
 
-        # Re-check for artifacts after running tests
-        artifact_path = find_existing_artifact(language)
+        # Re-check for artifacts after running tests (check cover_dir first)
+        artifact_path = find_existing_artifact(language, cover_dir=cover_dir)
         artifact_from_tests = True
 
         if artifact_path is None:
