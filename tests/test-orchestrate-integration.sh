@@ -10,8 +10,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+export REPO_ROOT
 python3 - <<'PY'
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -21,9 +23,10 @@ from unittest import mock
 
 from scripts import orchestrate as orch
 
-REPO_ROOT = Path("/Users/runger/workspaces/skill-codereview")
+REPO_ROOT = Path(os.environ["REPO_ROOT"])
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "orchestrate"
 PROMPTS = REPO_ROOT / "skills" / "codereview" / "prompts"
+SKILL_SCRIPTS = REPO_ROOT / "skills" / "codereview" / "scripts"
 
 
 def assert_true(condition: bool, message: str) -> None:
@@ -41,11 +44,16 @@ def build_repo(copy_missing_prompt: str | None = None) -> Path:
     repo = tmpdir / "repo"
     (repo / ".git").mkdir(parents=True)
     prompt_dir = repo / "skills" / "codereview" / "prompts"
+    scripts_dir = repo / "skills" / "codereview" / "scripts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
+    scripts_dir.mkdir(parents=True, exist_ok=True)
     for prompt in PROMPTS.glob("reviewer-*.md"):
         if copy_missing_prompt and prompt.name == copy_missing_prompt:
             continue
         shutil.copy2(prompt, prompt_dir / prompt.name)
+    for script in SKILL_SCRIPTS.iterdir():
+        if script.is_file():
+            shutil.copy2(script, scripts_dir / script.name)
     return repo
 
 
@@ -217,7 +225,7 @@ def round_trip() -> None:
         "shell-script": json.dumps(shell_script),
     }
     for task in tasks:
-        write(Path(task["output_file"]), outputs[task["name"]])
+        write(Path(task["output_file"]), outputs.get(task["name"], "[]"))
 
     post_rc = orch.post_explorers(Namespace(session_dir=session_dir))
     assert_equal(post_rc, 0, "post-explorers should succeed")
@@ -251,7 +259,7 @@ def round_trip() -> None:
 
 
 def missing_prompt_failure() -> None:
-    repo = build_repo(copy_missing_prompt="reviewer-security-pass.md")
+    repo = build_repo(copy_missing_prompt="reviewer-correctness-pass.md")
     session_dir = repo / "session"
     diff_result = orch.DiffResult(
         mode="base",
@@ -278,7 +286,7 @@ def missing_prompt_failure() -> None:
                 )
             )
         except FileNotFoundError as exc:
-            assert_true("reviewer-security-pass.md" in str(exc), "missing prompt should be named in the failure")
+            assert_true("reviewer-correctness-pass.md" in str(exc), "missing prompt should be named in the failure")
         else:
             raise AssertionError("prepare should fail when a required prompt file is missing")
 

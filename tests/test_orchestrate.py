@@ -10,8 +10,12 @@ from unittest import mock
 from scripts.orchestrate import (
     DEFAULT_CONFIG,
     DiffResult,
+    PromptBudgetExceeded,
     PromptContext,
     SubprocessError,
+    _apply_spec_scope,
+    _chunk_diff,
+    _count_changed_lines_for_file,
     assemble_expert_panel,
     assemble_explorer_prompt,
     build_parser,
@@ -22,6 +26,7 @@ from scripts.orchestrate import (
     post_explorers,
     prepare,
     select_mode,
+    triage_files,
 )
 
 
@@ -102,7 +107,10 @@ class OrchestratePlumbingTests(unittest.TestCase):
 
         panel = assemble_expert_panel(diff_result, config={}, spec_content=None)
 
-        self.assertEqual([expert["name"] for expert in panel[:3]], ["correctness", "security", "test-adequacy"])
+        self.assertEqual(
+            [expert["name"] for expert in panel[:3]],
+            ["correctness", "security-config", "test-adequacy"],
+        )
 
     def test_assemble_expert_panel_activates_shell_script_for_shell_diff(self) -> None:
         diff_result = DiffResult(
@@ -133,6 +141,7 @@ class OrchestratePlumbingTests(unittest.TestCase):
         )
 
         names = [expert["name"] for expert in panel]
+        self.assertIn("security-dataflow", names)
         self.assertIn("shell-script", names)
         self.assertIn("api-contract", names)
         self.assertIn("concurrency", names)
@@ -152,13 +161,60 @@ class OrchestratePlumbingTests(unittest.TestCase):
         panel = assemble_expert_panel(
             diff_result,
             config={
-                "passes": ["correctness", "security", "test-adequacy"],
-                "expert_panel": {"experts": {"security": False}},
+                "passes": ["correctness", "security-config", "test-adequacy"],
+                "expert_panel": {"experts": {"security-config": False}},
             },
             spec_content=None,
         )
 
-        self.assertEqual([expert["name"] for expert in panel], ["correctness", "test-adequacy"])
+        self.assertEqual(
+            [expert["name"] for expert in panel], ["correctness", "test-adequacy"]
+        )
+
+    def test_assemble_expert_panel_activates_dataflow_for_request_diff(self):
+        diff_result = DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base="abc123",
+            changed_files=["src/views.py"],
+            diff_text="@@\n+data = request.args.get('q')\n",
+        )
+        panel = assemble_expert_panel(diff_result, config={}, spec_content=None)
+        names = [e["name"] for e in panel]
+        self.assertIn("security-dataflow", names)
+
+    def test_assemble_expert_panel_security_alias_expands_to_both(self):
+        diff_result = DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base="abc123",
+            changed_files=["src/app.py"],
+            diff_text="@@\n+print('ok')\n",
+        )
+        panel = assemble_expert_panel(
+            diff_result,
+            config={"passes": ["security"]},
+            spec_content=None,
+        )
+        names = [e["name"] for e in panel]
+        self.assertIn("security-dataflow", names)
+        self.assertIn("security-config", names)
+
+    def test_build_expert_pass_models_security_alias(self):
+        from scripts.orchestrate import _build_expert
+
+        expert = _build_expert(
+            "security-dataflow", {"pass_models": {"security": "opus"}}, "core"
+        )
+        self.assertEqual(expert["model"], "opus")
+        expert2 = _build_expert(
+            "security-config", {"pass_models": {"security": "opus"}}, "core"
+        )
+        self.assertEqual(expert2["model"], "opus")
+        expert3 = _build_expert(
+            "correctness", {"pass_models": {"security": "opus"}}, "core"
+        )
+        self.assertEqual(expert3["model"], "sonnet")
 
     def test_extract_diff_commit_mode_uses_head_parent(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -172,7 +228,9 @@ class OrchestratePlumbingTests(unittest.TestCase):
     def test_extract_diff_range_mode_uses_explicit_range(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = self._init_repo_with_feature_commit(Path(tmpdir))
-            first_commit = self._capture(["git", "rev-list", "--max-parents=0", "HEAD"], cwd=repo).strip()
+            first_commit = self._capture(
+                ["git", "rev-list", "--max-parents=0", "HEAD"], cwd=repo
+            ).strip()
             head_commit = self._capture(["git", "rev-parse", "HEAD"], cwd=repo).strip()
 
             result = extract_diff(
@@ -195,7 +253,9 @@ class OrchestratePlumbingTests(unittest.TestCase):
 
     def test_extract_diff_path_mode_scopes_to_requested_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            repo = self._init_repo_with_feature_commit(Path(tmpdir), add_second_file=True)
+            repo = self._init_repo_with_feature_commit(
+                Path(tmpdir), add_second_file=True
+            )
 
             result = extract_diff(repo_root=repo, mode="path", pathspec="tracked.txt")
 
@@ -208,7 +268,12 @@ class OrchestratePlumbingTests(unittest.TestCase):
                 '{"baseRefName":"main","headRefName":"feature"}'
             ),
             ("gh", "pr", "diff", "42", "--name-only"): "tracked.txt\n",
-            ("gh", "pr", "diff", "42"): "diff --git a/tracked.txt b/tracked.txt\n+two\n",
+            (
+                "gh",
+                "pr",
+                "diff",
+                "42",
+            ): "diff --git a/tracked.txt b/tracked.txt\n+two\n",
         }
 
         def fake_run(
@@ -219,7 +284,9 @@ class OrchestratePlumbingTests(unittest.TestCase):
         ) -> str:
             return outputs[tuple(command)]
 
-        with mock.patch("scripts.orchestrate.run_subprocess_text", side_effect=fake_run):
+        with mock.patch(
+            "scripts.orchestrate.run_subprocess_text", side_effect=fake_run
+        ):
             result = extract_diff(repo_root=Path("."), mode="pr", pr_number="42")
 
         self.assertEqual(result.base_ref, "main")
@@ -335,9 +402,15 @@ class OrchestratePlumbingTests(unittest.TestCase):
             ]
 
             with (
-                mock.patch("scripts.orchestrate.extract_diff", return_value=diff_result),
-                mock.patch("scripts.orchestrate.run_subprocess_json", side_effect=side_effect),
-                mock.patch("scripts.orchestrate.detect_repo_root", return_value=Path.cwd()),
+                mock.patch(
+                    "scripts.orchestrate.extract_diff", return_value=diff_result
+                ),
+                mock.patch(
+                    "scripts.orchestrate.run_subprocess_json", side_effect=side_effect
+                ),
+                mock.patch(
+                    "scripts.orchestrate.detect_repo_root", return_value=Path.cwd()
+                ),
             ):
                 result = prepare(args)
 
@@ -355,7 +428,9 @@ class OrchestratePlumbingTests(unittest.TestCase):
     def test_prepare_parser_accepts_timeout_flag(self) -> None:
         parser = build_parser()
 
-        args = parser.parse_args(["prepare", "--session-dir", "/tmp/session", "--timeout", "5"])
+        args = parser.parse_args(
+            ["prepare", "--session-dir", "/tmp/session", "--timeout", "5"]
+        )
 
         self.assertEqual(args.timeout, 5)
 
@@ -381,12 +456,16 @@ class OrchestratePlumbingTests(unittest.TestCase):
             )
 
             with (
-                mock.patch("scripts.orchestrate.extract_diff", return_value=diff_result),
+                mock.patch(
+                    "scripts.orchestrate.extract_diff", return_value=diff_result
+                ),
                 mock.patch(
                     "scripts.orchestrate.run_subprocess_json",
                     side_effect=TimeoutError("Global timeout exceeded during discover"),
                 ),
-                mock.patch("scripts.orchestrate.detect_repo_root", return_value=Path.cwd()),
+                mock.patch(
+                    "scripts.orchestrate.detect_repo_root", return_value=Path.cwd()
+                ),
             ):
                 result = prepare(args)
 
@@ -400,7 +479,9 @@ class OrchestratePlumbingTests(unittest.TestCase):
             session_dir = Path(tmpdir) / "session"
             session_dir.mkdir()
             fixtures = Path("tests/fixtures/orchestrate")
-            correctness = json.loads((fixtures / "mock-explorer-correctness.json").read_text())
+            correctness = json.loads(
+                (fixtures / "mock-explorer-correctness.json").read_text()
+            )
             duplicate = dict(correctness["findings"][0])
             duplicate["confidence"] = 0.60
             security_text = (fixtures / "mock-explorer-security.json").read_text()
@@ -410,8 +491,12 @@ class OrchestratePlumbingTests(unittest.TestCase):
                 json.dumps(correctness["findings"] + [duplicate]),
                 encoding="utf-8",
             )
-            (session_dir / "explorer-security.json").write_text(security_text, encoding="utf-8")
-            (session_dir / "explorer-malformed.json").write_text(malformed_text, encoding="utf-8")
+            (session_dir / "explorer-security.json").write_text(
+                security_text, encoding="utf-8"
+            )
+            (session_dir / "explorer-malformed.json").write_text(
+                malformed_text, encoding="utf-8"
+            )
 
             launch_packet = {
                 "session_dir": str(session_dir),
@@ -419,22 +504,47 @@ class OrchestratePlumbingTests(unittest.TestCase):
                     {
                         "wave": 1,
                         "tasks": [
-                            {"name": "correctness", "output_file": str((session_dir / "explorer-correctness.json").absolute())},
-                            {"name": "security", "output_file": str((session_dir / "explorer-security.json").absolute())},
-                            {"name": "malformed", "output_file": str((session_dir / "explorer-malformed.json").absolute())},
+                            {
+                                "name": "correctness",
+                                "output_file": str(
+                                    (
+                                        session_dir / "explorer-correctness.json"
+                                    ).absolute()
+                                ),
+                            },
+                            {
+                                "name": "security",
+                                "output_file": str(
+                                    (session_dir / "explorer-security.json").absolute()
+                                ),
+                            },
+                            {
+                                "name": "malformed",
+                                "output_file": str(
+                                    (session_dir / "explorer-malformed.json").absolute()
+                                ),
+                            },
                         ],
                     }
                 ],
                 "judge": {
                     "prompt_file": str(
-                        (Path.cwd() / "skills" / "codereview" / "prompts" / "reviewer-judge.md").absolute()
+                        (
+                            Path.cwd()
+                            / "skills"
+                            / "codereview"
+                            / "prompts"
+                            / "reviewer-judge.md"
+                        ).absolute()
                     ),
                     "output_file": str((session_dir / "judge.json").absolute()),
                 },
                 "scan_results": {"findings": []},
-                "config": {"confidence_floor": 0.65},
+                "_config": {"confidence_floor": 0.65},
             }
-            (session_dir / "launch.json").write_text(json.dumps(launch_packet), encoding="utf-8")
+            (session_dir / "launch.json").write_text(
+                json.dumps(launch_packet), encoding="utf-8"
+            )
 
             result = post_explorers(Namespace(session_dir=session_dir))
 
@@ -450,9 +560,13 @@ class OrchestratePlumbingTests(unittest.TestCase):
             repo_root = Path(tmpdir)
             session_dir = repo_root / "session"
             session_dir.mkdir(parents=True)
-            (session_dir / "changed-files.txt").write_text("scripts/orchestrate.py\n", encoding="utf-8")
+            (session_dir / "changed-files.txt").write_text(
+                "scripts/orchestrate.py\n", encoding="utf-8"
+            )
             judge_output = json.loads(
-                Path("tests/fixtures/orchestrate/mock-judge-output.json").read_text(encoding="utf-8")
+                Path("tests/fixtures/orchestrate/mock-judge-output.json").read_text(
+                    encoding="utf-8"
+                )
             )
             judge_output_path = session_dir / "judge.json"
             judge_output_path.write_text(json.dumps(judge_output), encoding="utf-8")
@@ -464,12 +578,16 @@ class OrchestratePlumbingTests(unittest.TestCase):
                 "base_ref": "main",
                 "head_ref": "feature",
                 "mode": "standard",
-                "config": {"confidence_floor": 0.65},
-                "tool_status": {"semgrep": {"status": "ran", "finding_count": 1, "note": None}},
+                "_config": {"confidence_floor": 0.65},
+                "tool_status": {
+                    "semgrep": {"status": "ran", "finding_count": 1, "note": None}
+                },
                 "diff_result": {"changed_files": ["scripts/orchestrate.py"]},
                 "scan_results": {"findings": []},
             }
-            (session_dir / "launch.json").write_text(json.dumps(launch_packet), encoding="utf-8")
+            (session_dir / "launch.json").write_text(
+                json.dumps(launch_packet), encoding="utf-8"
+            )
 
             enriched = {
                 "findings": [
@@ -503,14 +621,24 @@ class OrchestratePlumbingTests(unittest.TestCase):
             }
 
             with (
-                mock.patch("scripts.orchestrate.detect_repo_root", return_value=repo_root),
-                mock.patch("scripts.orchestrate.run_subprocess_json", side_effect=[enriched, lifecycle]),
-                mock.patch("scripts.orchestrate.subprocess.run", return_value=subprocess.CompletedProcess(["bash"], 0, "", "")),
+                mock.patch(
+                    "scripts.orchestrate.detect_repo_root", return_value=repo_root
+                ),
+                mock.patch(
+                    "scripts.orchestrate.run_subprocess_json",
+                    side_effect=[enriched, lifecycle],
+                ),
+                mock.patch(
+                    "scripts.orchestrate.subprocess.run",
+                    return_value=subprocess.CompletedProcess(["bash"], 0, "", ""),
+                ),
             ):
                 result = finalize(Namespace(session_dir=session_dir, judge_output=None))
 
             self.assertEqual(result, 0)
-            report_json = json.loads((session_dir / "report.json").read_text(encoding="utf-8"))
+            report_json = json.loads(
+                (session_dir / "report.json").read_text(encoding="utf-8")
+            )
             self.assertEqual(report_json["verdict"], "FAIL")
             self.assertTrue((session_dir / "report.md").exists())
             review_dir = repo_root / ".agents" / "reviews"
@@ -538,7 +666,9 @@ class OrchestratePlumbingTests(unittest.TestCase):
         )
         return result.stdout
 
-    def _init_repo_with_feature_commit(self, repo: Path, *, add_second_file: bool = False) -> Path:
+    def _init_repo_with_feature_commit(
+        self, repo: Path, *, add_second_file: bool = False
+    ) -> Path:
         self._run(["git", "init", "-b", "main"], cwd=repo)
         self._run(["git", "config", "user.name", "Test User"], cwd=repo)
         self._run(["git", "config", "user.email", "test@example.com"], cwd=repo)
@@ -554,6 +684,132 @@ class OrchestratePlumbingTests(unittest.TestCase):
         self._run(["git", "add", "."], cwd=repo)
         self._run(["git", "commit", "-m", "update"], cwd=repo)
         return repo
+
+    def test_check_token_budget_raises_when_exceeds_after_truncation(self) -> None:
+        """PromptBudgetExceeded is raised when the prompt is too large even after all truncations."""
+        huge_diff = "+" + "x" * 200_000
+        context = PromptContext(
+            global_contract="contract " * 500,
+            pass_prompt="focus " * 500,
+            diff=huge_diff,
+            changed_files="a.py\nb.py\nc.py",
+            complexity="complexity " * 500,
+            git_risk="risk " * 500,
+            scan_results="scan " * 500,
+            callers="callers " * 500,
+            language_standards="standards " * 500,
+            review_instructions="instructions " * 500,
+            spec="spec " * 500,
+        )
+
+        with self.assertRaises(PromptBudgetExceeded):
+            check_token_budget(context, "correctness", prompt_budget_tokens=10)
+
+    def test_chunk_diff_filters_to_requested_files(self) -> None:
+        """_chunk_diff returns only hunks for files in chunk_files."""
+        diff_text = (
+            "diff --git a/file1.py b/file1.py\n"
+            "--- a/file1.py\n"
+            "+++ b/file1.py\n"
+            "@@ -1,3 +1,4 @@\n"
+            " line1\n"
+            "+added_to_file1\n"
+            " line3\n"
+            "diff --git a/file2.py b/file2.py\n"
+            "--- a/file2.py\n"
+            "+++ b/file2.py\n"
+            "@@ -1,2 +1,3 @@\n"
+            " alpha\n"
+            "+added_to_file2\n"
+            "diff --git a/file3.py b/file3.py\n"
+            "--- a/file3.py\n"
+            "+++ b/file3.py\n"
+            "@@ -1 +1,2 @@\n"
+            " gamma\n"
+            "+added_to_file3\n"
+        )
+
+        result = _chunk_diff(diff_text, ["file2.py"])
+
+        self.assertIn("added_to_file2", result)
+        self.assertNotIn("added_to_file1", result)
+        self.assertNotIn("added_to_file3", result)
+        self.assertIn("diff --git a/file2.py b/file2.py", result)
+
+    def test_apply_spec_scope_returns_full_spec_when_no_heading_matches(self) -> None:
+        """_apply_spec_scope returns the full spec unchanged when no headings match the scope."""
+        spec_content = (
+            "# Introduction\n"
+            "This is the introduction.\n"
+            "\n"
+            "## Authentication\n"
+            "Auth details here.\n"
+            "\n"
+            "## Database\n"
+            "Database details here.\n"
+        )
+
+        result = _apply_spec_scope(spec_content, "nonexistent-term")
+
+        self.assertEqual(result, spec_content)
+
+
+class TriageTests(unittest.TestCase):
+    def test_triage_files_disabled_returns_all_complex(self):
+        result = triage_files(["a.py", "b.md"], "+x", {"triage": {"enabled": False}})
+        self.assertEqual(result, {"a.py": "complex", "b.md": "complex"})
+
+    def test_triage_files_default_config_returns_all_complex(self):
+        result = triage_files(["a.py", "b.md"], "+x", {})
+        self.assertEqual(result, {"a.py": "complex", "b.md": "complex"})
+
+    def test_triage_files_trivial_extensions(self):
+        config = {"triage": {"enabled": True, "always_review_extensions": [".py"]}}
+        result = triage_files(["README.md", "data.json", "config.yaml"], "+x", config)
+        self.assertEqual(result["README.md"], "trivial")
+        self.assertEqual(result["data.json"], "trivial")
+        self.assertEqual(result["config.yaml"], "trivial")
+
+    def test_triage_files_always_review_extensions(self):
+        config = {
+            "triage": {"enabled": True, "always_review_extensions": [".py", ".go"]}
+        }
+        result = triage_files(["app.py", "main.go"], "+x", config)
+        self.assertEqual(result["app.py"], "complex")
+        self.assertEqual(result["main.go"], "complex")
+
+    def test_triage_files_line_threshold(self):
+        diff = "diff --git a/style.css b/style.css\n+line1\n+line2\n"
+        config = {
+            "triage": {
+                "enabled": True,
+                "trivial_line_threshold": 3,
+                "always_review_extensions": [".py"],
+            }
+        }
+        result = triage_files(["style.css"], diff, config)
+        self.assertEqual(result["style.css"], "trivial")
+
+        diff_big = "diff --git a/style.css b/style.css\n+l1\n+l2\n+l3\n+l4\n+l5\n"
+        result2 = triage_files(["style.css"], diff_big, config)
+        self.assertEqual(result2["style.css"], "complex")
+
+    def test_count_changed_lines_for_file(self):
+        diff = (
+            "diff --git a/foo.py b/foo.py\n"
+            "--- a/foo.py\n"
+            "+++ b/foo.py\n"
+            "@@ -1,3 +1,4 @@\n"
+            " unchanged\n"
+            "+added1\n"
+            "+added2\n"
+            "-removed1\n"
+            " unchanged\n"
+            "diff --git a/bar.py b/bar.py\n"
+            "+other\n"
+        )
+        self.assertEqual(_count_changed_lines_for_file(diff, "foo.py"), 3)
+        self.assertEqual(_count_changed_lines_for_file(diff, "bar.py"), 1)
 
 
 if __name__ == "__main__":

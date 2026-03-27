@@ -7,14 +7,15 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "skills" / "codereview"))
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent.parent / "skills" / "codereview")
+)
 
 from scripts.orchestrate import (  # noqa: E402
     DEFAULT_CONFIG,
     DiffResult,
     PromptContext,
     assemble_expert_panel,
-    assemble_explorer_prompt,
     check_token_budget,
     detect_repo_root,
     extract_diff,
@@ -65,7 +66,10 @@ class OrchestratePrepareTests(unittest.TestCase):
 
         panel = assemble_expert_panel(diff_result, config={}, spec_content=None)
 
-        self.assertEqual([expert["name"] for expert in panel[:3]], ["correctness", "security", "test-adequacy"])
+        self.assertEqual(
+            [expert["name"] for expert in panel[:3]],
+            ["correctness", "security-config", "test-adequacy"],
+        )
         self.assertIn("shell-script", [expert["name"] for expert in panel])
 
     def test_assemble_expert_panel_force_all_and_filters(self) -> None:
@@ -81,14 +85,19 @@ class OrchestratePrepareTests(unittest.TestCase):
             diff_result,
             config={
                 "expert_panel": {"force_all": True},
-                "passes": ["correctness", "security", "test-adequacy", "shell-script"],
+                "passes": [
+                    "correctness",
+                    "security-config",
+                    "test-adequacy",
+                    "shell-script",
+                ],
             },
             spec_content="spec",
         )
 
         self.assertEqual(
             [expert["name"] for expert in panel],
-            ["correctness", "security", "test-adequacy", "shell-script"],
+            ["correctness", "security-config", "test-adequacy", "shell-script"],
         )
 
     def test_prompt_context_render_and_budget_truncation(self) -> None:
@@ -180,20 +189,32 @@ class OrchestratePrepareTests(unittest.TestCase):
                 timeout: float | None = None,
                 input_text: str | None = None,
             ) -> dict[str, object]:
-                name = next(Path(part).name for part in command if part.endswith((".py", ".sh")))
+                name = next(
+                    Path(part).name for part in command if part.endswith((".py", ".sh"))
+                )
                 mapping: dict[str, dict[str, object]] = {
                     "discover-project.py": {"language": "python"},
-                    "complexity.sh": {"hotspots": [{"file": "tracked.txt", "score": "C"}]},
+                    "complexity.sh": {
+                        "hotspots": [{"file": "tracked.txt", "score": "C"}]
+                    },
                     "git-risk.sh": {"tiers": [{"file": "tracked.txt", "tier": "high"}]},
                     "run-scans.sh": {"findings": [{"tool": "semgrep"}]},
-                    "coverage-collect.py": {"coverage": [{"file": "tracked.txt", "lines": 75}]},
+                    "coverage-collect.py": {
+                        "coverage": [{"file": "tracked.txt", "lines": 75}]
+                    },
                 }
                 return mapping[name]
 
             with (
-                mock.patch("scripts.orchestrate.detect_repo_root", return_value=Path.cwd()),
-                mock.patch("scripts.orchestrate.extract_diff", return_value=diff_result),
-                mock.patch("scripts.orchestrate.run_subprocess_json", side_effect=fake_run),
+                mock.patch(
+                    "scripts.orchestrate.detect_repo_root", return_value=Path.cwd()
+                ),
+                mock.patch(
+                    "scripts.orchestrate.extract_diff", return_value=diff_result
+                ),
+                mock.patch(
+                    "scripts.orchestrate.run_subprocess_json", side_effect=fake_run
+                ),
             ):
                 result = prepare(args)
 
@@ -202,7 +223,9 @@ class OrchestratePrepareTests(unittest.TestCase):
             self.assertTrue((session_dir / "changed-files.txt").exists())
             self.assertTrue((session_dir / "launch.json").exists())
 
-            launch = json.loads((session_dir / "launch.json").read_text(encoding="utf-8"))
+            launch = json.loads(
+                (session_dir / "launch.json").read_text(encoding="utf-8")
+            )
             self.assertEqual(launch["session_dir"], str(session_dir))
             self.assertEqual(launch["diff_result"]["changed_files"], ["tracked.txt"])
             self.assertTrue(launch["waves"])
@@ -235,7 +258,9 @@ class OrchestratePrepareTests(unittest.TestCase):
                 timeout: float | None = None,
                 input_text: str | None = None,
             ) -> dict[str, object]:
-                name = next(Path(part).name for part in command if part.endswith((".py", ".sh")))
+                name = next(
+                    Path(part).name for part in command if part.endswith((".py", ".sh"))
+                )
                 invocations[name] = {
                     "command": command,
                     "cwd": cwd,
@@ -252,26 +277,93 @@ class OrchestratePrepareTests(unittest.TestCase):
                 return mapping[name]
 
             with (
-                mock.patch("scripts.orchestrate.detect_repo_root", return_value=Path.cwd()),
-                mock.patch("scripts.orchestrate.extract_diff", return_value=diff_result),
-                mock.patch("scripts.orchestrate.run_subprocess_json", side_effect=fake_run),
+                mock.patch(
+                    "scripts.orchestrate.detect_repo_root", return_value=Path.cwd()
+                ),
+                mock.patch(
+                    "scripts.orchestrate.extract_diff", return_value=diff_result
+                ),
+                mock.patch(
+                    "scripts.orchestrate.run_subprocess_json", side_effect=fake_run
+                ),
             ):
                 result = prepare(args)
 
             self.assertEqual(result, 0)
-            self.assertEqual(invocations["complexity.sh"]["input_text"], "tracked.txt\n")
+            self.assertEqual(
+                invocations["complexity.sh"]["input_text"], "tracked.txt\n"
+            )
             self.assertEqual(invocations["git-risk.sh"]["input_text"], "tracked.txt\n")
-            self.assertEqual(invocations["coverage-collect.py"]["input_text"], "tracked.txt\n")
+            self.assertEqual(
+                invocations["coverage-collect.py"]["input_text"], "tracked.txt\n"
+            )
             self.assertEqual(invocations["run-scans.sh"]["input_text"], "tracked.txt\n")
             self.assertEqual(
                 invocations["run-scans.sh"]["command"],
                 [
                     "bash",
-                    str(Path.cwd() / "skills" / "codereview" / "scripts" / "run-scans.sh"),
+                    str(
+                        Path.cwd()
+                        / "skills"
+                        / "codereview"
+                        / "scripts"
+                        / "run-scans.sh"
+                    ),
                     "--base-ref",
                     "main",
                 ],
             )
+
+    def test_prepare_empty_diff_writes_empty_launch_packet(self) -> None:
+        """prepare() returns 0 and writes status='empty' when diff is empty."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir) / "session"
+            args = Namespace(
+                session_dir=session_dir,
+                no_config=True,
+                spec=None,
+                spec_scope=None,
+                base="main",
+                mode="base",
+            )
+            empty_diff = DiffResult(
+                mode="base",
+                base_ref="main",
+                merge_base="abc123",
+                changed_files=[],
+                diff_text="",
+            )
+
+            with (
+                mock.patch(
+                    "scripts.orchestrate.detect_repo_root", return_value=Path.cwd()
+                ),
+                mock.patch("scripts.orchestrate.extract_diff", return_value=empty_diff),
+            ):
+                result = prepare(args)
+
+            self.assertEqual(result, 0)
+            self.assertTrue((session_dir / "launch.json").exists())
+            launch = json.loads(
+                (session_dir / "launch.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(launch["status"], "empty")
+            self.assertEqual(launch["message"], "No changes found to review")
+
+    def test_extract_diff_staged_mode_with_staged_files(self) -> None:
+        """extract_diff in staged mode returns staged files when they exist."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = self._init_repo(Path(tmpdir))
+            # Modify and stage a file (but don't commit)
+            (repo / "tracked.txt").write_text("one\nstaged change\n", encoding="utf-8")
+            self._run(["git", "add", "tracked.txt"], cwd=repo)
+
+            result = extract_diff(repo_root=repo, mode="staged")
+
+        self.assertIsInstance(result, DiffResult)
+        self.assertIn("tracked.txt", result.changed_files)
+        self.assertIn("+staged change", result.diff_text)
+        self.assertEqual(result.mode, "staged")
 
     def _init_repo(self, repo: Path) -> Path:
         self._run(["git", "init", "-b", "main"], cwd=repo)
