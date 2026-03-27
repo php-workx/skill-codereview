@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/codereview/launch-packet.schema.json",
+  "title": "Codereview Launch Packet",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["ready", "empty", "error", "timeout"]
+    },
+    "message": {
+      "type": "string"
+    },
+    "error": {
+      "type": "string"
+    },
+    "review_id": {
+      "type": "string",
+      "description": "Unique review identifier."
+    },
+    "session_dir": {
+      "type": "string",
+      "description": "Absolute path to the session directory.",
+      "pattern": "^/"
+    },
+    "mode": {
+      "type": "string",
+      "description": "Review mode or diff extraction mode.",
+      "enum": ["base", "standard", "chunked", "branch", "range", "staged", "commit", "pr", "path"]
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["branch", "range", "staged", "commit", "pr", "path"]
+    },
+    "base_ref": {
+      "type": ["string", "null"]
+    },
+    "head_ref": {
+      "type": ["string", "null"]
+    },
+    "pr_number": {
+      "type": ["integer", "null"]
+    },
+    "changed_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "file_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "diff_lines": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "diff_result": {
+      "$ref": "#/$defs/diffResult"
+    },
+    "waves": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/wave"
+      }
+    },
+    "judge": {
+      "$ref": "#/$defs/judge"
+    },
+    "scan_results_file": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "tool_status": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "scan_results": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "spec_file": {
+      "type": ["string", "null"]
+    },
+    "context_summary": {
+      "type": "string"
+    },
+    "_config": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "project_profile": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "chunks": {
+      "type": ["array", "null"],
+      "items": {
+        "$ref": "#/$defs/chunk"
+      }
+    },
+    "post_wave_task": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/task"
+        }
+      ]
+    },
+    "_timing": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "required": ["session_dir", "mode", "waves", "judge"],
+  "$defs": {
+    "diffResult": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "base_ref": {
+          "type": ["string", "null"]
+        },
+        "merge_base": {
+          "type": ["string", "null"]
+        },
+        "changed_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "diff_text": {
+          "type": "string"
+        }
+      },
+      "required": ["mode", "changed_files", "diff_text"]
+    },
+    "judge": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "prompt_file": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "model": {
+          "type": "string"
+        },
+        "output_file": {
+          "type": "string",
+          "pattern": "^/"
+        }
+      },
+      "required": ["prompt_file", "output_file"]
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "assembled_prompt_file": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "output_file": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "activation_reason": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "core": {
+          "type": "boolean"
+        }
+      },
+      "required": ["name", "assembled_prompt_file", "output_file"]
+    },
+    "wave": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "wave": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/task"
+          }
+        }
+      },
+      "required": ["wave", "tasks"]
+    },
+    "chunk": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "description": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "risk_tier": {
+          "type": "string",
+          "enum": ["critical", "standard", "low-risk"]
+        },
+        "diff_lines": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "experts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "cross_chunk_summary": {
+          "type": "string"
+        }
+      },
+      "required": ["id", "description", "files", "risk_tier", "diff_lines", "experts"]
+    }
+  }
+}
