@@ -539,7 +539,7 @@ fi
 # 9g. Suppression file missing → no suppressions applied (fail-open)
 LIFECYCLE_NOSUPP=$(python3 "$SCRIPTS/lifecycle.py" \
   --findings "$FIXTURES/judge-output.json" --raw \
-  --suppressions /tmp/nonexistent-suppressions.json 2>/dev/null)
+  --suppressions $TEST_TMPDIR/nonexistent-suppressions.json 2>/dev/null)
 assert_json_valid "lifecycle with missing suppressions produces valid JSON" "$LIFECYCLE_NOSUPP"
 assert_json_field "no suppressions applied when file missing" "$LIFECYCLE_NOSUPP" \
   "len(d['suppressed_findings']) == 0"

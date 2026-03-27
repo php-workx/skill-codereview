@@ -411,9 +411,13 @@ def apply_suppressions(
         if status == "deferred":
             deferred_scope = matched_suppression.get("deferred_scope", "file")
             file_path = f.get("file", "")
-            should_resurface = False
 
-            if deferred_scope == "file":
+            # If changed_files is empty (--changed-files not provided), resurface
+            # all deferred findings to avoid turning temporary deferrals into
+            # permanent hides in the fail-open path.
+            if not changed_files:
+                should_resurface = True
+            elif deferred_scope == "file":
                 # Resurface if file is in CHANGED_FILES
                 should_resurface = file_path in changed_files
             elif deferred_scope == "pass":

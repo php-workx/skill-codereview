@@ -295,9 +295,10 @@ normalize_osv() {
     [(.results // [])[] |
       (.packages // [])[] |
       (.package.name // "unknown") as $pkg |
+      (.source.path // "unknown") as $src |
       (.vulnerabilities // [])[] |
       {
-        file: $pkg,
+        file: (if $src != "unknown" then $src else $pkg end),
         line: 0,
         summary: (.summary // .id // "Unknown vulnerability"),
         severity: (
@@ -1246,7 +1247,9 @@ log "=== Tier 3 complete ==="
 if [ -f "$SCRATCH/pre_commit.status" ]; then
   status="$(cat "$SCRATCH/pre_commit.status")"
   version="$(get_version pre-commit)"
-  if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
+  if [ "$status" = "failed" ]; then
+    # Only normalize output when pre-commit failed (found issues).
+    # Successful runs print status banners that are not findings.
     if [ -s "$SCRATCH/pre_commit.out" ]; then
       normalize_precommit < "$SCRATCH/pre_commit.out" > "$SCRATCH/findings/pre_commit.json"
     else
@@ -1304,7 +1307,9 @@ if [ -n "${PROJ_CMD_INDEX:-}" ] && [ "$PROJ_CMD_INDEX" -gt 0 ] 2>/dev/null; then
     proj_key="project_cmd_${i}"
     if [ -f "$SCRATCH/${proj_key}.status" ]; then
       status="$(cat "$SCRATCH/${proj_key}.status")"
-      if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
+      if [ "$status" = "failed" ]; then
+        # Only normalize output when command failed (found issues).
+        # Successful runs may print status banners that are not findings.
         if [ -s "$SCRATCH/${proj_key}.out" ]; then
           normalize_project_cmd "$proj_key" < "$SCRATCH/${proj_key}.out" > "$SCRATCH/findings/${proj_key}.json"
         else

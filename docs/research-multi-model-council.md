@@ -112,7 +112,7 @@ Each pass uses the same model but with a different constitution prompt. The mode
 
 ### 5. PR-Agent (Qodo) — Self-Reflection with Dedicated Reasoning Model
 
-**Source:** Analysis of the PR-Agent open-source code review tool (`~/workspaces/pr-agent`), the most widely-deployed AI code review agent. Apache 2.0, Python.
+**Source:** Analysis of the PR-Agent open-source code review tool ([qodo-ai/pr-agent](https://github.com/qodo-ai/pr-agent)), the most widely-deployed AI code review agent. Apache 2.0, Python.
 
 **Architecture:** NOT a council — a **two-pass pipeline** where the second pass uses a potentially different model to score and validate the first pass's output. Multi-model is used for *cost optimization and role separation*, not diversity.
 
@@ -235,7 +235,7 @@ PR-Agent defines a `pr_evaluate_prompt_response.toml` that compares two model re
 
 ### 6. Kodus-AI — Panel of Named Experts (Single-Prompt Role-Play)
 
-**Source:** Analysis of the Kodus-AI code review platform (~/workspaces/kodus-ai), a production AGPLv3 SaaS with multi-provider LLM support.
+**Source:** Analysis of the Kodus-AI code review platform ([kodus-ai/kodus-ai](https://github.com/kodus-ai/kodus-ai)), a production AGPLv3 SaaS with multi-provider LLM support.
 
 **Architecture:** NOT multi-model — a single LLM call with a prompt that instructs the model to role-play a panel of named experts who analyze sequentially within one response. Used in two contexts:
 
@@ -505,9 +505,9 @@ output for auditability but is not shown in the report unless contradicted.
 
 ## References
 
-- Claude Octopus (`~/workspaces/claude-octopus`) — Multi-AI orchestration with parallel fleet, verification round, and adversarial debate
+- Claude Octopus — Multi-AI orchestration with parallel fleet, verification round, and adversarial debate
 - Aider (https://aider.chat) — Architect + Editor dual-model pattern
 - Constitutional AI (Anthropic research) — Principle-based critique with explicit value systems
 - Analysis of Competing Hypotheses (ACH) — Intelligence analysis methodology used by Octopus for cross-model falsification
-- Kodus-AI (`~/workspaces/kodus-ai`) — Production code review platform with panel-of-experts prompts, 3-stage safeguard pipeline, and multi-model pipeline (different models per stage). AGPLv3, NestJS/TypeScript monorepo. Analyzed 2026-03-26.
-- PR-Agent / Qodo (`~/workspaces/pr-agent`) — Most widely-deployed AI code review tool. Self-reflection scoring (generate→score with dedicated reasoning model), tiered model routing (weak/primary/reasoning/fallback), response comparison prompt (defined but unused), and ticket compliance checking. Apache 2.0, Python. Analyzed 2026-03-26.
+- Kodus-AI ([kodus-ai/kodus-ai](https://github.com/kodus-ai/kodus-ai)) — Production code review platform with panel-of-experts prompts, 3-stage safeguard pipeline, and multi-model pipeline (different models per stage). AGPLv3, NestJS/TypeScript monorepo. Analyzed 2026-03-26.
+- PR-Agent / Qodo ([qodo-ai/pr-agent](https://github.com/qodo-ai/pr-agent)) — Most widely-deployed AI code review tool. Self-reflection scoring (generate→score with dedicated reasoning model), tiered model routing (weak/primary/reasoning/fallback), response comparison prompt (defined but unused), and ticket compliance checking. Apache 2.0, Python. Analyzed 2026-03-26.

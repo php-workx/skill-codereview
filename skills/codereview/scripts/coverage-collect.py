@@ -64,9 +64,9 @@ TEST_PATTERNS = [
 # Coverage artifact paths to check, per language (checked in order)
 COVERAGE_ARTIFACTS = {
     "go": ["cover.out", "coverage.out"],
-    "python": [".coverage", "coverage.json", "cover.json", "htmlcov/"],
+    "python": [".coverage", "coverage.json", "cover.json"],
     "rust": ["tarpaulin-report.json", "lcov.info", "lcov.json"],
-    "typescript": ["coverage/", ".nyc_output/", "coverage-final.json"],
+    "typescript": ["coverage/coverage-final.json", "coverage-final.json"],
     "ruby": ["coverage/.resultset.json", "coverage/.last_run.json"],
     "java": ["target/site/jacoco/jacoco.xml", "build/reports/jacoco/test/jacocoTestReport.xml"],
 }
