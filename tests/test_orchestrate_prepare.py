@@ -25,6 +25,9 @@ from scripts.orchestrate import (  # noqa: E402
     select_mode,
 )
 
+TESTS_DIR = Path(__file__).resolve().parent
+REPO_ROOT = TESTS_DIR.parent
+
 
 class OrchestratePrepareTests(unittest.TestCase):
     def test_extract_diff_base_mode_returns_changed_files_and_diff_text(self) -> None:
@@ -125,7 +128,7 @@ class OrchestratePrepareTests(unittest.TestCase):
         self.assertNotIn("standards standards", truncated)
 
     def test_load_config_defaults_file_and_cli_override(self) -> None:
-        config_path = Path("tests/fixtures/orchestrate/codereview.yaml")
+        config_path = TESTS_DIR / "fixtures" / "orchestrate" / "codereview.yaml"
         fake_yaml = mock.Mock()
         fake_yaml.safe_load.return_value = {
             "cadence": "wave-end",
@@ -164,6 +167,7 @@ class OrchestratePrepareTests(unittest.TestCase):
             session_dir = Path(tmpdir) / "session"
             stale_prompt = session_dir / "explorer-correctness-prompt.md"
             stale_prompt.parent.mkdir(parents=True, exist_ok=True)
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
             stale_prompt.write_text("stale", encoding="utf-8")
             (session_dir / "launch.json").write_text("stale", encoding="utf-8")
 
@@ -207,7 +211,7 @@ class OrchestratePrepareTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "scripts.orchestrate.detect_repo_root", return_value=Path.cwd()
+                    "scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT
                 ),
                 mock.patch(
                     "scripts.orchestrate.extract_diff", return_value=diff_result
@@ -222,6 +226,7 @@ class OrchestratePrepareTests(unittest.TestCase):
             self.assertTrue((session_dir / "diff.patch").exists())
             self.assertTrue((session_dir / "changed-files.txt").exists())
             self.assertTrue((session_dir / "launch.json").exists())
+            self.assertTrue((session_dir / ".codereview-session").exists())
 
             launch = json.loads(
                 (session_dir / "launch.json").read_text(encoding="utf-8")
@@ -278,7 +283,7 @@ class OrchestratePrepareTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "scripts.orchestrate.detect_repo_root", return_value=Path.cwd()
+                    "scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT
                 ),
                 mock.patch(
                     "scripts.orchestrate.extract_diff", return_value=diff_result
@@ -303,11 +308,7 @@ class OrchestratePrepareTests(unittest.TestCase):
                 [
                     "bash",
                     str(
-                        Path.cwd()
-                        / "skills"
-                        / "codereview"
-                        / "scripts"
-                        / "run-scans.sh"
+                        REPO_ROOT / "skills" / "codereview" / "scripts" / "run-scans.sh"
                     ),
                     "--base-ref",
                     "main",
@@ -336,7 +337,7 @@ class OrchestratePrepareTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "scripts.orchestrate.detect_repo_root", return_value=Path.cwd()
+                    "scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT
                 ),
                 mock.patch("scripts.orchestrate.extract_diff", return_value=empty_diff),
             ):
@@ -364,6 +365,25 @@ class OrchestratePrepareTests(unittest.TestCase):
         self.assertIn("tracked.txt", result.changed_files)
         self.assertIn("+staged change", result.diff_text)
         self.assertEqual(result.mode, "staged")
+
+    def test_prepare_refuses_non_session_directory_with_existing_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir) / "session"
+            session_dir.mkdir()
+            (session_dir / "user-file.txt").write_text("keep", encoding="utf-8")
+            args = Namespace(
+                session_dir=session_dir,
+                no_config=True,
+                spec=None,
+                spec_scope=None,
+                base="main",
+                mode="base",
+            )
+
+            result = prepare(args)
+
+            self.assertEqual(result, 1)
+            self.assertTrue((session_dir / "user-file.txt").exists())
 
     def _init_repo(self, repo: Path) -> Path:
         self._run(["git", "init", "-b", "main"], cwd=repo)

@@ -119,7 +119,22 @@
       "additionalProperties": true
     }
   },
-  "required": ["session_dir", "mode", "waves", "judge"],
+  "required": ["status", "session_dir"],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "ready"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["mode", "waves", "judge"]
+      }
+    }
+  ],
   "$defs": {
     "diffResult": {
       "type": "object",

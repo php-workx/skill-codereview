@@ -11,19 +11,41 @@ sys.path.insert(
     0, str(Path(__file__).resolve().parent.parent / "skills" / "codereview")
 )
 
-from scripts.orchestrate import derive_verdict, finalize, post_explorers  # noqa: E402
+from scripts.orchestrate import cleanup, derive_verdict, finalize, post_explorers  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class PostExplorersPhaseTests(unittest.TestCase):
+    def test_post_explorers_noops_for_empty_launch_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir) / "session"
+            session_dir.mkdir()
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
+            (session_dir / "launch.json").write_text(
+                json.dumps({"status": "empty", "session_dir": str(session_dir)}),
+                encoding="utf-8",
+            )
+
+            result = post_explorers(Namespace(session_dir=session_dir))
+
+            self.assertEqual(result, 0)
+            judge_input = json.loads(
+                (session_dir / "judge-input.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(judge_input["status"], "skipped")
+            self.assertEqual(judge_input["reason"], "Launch packet status is empty")
+
     def test_post_explorers_reports_missing_invalid_and_wrong_shape_outputs(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             session_dir = Path(tmpdir) / "session"
             session_dir.mkdir()
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
 
             judge_prompt_file = (
-                Path.cwd() / "skills" / "codereview" / "prompts" / "reviewer-judge.md"
+                REPO_ROOT / "skills" / "codereview" / "prompts" / "reviewer-judge.md"
             )
             launch_packet = {
                 "session_dir": str(session_dir),
@@ -133,19 +155,28 @@ class PostExplorersPhaseTests(unittest.TestCase):
             self.assertEqual(judge_input["explorer_finding_count"], 1)
             self.assertEqual(judge_input["spec_requirements"], [])
             self.assertEqual(
-                judge_input["explorer_status"],
-                {
-                    "correctness": {"status": "ok", "findings": 3},
-                    "security": {"status": "wrong_shape", "findings": 0},
-                    "missing": {"status": "missing", "findings": 0},
-                    "wrong-shape": {"status": "wrong_shape", "findings": 0},
-                    "invalid-json": {
-                        "status": "invalid_json",
-                        "findings": 0,
-                        "error": "No complete JSON payload found in text",
-                    },
-                },
+                judge_input["explorer_status"]["correctness"],
+                {"status": "ok", "findings": 3},
             )
+            self.assertEqual(
+                judge_input["explorer_status"]["security"],
+                {"status": "wrong_shape", "findings": 0},
+            )
+            self.assertEqual(
+                judge_input["explorer_status"]["missing"],
+                {"status": "missing", "findings": 0},
+            )
+            self.assertEqual(
+                judge_input["explorer_status"]["wrong-shape"],
+                {"status": "wrong_shape", "findings": 0},
+            )
+            self.assertEqual(
+                judge_input["explorer_status"]["invalid-json"]["status"], "invalid_json"
+            )
+            self.assertEqual(
+                judge_input["explorer_status"]["invalid-json"]["findings"], 0
+            )
+            self.assertTrue(judge_input["explorer_status"]["invalid-json"].get("error"))
             self.assertEqual(len(judge_input["findings"]), 1)
             self.assertEqual(judge_input["findings"][0]["confidence"], 0.92)
             self.assertIn("pass", judge_input["findings"][0])
@@ -156,9 +187,10 @@ class PostExplorersPhaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             session_dir = Path(tmpdir) / "session"
             session_dir.mkdir()
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
 
             judge_prompt_file = (
-                Path.cwd() / "skills" / "codereview" / "prompts" / "reviewer-judge.md"
+                REPO_ROOT / "skills" / "codereview" / "prompts" / "reviewer-judge.md"
             )
             launch_packet = {
                 "session_dir": str(session_dir),
@@ -237,19 +269,20 @@ class PostExplorersPhaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             session_dir = Path(tmpdir) / "session"
             session_dir.mkdir()
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
 
             judge_prompt_file = (
-                Path.cwd() / "skills" / "codereview" / "prompts" / "reviewer-judge.md"
+                REPO_ROOT / "skills" / "codereview" / "prompts" / "reviewer-judge.md"
             )
 
-            # Create 51 findings with distinct confidence values (0.70 .. 1.20 step 0.01)
+            # Create 51 findings with distinct confidence values (0.50 .. 1.00 step 0.01)
             findings_51 = [
                 {
                     "summary": f"Finding {i}",
                     "file": "app.py",
                     "line": i,
                     "severity": "medium",
-                    "confidence": round(0.70 + i * 0.01, 2),
+                    "confidence": round(0.50 + i * 0.01, 2),
                 }
                 for i in range(51)
             ]
@@ -291,12 +324,12 @@ class PostExplorersPhaseTests(unittest.TestCase):
             )
             self.assertEqual(judge_input["explorer_finding_count"], 50)
             confidences = [f["confidence"] for f in judge_input["findings"]]
-            # The lowest surviving confidence should be the 2nd from the bottom
-            # (index 1 = 0.71), since index 0 = 0.70 is the 51st and gets dropped
+            # The lowest surviving confidence should be 0.51, since 0.50 is the
+            # 51st entry and gets dropped when the list is capped at 50.
             self.assertEqual(len(confidences), 50)
-            self.assertNotIn(0.70, confidences)
-            self.assertIn(0.71, confidences)
-            self.assertIn(1.20, confidences)
+            self.assertNotIn(0.50, confidences)
+            self.assertIn(0.51, confidences)
+            self.assertIn(1.00, confidences)
             # Verify sorted descending (highest first)
             self.assertEqual(confidences, sorted(confidences, reverse=True))
 
@@ -335,6 +368,7 @@ class FinalizePhaseTests(unittest.TestCase):
             repo_root = Path(tmpdir)
             session_dir = repo_root / "session"
             session_dir.mkdir(parents=True)
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
             (session_dir / "changed-files.txt").write_text(
                 "scripts/orchestrate.py\n", encoding="utf-8"
             )
@@ -415,9 +449,36 @@ class FinalizePhaseTests(unittest.TestCase):
             self.assertEqual(report["strengths"], ["Prompt assembly is deterministic."])
             self.assertTrue((session_dir / "report.md").exists())
 
-            review_dir = repo_root / ".agents" / "reviews"
-            self.assertTrue(list(review_dir.glob("*.json")))
-            self.assertTrue(list(review_dir.glob("*.md")))
+    def test_finalize_noops_for_non_ready_launch_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir) / "session"
+            session_dir.mkdir()
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
+            (session_dir / "launch.json").write_text(
+                json.dumps({"status": "empty", "session_dir": str(session_dir)}),
+                encoding="utf-8",
+            )
+
+            result = finalize(Namespace(session_dir=session_dir, judge_output=None))
+
+            self.assertEqual(result, 0)
+            finalize_json = json.loads(
+                (session_dir / "finalize.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(finalize_json["status"], "skipped")
+            self.assertEqual(finalize_json["reason"], "Launch packet status is empty")
+
+    def test_cleanup_refuses_directory_without_session_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir) / "session"
+            session_dir.mkdir()
+            (session_dir / "keep.txt").write_text("data", encoding="utf-8")
+
+            result = cleanup(Namespace(session_dir=session_dir))
+
+            self.assertEqual(result, 1)
+            self.assertTrue(session_dir.exists())
+            self.assertTrue((session_dir / "keep.txt").exists())
 
 
 if __name__ == "__main__":

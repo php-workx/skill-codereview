@@ -29,11 +29,14 @@ from scripts.orchestrate import (
     triage_files,
 )
 
+TESTS_DIR = Path(__file__).resolve().parent
+REPO_ROOT = TESTS_DIR.parent
+
 
 class OrchestratePlumbingTests(unittest.TestCase):
     def test_help_lists_expected_subcommands(self) -> None:
         result = subprocess.run(
-            [sys.executable, "scripts/orchestrate.py", "--help"],
+            [sys.executable, str(REPO_ROOT / "scripts" / "orchestrate.py"), "--help"],
             capture_output=True,
             text=True,
             check=False,
@@ -88,7 +91,9 @@ class OrchestratePlumbingTests(unittest.TestCase):
             "ignore_paths": ["vendor/"],
         }
         with mock.patch("scripts.orchestrate.yaml", fake_yaml):
-            config = load_config(Path("tests/fixtures/orchestrate/codereview.yaml"))
+            config = load_config(
+                TESTS_DIR / "fixtures" / "orchestrate" / "codereview.yaml"
+            )
 
         self.assertEqual(config["cadence"], "wave-end")
         self.assertEqual(config["pushback_level"], "selective")
@@ -409,7 +414,7 @@ class OrchestratePlumbingTests(unittest.TestCase):
                     "scripts.orchestrate.run_subprocess_json", side_effect=side_effect
                 ),
                 mock.patch(
-                    "scripts.orchestrate.detect_repo_root", return_value=Path.cwd()
+                    "scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT
                 ),
             ):
                 result = prepare(args)
@@ -464,7 +469,7 @@ class OrchestratePlumbingTests(unittest.TestCase):
                     side_effect=TimeoutError("Global timeout exceeded during discover"),
                 ),
                 mock.patch(
-                    "scripts.orchestrate.detect_repo_root", return_value=Path.cwd()
+                    "scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT
                 ),
             ):
                 result = prepare(args)
@@ -478,7 +483,8 @@ class OrchestratePlumbingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             session_dir = Path(tmpdir) / "session"
             session_dir.mkdir()
-            fixtures = Path("tests/fixtures/orchestrate")
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
+            fixtures = TESTS_DIR / "fixtures" / "orchestrate"
             correctness = json.loads(
                 (fixtures / "mock-explorer-correctness.json").read_text()
             )
@@ -530,7 +536,7 @@ class OrchestratePlumbingTests(unittest.TestCase):
                 "judge": {
                     "prompt_file": str(
                         (
-                            Path.cwd()
+                            REPO_ROOT
                             / "skills"
                             / "codereview"
                             / "prompts"
@@ -560,13 +566,14 @@ class OrchestratePlumbingTests(unittest.TestCase):
             repo_root = Path(tmpdir)
             session_dir = repo_root / "session"
             session_dir.mkdir(parents=True)
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
             (session_dir / "changed-files.txt").write_text(
                 "scripts/orchestrate.py\n", encoding="utf-8"
             )
             judge_output = json.loads(
-                Path("tests/fixtures/orchestrate/mock-judge-output.json").read_text(
-                    encoding="utf-8"
-                )
+                (
+                    TESTS_DIR / "fixtures" / "orchestrate" / "mock-judge-output.json"
+                ).read_text(encoding="utf-8")
             )
             judge_output_path = session_dir / "judge.json"
             judge_output_path.write_text(json.dumps(judge_output), encoding="utf-8")
@@ -735,6 +742,38 @@ class OrchestratePlumbingTests(unittest.TestCase):
         self.assertNotIn("added_to_file1", result)
         self.assertNotIn("added_to_file3", result)
         self.assertIn("diff --git a/file2.py b/file2.py", result)
+
+    def test_chunk_diff_uses_rename_destination_path(self) -> None:
+        diff_text = (
+            "diff --git a/old_name.py b/new_name.py\n"
+            "similarity index 95%\n"
+            "rename from old_name.py\n"
+            "rename to new_name.py\n"
+            "--- a/old_name.py\n"
+            "+++ b/new_name.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+
+        result = _chunk_diff(diff_text, ["new_name.py"])
+
+        self.assertIn("rename to new_name.py", result)
+        self.assertNotEqual(result, diff_text if False else "")
+
+    def test_chunk_diff_returns_empty_when_no_chunk_files_match(self) -> None:
+        diff_text = (
+            "diff --git a/file1.py b/file1.py\n"
+            "--- a/file1.py\n"
+            "+++ b/file1.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+        )
+
+        result = _chunk_diff(diff_text, ["file2.py"])
+
+        self.assertEqual(result, "")
 
     def test_apply_spec_scope_returns_full_spec_when_no_heading_matches(self) -> None:
         """_apply_spec_scope returns the full spec unchanged when no headings match the scope."""

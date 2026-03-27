@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import atexit
 from argparse import Namespace
 from pathlib import Path
 from unittest import mock
@@ -27,6 +28,13 @@ REPO_ROOT = Path(os.environ["REPO_ROOT"])
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "orchestrate"
 PROMPTS = REPO_ROOT / "skills" / "codereview" / "prompts"
 SKILL_SCRIPTS = REPO_ROOT / "skills" / "codereview" / "scripts"
+_TEMP_DIRS = []
+
+
+@atexit.register
+def _cleanup_tempdirs() -> None:
+    for tmpdir in _TEMP_DIRS:
+        tmpdir.cleanup()
 
 
 def assert_true(condition: bool, message: str) -> None:
@@ -40,8 +48,10 @@ def assert_equal(actual, expected, message: str) -> None:
 
 
 def build_repo(copy_missing_prompt: str | None = None) -> Path:
-    tmpdir = Path(tempfile.mkdtemp(prefix="sc-0it0-"))
-    repo = tmpdir / "repo"
+    tmpdir = tempfile.TemporaryDirectory(prefix="sc-0it0-")
+    _TEMP_DIRS.append(tmpdir)
+    tmpdir_path = Path(tmpdir.name)
+    repo = tmpdir_path / "repo"
     (repo / ".git").mkdir(parents=True)
     prompt_dir = repo / "skills" / "codereview" / "prompts"
     scripts_dir = repo / "skills" / "codereview" / "scripts"

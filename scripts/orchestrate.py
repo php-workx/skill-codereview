@@ -476,15 +476,7 @@ def _cleanup_old_temp_sessions(
         try:
             if path.stat().st_mtime >= cutoff:
                 continue
-            if not any(
-                (path / marker).exists()
-                for marker in (
-                    "launch.json",
-                    "diff.patch",
-                    "judge-input.json",
-                    "finalize.json",
-                )
-            ):
+            if not _has_session_marker(path):
                 continue
             shutil.rmtree(path, ignore_errors=True)
         except OSError:
@@ -675,7 +667,7 @@ def check_token_budget(
     *,
     prompt_budget_tokens: int = 70_000,
 ) -> str:
-    """Render a prompt, applying progressive truncation if needed."""
+    """Render a prompt, mutating ``ctx`` in place as progressive truncation is applied."""
     if ctx.estimate_tokens() <= prompt_budget_tokens:
         return ctx.render()
 
@@ -1128,7 +1120,26 @@ def validate_prompt_files(repo_root: Path) -> None:
         raise FileNotFoundError(f"Missing prompt files: {', '.join(missing)}")
 
 
+SESSION_MARKER = ".codereview-session"
+
+
+def _session_marker_path(session_dir: Path) -> Path:
+    return session_dir / SESSION_MARKER
+
+
+def _has_session_marker(session_dir: Path) -> bool:
+    return _session_marker_path(session_dir).exists()
+
+
+def _write_session_marker(session_dir: Path) -> None:
+    _session_marker_path(session_dir).write_text(
+        "codereview-session\n", encoding="utf-8"
+    )
+
+
 def _cleanup_stale_session(session_dir: Path) -> None:
+    if not _has_session_marker(session_dir):
+        return
     for pattern in (
         "explorer-*.json",
         "explorer-*-prompt.md",
@@ -1152,19 +1163,29 @@ def _chunk_diff(diff_text: str, chunk_files: list[str]) -> str:
 
     selected: list[str] = []
     current: list[str] = []
-    current_file: str | None = None
+    current_files: set[str] = set()
+    saw_header = False
     for line in diff_text.splitlines():
         if line.startswith("diff --git "):
-            if current_file in chunk_files and current:
+            if current_files.intersection(chunk_files) and current:
                 selected.extend(current)
             current = [line]
-            match = re.match(r"diff --git a/(.*?) b/", line)
-            current_file = match.group(1) if match else None
+            saw_header = True
+            current_files = set()
+            match = re.match(r"diff --git a/(.*?) b/(.*)", line)
+            if match:
+                old_path, new_path = match.groups()
+                if old_path != "/dev/null":
+                    current_files.add(old_path)
+                if new_path != "/dev/null":
+                    current_files.add(new_path)
         else:
             current.append(line)
-    if current_file in chunk_files and current:
+    if current_files.intersection(chunk_files) and current:
         selected.extend(current)
-    return "\n".join(selected) if selected else diff_text
+    if selected:
+        return "\n".join(selected)
+    return "" if saw_header else diff_text
 
 
 def build_chunks(
@@ -1218,7 +1239,18 @@ def _ensure_session_dir(args: argparse.Namespace, *, create_if_missing: bool) ->
         path = Path(tempfile.mkdtemp(prefix="codereview-"))
         progress("session_dir_created", session_dir=str(path))
         return path
-    return Path(session)
+    path = Path(session)
+    if create_if_missing and path.exists() and path.is_dir():
+        if not _has_session_marker(path):
+            try:
+                has_entries = any(path.iterdir())
+            except OSError:
+                has_entries = True
+            if has_entries:
+                raise ValueError(
+                    f"Refusing to reuse non-session directory without marker: {path}"
+                )
+    return path
 
 
 def _determine_diff_mode(args: argparse.Namespace) -> str:
@@ -1326,8 +1358,13 @@ def prepare(args: argparse.Namespace) -> int:
     phase_started = time.monotonic()
     repo_root = detect_repo_root()
     validate_prompt_files(repo_root)
-    session_dir = _ensure_session_dir(args, create_if_missing=True)
+    try:
+        session_dir = _ensure_session_dir(args, create_if_missing=True)
+    except ValueError as exc:
+        progress("prepare_error", error=str(exc))
+        return 1
     session_dir.mkdir(parents=True, exist_ok=True)
+    _write_session_marker(session_dir)
     _cleanup_old_temp_sessions()
     _cleanup_stale_session(session_dir)
 
@@ -1708,6 +1745,17 @@ def post_explorers(args: argparse.Namespace) -> int:
     launch_packet = json.loads(
         (session_dir / "launch.json").read_text(encoding="utf-8")
     )
+    launch_status = launch_packet.get("status", "ready")
+    if launch_status != "ready":
+        skipped = {
+            "status": "skipped",
+            "reason": f"Launch packet status is {launch_status}",
+        }
+        (session_dir / "judge-input.json").write_text(
+            json.dumps(skipped, indent=2), encoding="utf-8"
+        )
+        _append_timing(session_dir, "post_explorers", phase_started)
+        return 0
     all_findings: list[dict[str, Any]] = []
     explorer_status: dict[str, Any] = {}
     spec_requirements: list[dict[str, Any]] = []
@@ -2010,6 +2058,18 @@ def finalize(args: argparse.Namespace) -> int:
     launch_packet = json.loads(
         (session_dir / "launch.json").read_text(encoding="utf-8")
     )
+    launch_status = launch_packet.get("status", "ready")
+    if launch_status != "ready":
+        skipped = {
+            "status": "skipped",
+            "reason": f"Launch packet status is {launch_status}",
+            "session_dir": str(session_dir),
+        }
+        (session_dir / "finalize.json").write_text(
+            json.dumps(skipped, indent=2), encoding="utf-8"
+        )
+        _append_timing(session_dir, "finalize", phase_started)
+        return 0
     judge_output_default = launch_packet.get("judge", {}).get(
         "output_file", str(session_dir / "judge.json")
     )
@@ -2157,6 +2217,13 @@ def finalize(args: argparse.Namespace) -> int:
 def cleanup(args: argparse.Namespace) -> int:
     progress("cleanup_started")
     session_dir = _ensure_session_dir(args, create_if_missing=False)
+    if session_dir.exists() and not _has_session_marker(session_dir):
+        progress(
+            "cleanup_refused",
+            session_dir=str(session_dir),
+            error="Missing session marker",
+        )
+        return 1
     if session_dir.exists():
         shutil.rmtree(session_dir, ignore_errors=True)
     return 0
