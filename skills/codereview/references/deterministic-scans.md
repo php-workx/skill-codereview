@@ -1,6 +1,8 @@
 # Deterministic Scans Reference
 
-This file contains the full bash scripts, cache setup, and operational details for Step 3 of the codereview skill. The executing agent should follow these instructions when running deterministic scans.
+> **Note:** The executable logic from this document has been extracted to `scripts/run-scans.sh`. This file is now **reference documentation only** — it explains what each tool does, when to install them, and how normalization works. The agent should run the script, not re-implement this document. Fall back to manual execution only if the script is unavailable.
+
+This file contains tool documentation, cache setup rationale, and operational details for Step 3 of the codereview skill.
 
 ---
 

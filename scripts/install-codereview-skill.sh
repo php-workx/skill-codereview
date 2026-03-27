@@ -47,8 +47,18 @@ rm -rf "$DEST_CLAUDE" "$DEST_CODEX"
 mv "$DEST_CLAUDE_TMP" "$DEST_CLAUDE"
 mv "$DEST_CODEX_TMP" "$DEST_CODEX"
 
-chmod +x "$DEST_CLAUDE/scripts/validate_output.sh" \
-  "$DEST_CODEX/scripts/validate_output.sh"
+# Make all scripts executable
+for dest in "$DEST_CLAUDE" "$DEST_CODEX"; do
+  # Use compgen to check for matching files before chmod (avoids glob expansion errors)
+  for pat in "$dest/scripts/"*.sh "$dest/scripts/"*.py; do
+    if compgen -G "$pat" >/dev/null 2>&1; then
+      chmod +x $pat || {
+        echo "error: failed to chmod +x $pat" >&2
+        exit 1
+      }
+    fi
+  done
+done
 
 if [[ -f "$SRC_PROMPT" ]]; then
   cp "$SRC_PROMPT" "$DEST_CODEX_PROMPTS_BASE/codereview.md" || {

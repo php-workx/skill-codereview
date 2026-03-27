@@ -1,0 +1,34 @@
+{
+  "run_id": "test-bad-suppressed",
+  "timestamp": "2026-03-26T08:00:00Z",
+  "review_mode": "standard",
+  "scope": "branch",
+  "base_ref": "main",
+  "head_ref": "feat/test",
+  "pr_number": null,
+  "files_reviewed": ["src/auth/login.py"],
+  "verdict": "PASS",
+  "verdict_reason": "No issues",
+  "strengths": [],
+  "spec_gaps": [],
+  "spec_requirements": [],
+  "tool_status": {
+    "ai_correctness": { "status": "ran", "version": null, "finding_count": 0, "note": null }
+  },
+  "findings": [],
+  "tier_summary": { "must_fix": 0, "should_fix": 0, "consider": 0 },
+  "suppressed_findings": [
+    {
+      "id": "correctness-test-1",
+      "source": "ai",
+      "pass": "correctness",
+      "severity": "medium",
+      "confidence": 0.78,
+      "file": "src/api/orders.py",
+      "line": 10,
+      "summary": "Suppressed finding with wrong lifecycle status",
+      "action_tier": "should_fix",
+      "lifecycle_status": "new"
+    }
+  ]
+}

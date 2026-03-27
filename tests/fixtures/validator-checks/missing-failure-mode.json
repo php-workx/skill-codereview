@@ -1,0 +1,32 @@
+{
+  "run_id": "test-missing-failure-mode",
+  "timestamp": "2026-03-26T08:00:00Z",
+  "review_mode": "standard",
+  "scope": "branch",
+  "base_ref": "main",
+  "head_ref": "feat/test",
+  "pr_number": null,
+  "files_reviewed": ["src/auth/login.py"],
+  "verdict": "FAIL",
+  "verdict_reason": "Critical issue found",
+  "strengths": [],
+  "spec_gaps": [],
+  "spec_requirements": [],
+  "tool_status": {
+    "ai_correctness": { "status": "ran", "version": null, "finding_count": 1, "note": null }
+  },
+  "findings": [
+    {
+      "id": "security-test-1",
+      "source": "ai",
+      "pass": "security",
+      "severity": "high",
+      "confidence": 0.92,
+      "file": "src/auth/login.py",
+      "line": 42,
+      "summary": "SQL injection via string formatting",
+      "action_tier": "must_fix"
+    }
+  ],
+  "tier_summary": { "must_fix": 1, "should_fix": 0, "consider": 0 }
+}

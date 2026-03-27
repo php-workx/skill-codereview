@@ -207,6 +207,94 @@ Force chunked review mode even when the diff is below thresholds. Useful for tes
 /codereview --force-chunk
 ```
 
+### `coverage`
+
+Settings for test coverage data collection. The skill detects languages from changed file extensions and checks for existing coverage artifacts. By default, it only parses pre-existing data — it does not run your test suite.
+
+```yaml
+coverage:
+  run_tests: false        # default: only parse existing coverage data
+  test_timeout: 300       # seconds, only applies when run_tests: true
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `run_tests` | `false` | When `false`, only parse existing coverage artifacts. When `true`, run the test suite to generate fresh coverage if no existing data is found. |
+| `test_timeout` | `300` | Timeout in seconds for test suite execution. Only applies when `run_tests: true`. Prevents the review from hanging on slow test suites. |
+
+## Finding Suppressions
+
+The `.codereview-suppressions.json` file in the repo root controls which findings are suppressed (hidden from the report). Commit this file to git so the team shares suppressions.
+
+### Suppressions File Schema
+
+```json
+{
+  "version": 1,
+  "suppressions": [
+    {
+      "fingerprint": "a1b2c3d4e5f6",
+      "status": "rejected",
+      "reason": "Intentional design choice — documented in ADR-007",
+      "created_at": "2026-03-25T14:00:00Z",
+      "created_by": "runger",
+      "file": "src/auth/session.py",
+      "pass": "security",
+      "severity": "medium",
+      "summary_snippet": "Missing rate limit on token refresh"
+    },
+    {
+      "fingerprint": "d4e5f6a7b8c9",
+      "status": "deferred",
+      "reason": "Will address in v1.3 — tracked in JIRA-456",
+      "created_at": "2026-03-25T14:00:00Z",
+      "created_by": "runger",
+      "file": "src/api/orders.py",
+      "pass": "testing",
+      "severity": "medium",
+      "summary_snippet": "Missing integration test for bulk update",
+      "deferred_scope": "pass",
+      "expires_at": "2026-04-25T00:00:00Z"
+    }
+  ]
+}
+```
+
+### Suppression Fields
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `fingerprint` | Yes | — | SHA-256 fingerprint (12 hex chars) identifying the finding |
+| `status` | Yes | — | `rejected` (permanently dismissed) or `deferred` (temporarily dismissed) |
+| `reason` | Yes | — | Human-readable explanation for the suppression |
+| `created_at` | Yes | — | ISO 8601 timestamp of when the suppression was created |
+| `created_by` | No | — | Who created the suppression |
+| `file` | Yes | — | File path the finding was in (used for fuzzy matching) |
+| `pass` | Yes | — | Explorer pass that produced the finding (used for fuzzy matching) |
+| `severity` | Yes | — | Finding severity (used for fuzzy matching) |
+| `summary_snippet` | Yes | — | First ~80 chars of finding summary (human reference) |
+| `deferred_scope` | No | `"file"` | Controls when a deferred finding resurfaces. `"file"`: resurface when the file is in CHANGED_FILES. `"pass"`: resurface only when the file is changed AND the same explorer pass fires. `"exact"`: resurface only on exact fingerprint match (effectively permanent deferral until the exact same finding reappears). |
+| `expires_at` | No | `null` | ISO 8601 date string. When present and in the past, the suppression is ignored and the finding resurfaces. Enables "defer for N days" without permanent dismissal. |
+
+### Creating Suppressions
+
+Use the CLI subcommand after a review:
+
+```bash
+# Reject permanently
+/codereview suppress <finding-id> --status rejected --reason "explanation"
+
+# Defer for 30 days
+/codereview suppress <finding-id> --status deferred --defer-days 30 --reason "next sprint"
+
+# Defer with scope control
+/codereview suppress <finding-id> --status deferred --defer-scope pass --reason "only relevant if auth pass fires"
+```
+
+### Removing Suppressions
+
+To un-suppress a finding, remove its entry from `.codereview-suppressions.json`. Expired suppressions (past `expires_at`) are automatically ignored — no manual removal needed.
+
 ## Precedence
 
 If multiple configuration sources exist:

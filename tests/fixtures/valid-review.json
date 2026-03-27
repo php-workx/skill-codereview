@@ -1,0 +1,51 @@
+{
+  "run_id": "20260326T080000Z-test",
+  "timestamp": "2026-03-26T08:00:00Z",
+  "review_mode": "standard",
+  "scope": "branch",
+  "base_ref": "main",
+  "head_ref": "feat/test",
+  "pr_number": null,
+  "files_reviewed": ["src/auth/login.py", "src/api/orders.py"],
+  "verdict": "WARN",
+  "verdict_reason": "Has should-fix issues but no blockers",
+  "strengths": ["Clean separation of auth concerns"],
+  "spec_gaps": [],
+  "spec_requirements": [],
+  "tool_status": {
+    "semgrep": { "status": "ran", "version": "1.56.0", "finding_count": 1, "note": null },
+    "trivy": { "status": "not_installed", "version": null, "finding_count": 0, "note": "brew install trivy" },
+    "ai_correctness": { "status": "ran", "version": null, "finding_count": 1, "note": null }
+  },
+  "findings": [
+    {
+      "id": "security-d3b2-42",
+      "source": "ai",
+      "pass": "security",
+      "severity": "high",
+      "confidence": 0.92,
+      "file": "src/auth/login.py",
+      "line": 42,
+      "summary": "SQL injection via string formatting",
+      "evidence": "Line 42: query = f\"SELECT * FROM users WHERE name = '{name}'\"",
+      "failure_mode": "DB compromise",
+      "fix": "Use parameterized query",
+      "tests_to_add": ["Test SQL injection"],
+      "action_tier": "must_fix"
+    },
+    {
+      "id": "correctness-a1f2-105",
+      "source": "ai",
+      "pass": "correctness",
+      "severity": "medium",
+      "confidence": 0.78,
+      "file": "src/api/orders.py",
+      "line": 105,
+      "summary": "Off-by-one in pagination",
+      "evidence": "offset calculation wrong",
+      "fix": "Change to (page-1)*size",
+      "action_tier": "should_fix"
+    }
+  ],
+  "tier_summary": { "must_fix": 1, "should_fix": 1, "consider": 0 }
+}

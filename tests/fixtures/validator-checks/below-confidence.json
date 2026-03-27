@@ -1,0 +1,32 @@
+{
+  "run_id": "test-below-confidence",
+  "timestamp": "2026-03-26T08:00:00Z",
+  "review_mode": "standard",
+  "scope": "branch",
+  "base_ref": "main",
+  "head_ref": "feat/test",
+  "pr_number": null,
+  "files_reviewed": ["src/auth/login.py"],
+  "verdict": "WARN",
+  "verdict_reason": "Has findings",
+  "strengths": ["Clean code"],
+  "spec_gaps": [],
+  "spec_requirements": [],
+  "tool_status": {
+    "ai_correctness": { "status": "ran", "version": null, "finding_count": 1, "note": null }
+  },
+  "findings": [
+    {
+      "id": "correctness-test-1",
+      "source": "ai",
+      "pass": "correctness",
+      "severity": "medium",
+      "confidence": 0.40,
+      "file": "src/api/orders.py",
+      "line": 10,
+      "summary": "Low confidence finding that should have been filtered",
+      "action_tier": "should_fix"
+    }
+  ],
+  "tier_summary": { "must_fix": 0, "should_fix": 1, "consider": 0 }
+}

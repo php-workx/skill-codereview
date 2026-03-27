@@ -190,14 +190,14 @@
     },
     "tool_status": {
       "type": "object",
-      "description": "Status of each tool/pass that was attempted",
+      "description": "Status of each tool/pass that was attempted. Keys include deterministic scan tools (semgrep, trivy, rubocop, brakeman, pmd, etc.), AI passes (ai_correctness, ai_security, etc.), and coverage tools (coverage_go, coverage_python, coverage_rust, coverage_typescript, coverage_ruby, coverage_java).",
       "additionalProperties": {
         "type": "object",
         "required": ["status"],
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["ran", "skipped", "failed", "not_installed", "sandbox_blocked"]
+            "enum": ["ran", "skipped", "failed", "not_installed", "sandbox_blocked", "partial", "timeout"]
           },
           "version": {
             "type": ["string", "null"]
@@ -286,8 +286,56 @@
             "type": "string",
             "enum": ["must_fix", "should_fix", "consider"],
             "description": "Action tier: must_fix (critical/high, conf>=0.80), should_fix (medium or high 0.65-0.79), consider (everything else above confidence floor)"
+          },
+          "fingerprint": {
+            "type": "string",
+            "description": "SHA-256 fingerprint (12 hex chars) for cross-review tracking"
+          },
+          "lifecycle_status": {
+            "type": "string",
+            "enum": ["new", "recurring"],
+            "description": "Whether this finding appeared in a previous review"
           }
         }
+      }
+    },
+    "suppressed_findings": {
+      "type": "array",
+      "description": "Findings suppressed via .codereview-suppressions.json (rejected or deferred). Same shape as findings but with lifecycle_status of rejected or deferred.",
+      "items": {
+        "type": "object",
+        "required": ["id", "source", "pass", "severity", "confidence", "file", "line", "summary", "lifecycle_status"],
+        "properties": {
+          "id": { "type": "string" },
+          "source": { "type": "string", "enum": ["deterministic", "ai"] },
+          "pass": { "type": "string" },
+          "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+          "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+          "file": { "type": "string" },
+          "line": { "type": "integer", "minimum": 0 },
+          "summary": { "type": "string" },
+          "evidence": { "type": ["string", "null"] },
+          "failure_mode": { "type": ["string", "null"] },
+          "fix": { "type": ["string", "null"] },
+          "action_tier": { "type": "string", "enum": ["must_fix", "should_fix", "consider"] },
+          "fingerprint": { "type": "string", "description": "SHA-256 fingerprint (12 hex chars) for cross-review tracking" },
+          "lifecycle_status": {
+            "type": "string",
+            "enum": ["rejected", "deferred"],
+            "description": "Suppression status: rejected (permanently dismissed) or deferred (temporarily dismissed)"
+          }
+        }
+      }
+    },
+    "lifecycle_summary": {
+      "type": "object",
+      "description": "Counts of findings by lifecycle status",
+      "properties": {
+        "new": { "type": "integer", "description": "Findings appearing for the first time" },
+        "recurring": { "type": "integer", "description": "Findings that appeared in a previous review" },
+        "rejected": { "type": "integer", "description": "Findings permanently suppressed" },
+        "deferred": { "type": "integer", "description": "Findings temporarily suppressed" },
+        "deferred_resurfaced": { "type": "integer", "description": "Previously deferred findings that resurfaced" }
       }
     },
     "tier_summary": {
@@ -297,6 +345,34 @@
         "must_fix": { "type": "integer" },
         "should_fix": { "type": "integer" },
         "consider": { "type": "integer" }
+      }
+    },
+    "_timing": {
+      "type": ["object", "null"],
+      "description": "Observability timing data for the review pipeline. Optional — omit if timing.sh was not available.",
+      "properties": {
+        "total_ms": { "type": "integer" },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "duration_ms": { "type": "integer" }
+            }
+          }
+        },
+        "marks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "value": { "type": "string" },
+              "ts": { "type": "string" }
+            }
+          }
+        }
       }
     }
   }

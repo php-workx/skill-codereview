@@ -45,12 +45,14 @@ For new imports or dependency additions:
 2. Look for known vulnerability patterns in the version added.
 3. Check if the dependency is used in a security-sensitive context (crypto, auth, serialization).
 
-### Phase 6 — Non-User-Input Injection
-Don't limit injection analysis to user input. Any dynamic value that flows into a dangerous sink is an injection vector:
+### Phase 6 — Non-User-Input Injection (Including CLI/Script Contexts)
+Don't limit injection analysis to user input or web contexts. Any dynamic value that flows into a dangerous sink is an injection vector — including in CLI tools, shell scripts, and build pipelines:
 1. **Identify non-user dynamic values** in the diff: inter-component data (step outputs, RPC responses, queue messages, webhook payloads), configuration values (matrix parameters, template variables, feature flags), file contents read at runtime, values from other stages of a pipeline.
 2. **Trace these values to sinks**: shell commands (`exec`, `system`, `popen`, backticks, `$()` in shell scripts), SQL queries, file paths, `eval`/`Function()` contexts, template rendering, HTTP headers.
 3. **Check for escaping/sanitization** at the boundary where the value enters the sink. Framework-level or language-level protections (parameterized queries, subprocess list args) count. String interpolation into shell or SQL does not.
 4. For **pipeline/workflow systems**: trace output from one step that becomes input to another. Step outputs, environment variables set by previous steps, and output files are all potential injection vectors if consumed by shell commands or expression engines in later steps.
+5. For **CLI scripts that read data from repo files**: file content (JSON configs, YAML, Makefiles, Gemfiles, package.json scripts, project profiles) is untrusted input — a malicious PR can control it. If file-derived strings are passed to `bash -c`, `eval`, `system()`, `exec()`, or any shell execution, this is command injection. Defend with: allowlisted tool names, structured argv (not string interpolation), or sandboxed execution.
+6. For **bash scripts building structured output** (JSON, YAML, XML) via string interpolation (`printf`, heredoc, `echo`): variable values containing quotes, backslashes, newlines, or control characters corrupt the output format. This is injection — use `jq -n --arg` for JSON, proper escaping functions, or a structured serializer instead of string interpolation.
 
 ### Phase 7 — Environment Variable Namespace Pollution
 When the diff sets environment variables from dynamic sources (user config, matrix parameters, template variables, key-value stores):

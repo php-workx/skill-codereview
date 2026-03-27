@@ -1,0 +1,31 @@
+{
+  "findings": [
+    {
+      "pass": "security",
+      "severity": "high",
+      "file": "src/auth/login.py",
+      "line": 42,
+      "summary": "SQL injection via string formatting",
+      "evidence": "semgrep rule python.lang.security.audit.formatted-sql-query",
+      "tool": "semgrep"
+    },
+    {
+      "pass": "security",
+      "severity": "critical",
+      "file": "src/config/settings.py",
+      "line": 5,
+      "summary": "Secret detected: Generic API Key",
+      "evidence": "Match: AKIAI****EXAMPLE (gitleaks rule generic-api-key)",
+      "tool": "gitleaks"
+    },
+    {
+      "pass": "reliability",
+      "severity": "medium",
+      "file": "scripts/deploy.sh",
+      "line": 18,
+      "summary": "SC2086: Double quote to prevent globbing and word splitting",
+      "evidence": "SC2086",
+      "tool": "shellcheck"
+    }
+  ]
+}

@@ -49,15 +49,15 @@ This document contains background context for the codereview skill. It is not ne
     └─────────┴─────────┴────┬────┴─────────┴─────────┴─────────┴─────────┘
                              ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  Review Judge (prompts/reviewer-judge.md)                     │
-│  1. Adversarial validation (existence, contradiction,         │
-│     severity calibration)                                     │
-│  2. Root cause grouping (merge related findings)              │
-│  3. Cross-explorer synthesis (catch gaps across explorers)    │
-│  4. Strengths assessment (specific, not generic)              │
-│  5. Spec compliance: merge spec-verification explorer data,    │
-│     validate impl/test claims, produce spec_requirements       │
-│  6. Verdict: PASS / WARN / FAIL                               │
+│  Review Judge — Named Expert Panel (reviewer-judge.md)         │
+│  Expert 1: Gatekeeper — pre-filter triage (auto-discard       │
+│     phantom knowledge, speculative, framework-guaranteed,     │
+│     outside scope, style-only, duplicate of deterministic)    │
+│  Expert 2: Verifier — existence + evidence check with         │
+│     Read/Grep (verified / unverified / disproven)             │
+│  Expert 3: Calibrator — severity calibration, root cause      │
+│     grouping, cross-explorer synthesis, contradiction resolve │
+│  Expert 4: Synthesizer — strengths, spec compliance, verdict  │
 │  → Returns findings + verdict + strengths + spec_requirements │
 └──────────────────────────────────────────────────────────────┘
                               │
@@ -129,6 +129,13 @@ This document contains background context for the codereview skill. It is not ne
 | Envelope metadata in artifacts | run_id/timestamp/scope/tool_status/verdict make reviews traceable | Previous plan |
 | Best-effort degradation | Skip unavailable tools with explicit status rather than failing | Previous plan |
 | Repo-level config file | Teams customize passes, cadence, pushback, paths, thresholds | CodeRabbit `.coderabbit.yaml`, Gemini `config.yaml` |
+| Historical risk scoring | Git log churn + bug frequency provides a per-file risk signal. Files with recent bug history get extra explorer attention. | Complements path-based risk heuristics with data-driven signal |
+| Test coverage data integration | Collect measured line/function coverage from language-native tools (go cover, coverage.py, tarpaulin, c8/nyc) and feed it as context to explorers. Replaces inference-based coverage guessing with data. Best-effort: skips gracefully when tools are absent. | Measured coverage is strictly more accurate than AI inference for determining which code is exercised by tests |
+| Finding fingerprinting (SHA-256, 12 hex chars) | Stable cross-review identity using `file_path + pass + severity + normalized(summary)`. Line numbers excluded because they shift; exact summary excluded because AI wording varies. 12 hex chars (48 bits) gives negligible collision probability for review-scale datasets (< 1000 findings). | Enables lifecycle tracking (new vs recurring) and suppression matching without requiring deterministic AI output |
+| Suffix stemming in fingerprint normalization | Simple regex stripping of `-ing`, `-ed`, `-tion`, `-ment`, `-ness`, `-ly`, `-ble`, `-er`, `-est` bumps exact-match rate from ~70-80% to ~85-90%. Example: "missing" and "miss" converge, "validation" and "valida" converge. | No NLP library dependency; good enough for morphological variant convergence. Remaining ~10-15% mismatch caught by fuzzy match fallback |
+| Fuzzy match fallback (60% key term overlap) | Secondary matching when exact fingerprint differs: same `file + pass + severity` and >= 60% stemmed word set overlap. Catches AI summary rewording that escapes stemming (e.g., "missing" vs "lacks"). | Tradeoff: 60% threshold is data-driven via test fixtures. Too low → false matches between genuinely different findings. Too high → misses legitimate rewording |
+| Deferred scope (file/pass/exact) | Controls when deferred findings resurface. `file` (default): any change to the file. `pass`: change to file AND same pass fires. `exact`: only exact fingerprint match. | Granular control prevents noise — e.g., a deferred security finding shouldn't resurface when only correctness pass reviews a typo fix. `exact` is the strictest: effectively permanent deferral unless the exact same finding reappears |
+| Named expert panel | Restructures judge as sequential expert roles (Gatekeeper→Verifier→Calibrator→Synthesizer). Forces sequential reasoning, makes analysis auditable, prevents step skipping. Zero cost — prompt reorganization only. | Kodus-AI panel-of-experts pattern |
 
 ---
 

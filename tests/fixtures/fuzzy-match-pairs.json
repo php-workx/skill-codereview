@@ -1,0 +1,177 @@
+[
+  {
+    "finding_a": { "file": "src/auth/session.py", "pass": "security", "severity": "medium", "summary": "Missing rate limit on the token refresh endpoint" },
+    "finding_b": { "file": "src/auth/session.py", "pass": "security", "severity": "medium", "summary": "No rate limiting on token refresh" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Same issue, different wording — 'missing' vs 'no', 'rate limit' vs 'rate limiting'"
+  },
+  {
+    "finding_a": { "file": "src/api/handler.py", "pass": "correctness", "severity": "medium", "summary": "Missing validation for user input" },
+    "finding_b": { "file": "src/api/handler.py", "pass": "correctness", "severity": "medium", "summary": "Validation is missing for user input" },
+    "expected_exact_match": true,
+    "expected_fuzzy_match": true,
+    "note": "Same issue, reworded — stop words stripped, same terms remain after stemming"
+  },
+  {
+    "finding_a": { "file": "src/auth/login.py", "pass": "security", "severity": "medium", "summary": "SQL injection via string formatting in query builder" },
+    "finding_b": { "file": "src/auth/login.py", "pass": "security", "severity": "high", "summary": "SQL injection via string formatting in query builder" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": false,
+    "note": "Severity changed from medium to high — different fingerprint AND fuzzy requires same severity"
+  },
+  {
+    "finding_a": { "file": "src/parser.py", "pass": "correctness", "severity": "medium", "summary": "Missing null check in parse function" },
+    "finding_b": { "file": "src/parser.py", "pass": "correctness", "severity": "medium", "summary": "Missing null check in render function" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Known limitation: 80% token overlap matches despite parse/render being different functions. Algorithm improvement needed — see CodeRabbit Finding #4"
+  },
+  {
+    "finding_a": { "file": "src/parser.py", "pass": "correctness", "severity": "medium", "summary": "Null pointer dereference in parse function" },
+    "finding_b": { "file": "src/parser.py", "pass": "correctness", "severity": "medium", "summary": "Array index out of bounds in validate function" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": false,
+    "note": "Same file but genuinely different issues — completely different error types"
+  },
+  {
+    "finding_a": { "file": "src/net/connect.py", "pass": "correctness", "severity": "high", "summary": "Race condition in connect handler" },
+    "finding_b": { "file": "src/net/connect.py", "pass": "correctness", "severity": "high", "summary": "Buffer overflow in connect handler" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": false,
+    "note": "Same file, genuinely different issues — race condition vs buffer overflow"
+  },
+  {
+    "finding_a": { "file": "src/config/settings.py", "pass": "security", "severity": "high", "summary": "Hardcoded secret" },
+    "finding_b": { "file": "src/config/settings.py", "pass": "security", "severity": "high", "summary": "Hardcoded secret in config file" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Near-duplicate with extra context — 'hardcoded secret' is subset of longer summary"
+  },
+  {
+    "finding_a": { "file": "src/api/auth.py", "pass": "security", "severity": "medium", "summary": "Token refresh endpoint lacks rate limiting" },
+    "finding_b": { "file": "src/api/auth.py", "pass": "security", "severity": "medium", "summary": "Rate limiting is not applied on the token refresh endpoint" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Same concept expressed differently — key stemmed terms overlap: token, refresh, endpoint, rate, limit"
+  },
+  {
+    "finding_a": { "file": "src/db/query.py", "pass": "security", "severity": "high", "summary": "SQL injection in user search query" },
+    "finding_b": { "file": "src/db/query.py", "pass": "security", "severity": "high", "summary": "User search query has SQL injection" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Same issue, reworded — 'has' is not a stop word so tokens differ slightly, but fuzzy matches"
+  },
+  {
+    "finding_a": { "file": "src/api/orders.py", "pass": "correctness", "severity": "medium", "summary": "Off by one error in pagination" },
+    "finding_b": { "file": "src/api/orders.py", "pass": "correctness", "severity": "medium", "summary": "Error in pagination off by one" },
+    "expected_exact_match": true,
+    "expected_fuzzy_match": true,
+    "note": "Same issue, different word order — after stop word removal and sort, identical tokens"
+  },
+  {
+    "finding_a": { "file": "src/auth/login.py", "pass": "security", "severity": "high", "summary": "Password stored without hashing" },
+    "finding_b": { "file": "src/auth/login.py", "pass": "security", "severity": "high", "summary": "Storing password without hashing applied" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Same issue — 'password', 'without', 'hash' overlap; 'stored' vs 'storing' both stem"
+  },
+  {
+    "finding_a": { "file": "src/api/users.py", "pass": "correctness", "severity": "low", "summary": "Unused variable temp_result in process" },
+    "finding_b": { "file": "src/api/users.py", "pass": "correctness", "severity": "low", "summary": "Variable temp_result is unused in process" },
+    "expected_exact_match": true,
+    "expected_fuzzy_match": true,
+    "note": "Same issue, reordered — after stop words and sort, tokens are identical"
+  },
+  {
+    "finding_a": { "file": "src/auth/session.py", "pass": "security", "severity": "high", "summary": "Session token not invalidated on logout" },
+    "finding_b": { "file": "src/auth/session.py", "pass": "security", "severity": "high", "summary": "Session token remains valid after logout" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Same issue — key terms: session, token, logout overlap (3/4 = 75%)"
+  },
+  {
+    "finding_a": { "file": "src/api/upload.py", "pass": "security", "severity": "high", "summary": "File upload allows unrestricted file types" },
+    "finding_b": { "file": "src/api/upload.py", "pass": "security", "severity": "high", "summary": "Missing CSRF protection on upload endpoint" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": false,
+    "note": "Same file, different security issues — upload file types vs CSRF"
+  },
+  {
+    "finding_a": { "file": "src/cache/redis.py", "pass": "correctness", "severity": "medium", "summary": "Cache expiration not set for user sessions" },
+    "finding_b": { "file": "src/cache/redis.py", "pass": "correctness", "severity": "medium", "summary": "User session cache lacks expiration setting" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Same issue — key terms: cache, expira, us, session overlap"
+  },
+  {
+    "finding_a": { "file": "src/api/handler.py", "pass": "correctness", "severity": "medium", "summary": "Error response missing request ID" },
+    "finding_b": { "file": "src/api/handler.py", "pass": "correctness", "severity": "medium", "summary": "Request ID missing in error response" },
+    "expected_exact_match": true,
+    "expected_fuzzy_match": true,
+    "note": "Same issue — after stop word removal and sort, identical tokens: error, id, miss, requ, response"
+  },
+  {
+    "finding_a": { "file": "src/middleware/auth.py", "pass": "security", "severity": "high", "summary": "JWT signature verification skipped in development mode" },
+    "finding_b": { "file": "src/middleware/auth.py", "pass": "security", "severity": "high", "summary": "Development mode bypasses JWT signature verification" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Same issue, active vs passive — key terms: jwt, signatur, verifica, develop, mode"
+  },
+  {
+    "finding_a": { "file": "src/api/orders.py", "pass": "testing", "severity": "medium", "summary": "Missing integration test for bulk update" },
+    "finding_b": { "file": "src/api/orders.py", "pass": "testing", "severity": "medium", "summary": "No integration test covers bulk update" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Same issue — key terms: integra, test, bulk, updat all overlap"
+  },
+  {
+    "finding_a": { "file": "src/utils/format.py", "pass": "correctness", "severity": "low", "summary": "String concatenation in loop is inefficient" },
+    "finding_b": { "file": "src/utils/format.py", "pass": "correctness", "severity": "low", "summary": "Memory leak in recursive parser" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": false,
+    "note": "Same file, different issues — string perf vs memory leak"
+  },
+  {
+    "finding_a": { "file": "src/auth/oauth.py", "pass": "security", "severity": "high", "summary": "OAuth redirect URI not validated" },
+    "finding_b": { "file": "src/auth/oauth.py", "pass": "security", "severity": "high", "summary": "Redirect URI validation missing in OAuth flow" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Same issue — key terms: oauth, redirect, uri, valida overlap"
+  },
+  {
+    "finding_a": { "file": "src/api/search.py", "pass": "correctness", "severity": "medium", "summary": "Search results not paginated for large result sets" },
+    "finding_b": { "file": "src/api/search.py", "pass": "correctness", "severity": "medium", "summary": "Large search results lack pagination" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Same issue — key terms: search, result, pagina, larg overlap"
+  },
+  {
+    "finding_a": { "file": "src/db/migrate.py", "pass": "correctness", "severity": "high", "summary": "Database migration does not handle rollback on failure" },
+    "finding_b": { "file": "src/db/migrate.py", "pass": "correctness", "severity": "high", "summary": "Missing rollback handling in database migration" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Same issue — key terms: databas, migra, rollback, handl overlap"
+  },
+  {
+    "finding_a": { "file": "src/api/webhook.py", "pass": "security", "severity": "medium", "summary": "Webhook signature not verified before processing" },
+    "finding_b": { "file": "src/api/webhook.py", "pass": "security", "severity": "medium", "summary": "Processing webhook without signature verification" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": true,
+    "note": "Same issue — key terms: webhook, signatur, verifi, process"
+  },
+  {
+    "finding_a": { "file": "src/api/users.py", "pass": "security", "severity": "medium", "summary": "User email exposed in API response" },
+    "finding_b": { "file": "src/api/users.py", "pass": "security", "severity": "medium", "summary": "API endpoint leaks internal user IDs" },
+    "expected_exact_match": false,
+    "expected_fuzzy_match": false,
+    "note": "Same file and pass, but different data exposure issues — email vs internal IDs"
+  },
+  {
+    "finding_a": { "file": "src/queue/worker.py", "pass": "correctness", "severity": "medium", "summary": "Worker thread not terminated at shutdown" },
+    "finding_b": { "file": "src/queue/worker.py", "pass": "correctness", "severity": "medium", "summary": "At shutdown the worker thread is not terminated" },
+    "expected_exact_match": true,
+    "expected_fuzzy_match": true,
+    "note": "Same issue, restructured sentence — after stop word removal and sort, identical tokens"
+  }
+]

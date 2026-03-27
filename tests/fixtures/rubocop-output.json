@@ -1,0 +1,1 @@
+{"files":[{"path":"app/models/user.rb","offenses":[{"cop_name":"Security/Open","severity":"warning","message":"Avoid using Kernel#open","location":{"start_line":15,"start_column":5}},{"cop_name":"Lint/UselessAssignment","severity":"convention","message":"Useless assignment to variable - x","location":{"start_line":22,"start_column":3}}]}]}

@@ -1,0 +1,26 @@
+{
+  "run_id": "20260326T080000Z-invalid",
+  "timestamp": "2026-03-26T08:00:00Z",
+  "scope": "branch",
+  "base_ref": "main",
+  "head_ref": "feat/test",
+  "verdict": "PASS",
+  "verdict_reason": "All good",
+  "strengths": [],
+  "files_reviewed": [],
+  "tool_status": {},
+  "findings": [
+    {
+      "id": "security-bad-1",
+      "source": "ai",
+      "pass": "security",
+      "severity": "high",
+      "confidence": 0.40,
+      "file": "src/auth.py",
+      "line": 1,
+      "summary": "Below confidence floor — should have been filtered",
+      "action_tier": "must_fix"
+    }
+  ],
+  "tier_summary": { "must_fix": 1, "should_fix": 0, "consider": 0 }
+}

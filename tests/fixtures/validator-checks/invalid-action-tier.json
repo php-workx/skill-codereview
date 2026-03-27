@@ -1,0 +1,32 @@
+{
+  "run_id": "test-invalid-action-tier",
+  "timestamp": "2026-03-26T08:00:00Z",
+  "review_mode": "standard",
+  "scope": "branch",
+  "base_ref": "main",
+  "head_ref": "feat/test",
+  "pr_number": null,
+  "files_reviewed": ["src/auth/login.py"],
+  "verdict": "WARN",
+  "verdict_reason": "Has findings",
+  "strengths": [],
+  "spec_gaps": [],
+  "spec_requirements": [],
+  "tool_status": {
+    "ai_correctness": { "status": "ran", "version": null, "finding_count": 1, "note": null }
+  },
+  "findings": [
+    {
+      "id": "correctness-test-1",
+      "source": "ai",
+      "pass": "correctness",
+      "severity": "medium",
+      "confidence": 0.78,
+      "file": "src/api/orders.py",
+      "line": 10,
+      "summary": "Finding with invalid action tier",
+      "action_tier": "maybe_fix"
+    }
+  ],
+  "tier_summary": { "must_fix": 0, "should_fix": 1, "consider": 0 }
+}

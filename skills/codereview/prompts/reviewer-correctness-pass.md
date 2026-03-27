@@ -27,12 +27,15 @@ For each changed conditional or branch:
 1. Enumerate edge cases: null, undefined, empty string, zero, negative, empty collection, maximum value, concurrent access.
 2. For each edge case, trace whether it can reach this code path (check callers, input sources).
 3. Only report edge cases that have a plausible trigger path — not theoretical impossibilities.
+4. **Default/empty parameter analysis:** For every function parameter, especially optional ones, ask: "what happens when this is empty, None, an empty set, or omitted?" If the function has a fail-open pattern (e.g., `if not suppressions: return findings, []`), verify the return shape and behavior match what callers expect. Empty inputs that silently change semantics (e.g., `file in changed_files` is always false when `changed_files` is empty, turning a temporary state into a permanent one) are high-value findings.
+5. **Truth table enumeration for classification code:** When the diff contains rule-based classification (if/elif chains, match/case, lookup tables, priority systems, tier assignment), enumerate ALL valid input combinations and verify each maps to the expected output. Pay special attention to values that fall between rule boundaries. Example: severity={critical,high,medium,low} × confidence={0.0-1.0} → tier={must_fix,should_fix,consider}. Check every cell, not just the ones the developer tested.
 
 ### Phase 4 — State Invariant Check
 If the code mutates shared state (class fields, global variables, database, cache):
 1. Identify the invariant (e.g., "balance must never be negative").
 2. Check if the mutation in the diff can violate the invariant.
 3. Grep for other mutation sites of the same state — check if the new code is consistent.
+4. **Multi-run state reasoning:** If the code manages persistent state (files, databases, caches, suppression lists, review artifacts), simulate what happens after N operations. Does state accumulate correctly? Does an append-only structure allow stale entries to shadow newer ones? Does matching/lookup still work correctly when the state has grown from multiple runs? Example: a suppression list that only appends — if the same finding is suppressed twice with different reasons, which entry wins?
 
 ### Phase 5 — Backward Compatibility
 If a function signature, return type, error behavior, or public API contract changed:
@@ -57,6 +60,16 @@ When the diff contains code that marshals or unmarshals data (JSON, protobuf, gR
    - Optional/pointer field on one side, required/value on the other — nil vs zero value confusion
 3. **Check both directions**: if the diff changes the sending side, find the receiving side and verify compatibility (and vice versa). The receiving side may be in a different package, service, or even repository.
 4. If the two sides are in different files, use **Read** on both to verify the struct/type definitions match.
+
+### Phase 8 — Cross-Function Data Contract Tracing
+When a function builds a dict, object, struct, or data record that is consumed by another function (not just serialization — any structured data passed between functions):
+1. **Identify producer/consumer pairs.** Look for patterns where one function constructs a data structure (dict literal, object construction, dataclass, named tuple, JSON object) and another function reads specific fields from it. Use **Grep** to find where the produced data flows — return values, function arguments, file writes, queue messages.
+2. **Compare field names.** Does the producer write `summary_snippet` while the consumer reads `summary`? Does the producer write `lint_commands` while the consumer queries `commands`? Field name mismatches are silent — the consumer gets `None`/`undefined`/zero-value instead of the data, with no error.
+   - For dicts/maps: grep for all `["key"]` and `.get("key")` accesses in the consumer and verify each key exists in the producer's construction.
+   - For file paths: if the producer writes to `/tmp/cover.out` but the consumer looks for `/tmp/coverage.out`, the lookup silently fails.
+3. **Check across the diff boundary.** If the diff changes the producer (adds/renames a field), use **Grep** to find consumers and verify they're updated. If the diff changes the consumer (reads a new field), verify the producer provides it.
+4. **Truncation and transformation.** If the producer transforms a value before storing it (e.g., truncates a summary to 80 chars, hashes a key, lowercases a name), check whether the consumer accounts for the transformation. A consumer that fuzzy-matches on `summary` won't find it if the stored value is a truncated `summary_snippet`.
+5. **Routing table completeness.** When reviewing lookup tables, dispatch dicts, or config maps that route keys to handlers/parsers (e.g., `COVERAGE_ARTIFACTS = {"go": [...], "python": [...]}` → `_parse_coverage()` with `if language == "go": ...`), verify every entry in the table has a corresponding handler. Entries without handlers silently return empty/null results — the lookup succeeds but the consumer can't process what it found.
 
 ---
 
@@ -156,6 +169,9 @@ Do NOT report:
 - If complexity scores are provided in the context, pay extra attention to functions rated C or worse — high complexity correlates with logic bugs.
 - For changed conditionals, check git blame on the original condition — the original author may have left a comment explaining why it was written that way.
 - If the diff removes code, check whether anything depended on the removed behavior.
+- **Identifier uniqueness:** When reviewing ID/key/fingerprint generation, check the entropy. Count the distinguishing bits: 4 hex chars = 16 bits (~256 before collision), 8 hex = 32 bits (~65K), 12 hex = 48 bits (~16M). If the ID is used as a primary key or deduplication key, the collision threshold must exceed the expected dataset size. Also check: do two different inputs that should produce different IDs actually produce different IDs? (e.g., same file + same line + same pass but different summaries).
+- **Parallel instance consistency:** When the code performs the same operation for multiple items (running multiple tools, processing multiple file types, handling multiple event types), verify the operations are consistent where they should be. If 3 of 5 tool invocations scope to changed files but 2 use repo-wide scanning, the inconsistency is likely a bug. If error handling differs across parallel branches, ask whether the difference is intentional. Compare argument patterns side by side rather than reviewing each invocation in isolation.
+- **CLI tool invocation verification:** When the diff invokes CLI tools (especially build tools, coverage tools, linters, package managers), verify the command actually does what the code expects. If you are unsure what a specific subcommand or flag does (e.g., does `c8 report` run tests or only render existing data? does `nyc report` generate coverage or just format it?), use available documentation tools — Context7 MCP, WebSearch, or the tool's `--help` output — to confirm the behavior before assuming correctness. Common gotchas: report-only commands used where run+report is needed, flags that behave differently across tool versions, subcommands that look similar but have distinct semantics (e.g., `git rev-list --count` vs `git rev-parse --is-shallow-repository` for detecting shallow clones).
 
 ---
 
