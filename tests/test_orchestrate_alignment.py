@@ -368,6 +368,7 @@ class OrchestrateAlignmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             session_dir = Path(tmpdir) / "session"
             session_dir.mkdir()
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
             (session_dir / "launch.json").write_text("{}", encoding="utf-8")
 
             result = cleanup(Namespace(session_dir=session_dir))
