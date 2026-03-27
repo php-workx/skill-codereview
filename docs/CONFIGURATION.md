@@ -1,316 +1,157 @@
 # Configuration
 
-The codereview skill supports optional repo-level configuration via `.codereview.yaml` in the repository root. All settings have sensible defaults — no configuration is required.
+The orchestrator reads optional repo-level configuration from `.codereview.yaml` at the repository root.
 
-## Config File Schema
+`PyYAML` is required when this file exists. If you want defaults only, run with `--no-config`.
+
+## Implemented Fields
 
 ```yaml
-# .codereview.yaml (optional)
+confidence_floor: 0.65
 
-# Which review passes to run (default: all 8)
 passes:
-  # Core passes (always run unless removed)
   - correctness
   - security
-  - reliability
   - test-adequacy
-  # Extended passes (subject to adaptive skip signals)
+  - reliability
   - error-handling
   - api-contract
   - concurrency
-  - spec-verification  # runs only when --spec is provided
+  - shell-script
+  - spec-verification
 
-# Minimum confidence for AI findings (default: 0.65)
-confidence_floor: 0.65
-
-# Review cadence — controls when /codereview runs automatically
-# Options: manual (default), pre-commit, pre-push, wave-end
-cadence: manual
-
-# Pushback level — controls how aggressively findings are surfaced
-# Options: fix-all (default), selective, cautious
-pushback_level: fix-all
-
-# Model override per pass (optional)
-# Default: "sonnet" for all explorers, session default for judge
-pass_models:
-  # security: "opus"
-  # concurrency: "opus"
-  # judge: null
-
-# Force all configured passes to run (disable adaptive skip)
-# Default: false
 force_all_passes: false
 
-# Paths to ignore (glob patterns)
-ignore_paths:
-  - "*.generated.*"
-  - "vendor/"
-  - "node_modules/"
+experts:
+  force_all: false
+  concurrency: true
+  reliability: false
 
-# Paths to focus on (higher priority for findings in these paths)
-focus_paths:
-  - "src/auth/"
-  - "src/payments/"
+pass_models:
+  security: "opus"
+  concurrency: "opus"
 
-# Custom instructions included in all review passes
+judge_model: "sonnet"
+
+large_diff:
+  file_threshold: 80
+  line_threshold: 8000
+  max_chunk_files: 15
+
+token_budget:
+  explorer_prompt: 70000
+  judge_prompt: 80000
+
 custom_instructions: |
-  This repo uses Django ORM. Flag any raw SQL queries.
-  All API endpoints must have rate limiting.
+  Flag raw SQL usage.
+  All auth endpoints must enforce rate limits.
 ```
 
-## Settings Reference
-
-### `passes`
-
-Which AI review passes to run. Default: all 8 (4 core + 4 extended).
-
-**Core passes** — always run when listed:
-
-| Pass | Focus |
-|------|-------|
-| `correctness` | Functional bugs, regressions, logic errors |
-| `security` | Auth, injection, secrets, trust boundaries |
-| `reliability` | Timeouts, retries, resource leaks, performance |
-| `test-adequacy` | Missing tests, stale tests, mock-heavy tests |
-
-**Extended passes** — run when listed, subject to adaptive skip signals:
-
-| Pass | Focus | Skip Signal |
-|------|-------|-------------|
-| `error-handling` | Swallowed exceptions, missing error propagation, inconsistent patterns | Diff is test/docs/config only |
-| `api-contract` | Breaking API changes, missing backward compatibility, contract violations | No public API surface changes in diff |
-| `concurrency` | Race conditions, deadlocks, shared mutable state, goroutine/thread leaks | No concurrency primitives in diff |
-| `spec-verification` | Requirement tracing, implementation status, test category adequacy | No spec loaded (`--spec` not provided) |
-
-Extended passes are automatically skipped when their skip signal triggers. Use `force_all_passes: true` to override (except `spec-verification`, which always requires `--spec`).
-
-### `--spec-scope`
-
-CLI flag (not a config file option) to restrict spec verification to a specific section or milestone:
-
-```bash
-/codereview --spec docs/plan.md --spec-scope "Authentication" --base main
-```
-
-The spec-verification explorer matches the scope text against section headings (case-insensitive substring match) and milestone labels. If no match is found, it falls back to the full document with a warning.
+## Behavior
 
 ### `confidence_floor`
 
-Minimum confidence score for AI findings to appear in the report. Default: `0.65`. Range: `0.0` to `1.0`.
+Minimum confidence required for explorer findings to survive into `judge-input.json`.
 
-Higher values reduce false positives but may miss some real issues.
+### `passes`
 
-### `cadence`
+Optional allowlist of expert passes. When unset, the orchestrator keeps the full adaptive panel.
 
-When the skill should be invoked in agent workflows. Default: `manual`.
+Supported pass names:
 
-| Mode | When It Runs |
-|------|-------------|
-| `manual` | Only when user invokes `/codereview` |
-| `pre-commit` | Before every commit in agent workflows |
-| `pre-push` | Before push (agent checks before sharing) |
-| `wave-end` | After a batch of tasks completes |
-
-The cadence setting is advisory — it tells the agent *when* to call the skill, not a git hook.
-
-### `pushback_level`
-
-Controls how aggressively findings are surfaced. Default: `fix-all`.
-
-| Level | Must Fix | Should Fix | Consider |
-|-------|----------|------------|----------|
-| `fix-all` | Fix immediately | Fix in this PR | Fix if time permits |
-| `selective` | Fix immediately | Fix in this PR | Informational only |
-| `cautious` | Fix immediately | Informational | Informational only |
-
-### `pass_models`
-
-Override the model used for specific explorer passes or the judge. Default: `"sonnet"` for all explorers, session default model for the judge.
-
-```yaml
-pass_models:
-  security: "opus"       # use stronger model for security analysis
-  concurrency: "opus"    # use stronger model for concurrency
-  judge: null            # null = session default model
-```
-
-Valid model values: `"sonnet"`, `"opus"`, `"haiku"`, or `null` (session default).
-
-Use stronger models for passes where precision matters most (security, concurrency). Use faster models for passes where recall is more important than precision (test-adequacy).
+- `correctness`
+- `security`
+- `test-adequacy`
+- `shell-script`
+- `api-contract`
+- `concurrency`
+- `error-handling`
+- `reliability`
+- `spec-verification`
 
 ### `force_all_passes`
 
-Disable adaptive skip signals for extended passes. Default: `false`.
+Forces all adaptive passes on, subject to `passes` filtering and explicit per-expert disables.
 
-When `true`, all passes listed in `passes` will run regardless of skip signals. When `false`, extended passes are automatically skipped when their skip signal triggers (e.g., concurrency pass skipped when no concurrency primitives detected in the diff).
+### `experts`
 
-### `ignore_paths`
+Supports:
 
-Glob patterns for files to exclude from review. These files are filtered out of `CHANGED_FILES` before deterministic scans and AI review.
+- `force_all: true` to force the adaptive panel on
+- `name: false` to disable a specific pass
 
-### `focus_paths`
+Example:
 
-Glob patterns for high-priority paths. Findings in these paths get slightly boosted in the ranking within each tier.
+```yaml
+experts:
+  force_all: true
+  reliability: false
+```
 
-### `custom_instructions`
+Legacy `expert_panel.force_all` and `expert_panel.experts.<name>` are still accepted.
 
-Free-text instructions included in the context packet for all review passes. Use this for repo-specific conventions that the AI should enforce.
+### `pass_models`
+
+Overrides the model recorded for specific explorer passes.
+
+### `judge_model`
+
+Overrides the model recorded for the judge packet.
 
 ### `large_diff`
 
-Settings for large changeset (chunked) review mode. The skill automatically activates chunked mode when the diff exceeds file or line count thresholds. All settings have sensible defaults.
+Controls chunked mode:
 
-```yaml
-large_diff:
-  # File count that triggers chunked mode (default: 80)
-  file_threshold: 80
+- `file_threshold`: switch to chunked mode when changed file count meets or exceeds this value
+- `line_threshold`: switch to chunked mode when diff line count meets or exceeds this value
+- `max_chunk_files`: maximum files grouped into one chunk
 
-  # Diff line count that triggers chunked mode (default: 8000)
-  line_threshold: 8000
+### `token_budget`
 
-  # Maximum files per review chunk (default: 15)
-  max_chunk_files: 15
+Currently enforced for:
 
-  # Maximum diff lines per review chunk (default: 2000)
-  max_chunk_lines: 2000
+- `explorer_prompt`
 
-  # Maximum parallel explorer sub-agents per wave (default: 12)
-  max_parallel_explorers: 12
+`judge_prompt` is accepted and persisted but not currently enforced by `scripts/orchestrate.py`.
 
-  # Model for cross-chunk synthesis agent (default: null = session default)
-  cross_chunk_model: null
-```
+### `custom_instructions`
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `file_threshold` | 80 | File count that triggers chunked mode |
-| `line_threshold` | 8000 | Diff line count that triggers chunked mode |
-| `max_chunk_files` | 15 | Maximum files per chunk |
-| `max_chunk_lines` | 2000 | Maximum diff lines per chunk |
-| `max_parallel_explorers` | 12 | Maximum parallel Task calls per wave |
-| `cross_chunk_model` | `null` | Model for cross-chunk synthesizer |
+Included in prompt context via `.codereview.yaml`.
 
-### `--no-chunk` (CLI flag)
+## CLI Overrides
 
-Force standard (non-chunked) review mode even when the diff exceeds large-diff thresholds. Useful when you want the original single-explorer behavior and accept potential context truncation.
+`scripts/orchestrate.py prepare` supports:
 
 ```bash
-/codereview --base main --no-chunk
+python3 scripts/orchestrate.py prepare \
+  --session-dir /tmp/codereview \
+  --base main \
+  --range HEAD~5..HEAD \
+  --pr 42 \
+  --path src/auth \
+  --spec docs/plan.md \
+  --spec-scope "Billing" \
+  --no-chunk \
+  --force-chunk \
+  --force-all-experts \
+  --confidence-floor 0.8 \
+  --no-config
 ```
 
-### `--force-chunk` (CLI flag)
+Semantics:
 
-Force chunked review mode even when the diff is below thresholds. Useful for testing the chunked pipeline on small diffs.
+- `--path` is a hard error when the target path does not exist.
+- `--spec-scope` matches markdown headings by case-insensitive substring. If no heading matches, the full spec is kept.
+- `--no-chunk` forces standard mode.
+- `--force-chunk` forces chunked mode.
+- `--force-all-experts` overrides config and enables the adaptive passes.
 
-```bash
-/codereview --force-chunk
-```
+## Accepted But Not Enforced
 
-### `coverage`
+These fields may exist in config and merge successfully, but the current orchestrator does not apply behavior for them directly:
 
-Settings for test coverage data collection. The skill detects languages from changed file extensions and checks for existing coverage artifacts. By default, it only parses pre-existing data — it does not run your test suite.
+- `cadence`
+- `pushback_level`
+- `ignore_paths`
 
-```yaml
-coverage:
-  run_tests: false        # default: only parse existing coverage data
-  test_timeout: 300       # seconds, only applies when run_tests: true
-```
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `run_tests` | `false` | When `false`, only parse existing coverage artifacts. When `true`, run the test suite to generate fresh coverage if no existing data is found. |
-| `test_timeout` | `300` | Timeout in seconds for test suite execution. Only applies when `run_tests: true`. Prevents the review from hanging on slow test suites. |
-
-## Finding Suppressions
-
-The `.codereview-suppressions.json` file in the repo root controls which findings are suppressed (hidden from the report). Commit this file to git so the team shares suppressions.
-
-### Suppressions File Schema
-
-```json
-{
-  "version": 1,
-  "suppressions": [
-    {
-      "fingerprint": "a1b2c3d4e5f6",
-      "status": "rejected",
-      "reason": "Intentional design choice — documented in ADR-007",
-      "created_at": "2026-03-25T14:00:00Z",
-      "created_by": "runger",
-      "file": "src/auth/session.py",
-      "pass": "security",
-      "severity": "medium",
-      "summary_snippet": "Missing rate limit on token refresh"
-    },
-    {
-      "fingerprint": "d4e5f6a7b8c9",
-      "status": "deferred",
-      "reason": "Will address in v1.3 — tracked in JIRA-456",
-      "created_at": "2026-03-25T14:00:00Z",
-      "created_by": "runger",
-      "file": "src/api/orders.py",
-      "pass": "testing",
-      "severity": "medium",
-      "summary_snippet": "Missing integration test for bulk update",
-      "deferred_scope": "pass",
-      "expires_at": "2026-04-25T00:00:00Z"
-    }
-  ]
-}
-```
-
-### Suppression Fields
-
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `fingerprint` | Yes | — | SHA-256 fingerprint (12 hex chars) identifying the finding |
-| `status` | Yes | — | `rejected` (permanently dismissed) or `deferred` (temporarily dismissed) |
-| `reason` | Yes | — | Human-readable explanation for the suppression |
-| `created_at` | Yes | — | ISO 8601 timestamp of when the suppression was created |
-| `created_by` | No | — | Who created the suppression |
-| `file` | Yes | — | File path the finding was in (used for fuzzy matching) |
-| `pass` | Yes | — | Explorer pass that produced the finding (used for fuzzy matching) |
-| `severity` | Yes | — | Finding severity (used for fuzzy matching) |
-| `summary_snippet` | Yes | — | First ~80 chars of finding summary (human reference) |
-| `deferred_scope` | No | `"file"` | Controls when a deferred finding resurfaces. `"file"`: resurface when the file is in CHANGED_FILES. `"pass"`: resurface only when the file is changed AND the same explorer pass fires. `"exact"`: resurface only on exact fingerprint match (effectively permanent deferral until the exact same finding reappears). |
-| `expires_at` | No | `null` | ISO 8601 date string. When present and in the past, the suppression is ignored and the finding resurfaces. Enables "defer for N days" without permanent dismissal. |
-
-### Creating Suppressions
-
-Use the CLI subcommand after a review:
-
-```bash
-# Reject permanently
-/codereview suppress <finding-id> --status rejected --reason "explanation"
-
-# Defer for 30 days
-/codereview suppress <finding-id> --status deferred --defer-days 30 --reason "next sprint"
-
-# Defer with scope control
-/codereview suppress <finding-id> --status deferred --defer-scope pass --reason "only relevant if auth pass fires"
-```
-
-### Removing Suppressions
-
-To un-suppress a finding, remove its entry from `.codereview-suppressions.json`. Expired suppressions (past `expires_at`) are automatically ignored — no manual removal needed.
-
-## Precedence
-
-If multiple configuration sources exist:
-
-1. CLI flags (highest priority)
-2. `.codereview.yaml` in repo root
-3. Built-in defaults (lowest priority)
-
-## No Config Required
-
-If no `.codereview.yaml` exists, the skill uses defaults:
-- All 8 passes enabled (4 core + 4 extended)
-- 0.65 confidence floor
-- Manual cadence
-- fix-all pushback
-- sonnet model for all explorers
-- Adaptive skip enabled (spec-verification only runs with `--spec`)
-- No ignored or focused paths
-- Chunked mode auto-activates at 80 files or 8000 diff lines
+If you document or depend on them elsewhere, treat them as wrapper-level policy, not current `scripts/orchestrate.py` behavior.
