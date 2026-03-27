@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-03-27
+
+### Added
+- **Deterministic scan pipeline** — 9 scripts run 11+ linters and scanners in parallel with reproducible JSON output, replacing agent-interpreted steps with executable scripts
+- **Ruby and Java language support** — linting (RuboCop, PMD), Rails security scanning (Brakeman), coverage collection (SimpleCov, JaCoCo), complexity analysis (flog), and project discovery (Gemfile, Maven, Gradle) — at parity with Python, Go, Rust, and TypeScript
+- **Finding lifecycle tracking** — fingerprint findings across reviews, suppress or defer issues with expiry and scope controls, and automatically flag recurring findings
+- **Four-expert review panel** (Gatekeeper, Verifier, Calibrator, Synthesizer) — more rigorous judge reasoning at zero additional cost
+- **Git history risk scoring and measured test coverage** in review context so reviewers focus on high-churn, low-coverage code
+- **Review detection patterns** for empty-parameter edge cases, classification rule gaps, multi-run state bugs, and command injection via file-derived input
+
 ## [1.2.0] - 2026-03-26
 
 ### Added
