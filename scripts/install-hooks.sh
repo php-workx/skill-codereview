@@ -11,6 +11,10 @@ mkdir -p "$HOOKS_DIR"
 for hook in pre-commit pre-push; do
 	src="$SCRIPT_DIR/$hook"
 	dst="$HOOKS_DIR/$hook"
+	if [ ! -f "$src" ] || [ ! -r "$src" ]; then
+		echo "Missing hook source: $src (hook=$hook, script_dir=$SCRIPT_DIR)" >&2
+		exit 1
+	fi
 	cp "$src" "$dst"
 	chmod +x "$dst"
 	echo "Installed $hook hook."

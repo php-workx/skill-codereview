@@ -360,16 +360,34 @@ else
 fi
 
 # 5m. Hook scripts delegate to just targets
-if grep -q '^just pre-commit$' "$REPO_ROOT/scripts/pre-commit"; then
+if grep -Eq '\bjust[[:space:]]+pre-commit\b' "$REPO_ROOT/scripts/pre-commit"; then
 	pass "scripts/pre-commit delegates to just pre-commit"
 else
 	fail "scripts/pre-commit delegates to just pre-commit" "just pre-commit not found"
 fi
 
-if grep -q '^just pre-push$' "$REPO_ROOT/scripts/pre-push"; then
+if grep -Eq '\bjust[[:space:]]+pre-push\b' "$REPO_ROOT/scripts/pre-push"; then
 	pass "scripts/pre-push delegates to just pre-push"
 else
 	fail "scripts/pre-push delegates to just pre-push" "just pre-push not found"
+fi
+
+if grep -Eq '\bjust[[:space:]]+test-unit\b' "$REPO_ROOT/scripts/check-pre-push.sh"; then
+	pass "check-pre-push delegates unit tests to just test-unit"
+else
+	fail "check-pre-push delegates unit tests to just test-unit" "just test-unit not found"
+fi
+
+if grep -Fq "git show \":\$file\" >\"\$tmpdir/\$file\"" "$REPO_ROOT/scripts/check-pre-commit.sh"; then
+	pass "check-pre-commit reconstructs staged files into temp tree"
+else
+	fail "check-pre-commit reconstructs staged files into temp tree" "git show temp-tree copy not found"
+fi
+
+if grep -Fq "PY_FILES+=(\"\$tmpdir/\$file\")" "$REPO_ROOT/scripts/check-pre-commit.sh"; then
+	pass "check-pre-commit runs python linters on staged snapshot paths"
+else
+	fail "check-pre-commit runs python linters on staged snapshot paths" "staged python path mapping not found"
 fi
 
 # ============================================================
@@ -988,7 +1006,11 @@ fi
 
 # 12e4. Brakeman normalizer produces valid findings from fixture
 BRAKEMAN_NORM=$(bash -c '
-  eval "$(sed -n "/^normalize_brakeman/,/^}/p" "'"$SCRIPTS/run-scans.sh"'")"
+  eval "$(awk "
+    /^normalize_brakeman\(\) \{/ { in_func=1 }
+    in_func { print }
+    in_func && /^}/ { exit }
+  " "'"$SCRIPTS/run-scans.sh"'")"
   normalize_brakeman < "'"$FIXTURES/brakeman-output.json"'"
 ' 2>/dev/null || echo '[]')
 BRAKEMAN_COUNT=$(echo "$BRAKEMAN_NORM" | jq 'length' 2>/dev/null || echo 0)

@@ -962,6 +962,7 @@ for tool_key in semgrep ast_grep trivy osv_scanner gitleaks shellcheck; do
 		osv_scanner)
 			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
 				normalize_osv <"$SCRATCH/osv_scanner.out" >"$SCRATCH/findings/osv_scanner.json"
+				filter_to_changed_files "$SCRATCH/findings/osv_scanner.json"
 				check_normalized "$SCRATCH/findings/osv_scanner.json" "osv-scanner"
 			fi
 			;;
@@ -1230,6 +1231,7 @@ for tool_key in clippy ruff golangci_lint eslint rubocop brakeman pmd; do
 			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
 				if [ -s "$SCRATCH/brakeman.out" ]; then
 					normalize_brakeman <"$SCRATCH/brakeman.out" >"$SCRATCH/findings/brakeman.json"
+					filter_to_changed_files "$SCRATCH/findings/brakeman.json"
 				else
 					echo '[]' >"$SCRATCH/findings/brakeman.json"
 				fi

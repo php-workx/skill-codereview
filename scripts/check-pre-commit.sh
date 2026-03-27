@@ -20,16 +20,27 @@ PY_FILES=()
 SH_FILES=()
 WORKFLOW_FILES=()
 
+tmpdir="$(mktemp -d /tmp/skill-codereview-pre-commit-XXXXXX)"
+cleanup() {
+	rm -rf "$tmpdir"
+}
+trap cleanup EXIT INT TERM
+
 for file in "${FILES[@]}"; do
+	if ! git cat-file -e ":$file" 2>/dev/null; then
+		continue
+	fi
+	mkdir -p "$tmpdir/$(dirname "$file")"
+	git show ":$file" >"$tmpdir/$file"
 	case "$file" in
 	*.py)
-		PY_FILES+=("$file")
+		PY_FILES+=("$tmpdir/$file")
 		;;
 	*.sh | scripts/pre-commit | scripts/pre-push)
-		SH_FILES+=("$file")
+		SH_FILES+=("$tmpdir/$file")
 		;;
 	.github/workflows/*.yml | .github/workflows/*.yaml)
-		WORKFLOW_FILES+=("$file")
+		WORKFLOW_FILES+=("$tmpdir/$file")
 		;;
 	esac
 done
@@ -71,20 +82,6 @@ command -v gitleaks >/dev/null 2>&1 || {
 	echo "gitleaks not found. Install: brew install gitleaks" >&2
 	exit 1
 }
-
-tmpdir="$(mktemp -d /tmp/skill-codereview-gitleaks-XXXXXX)"
-cleanup() {
-	rm -rf "$tmpdir"
-}
-trap cleanup EXIT INT TERM
-
-for file in "${FILES[@]}"; do
-	if ! git cat-file -e ":$file" 2>/dev/null; then
-		continue
-	fi
-	mkdir -p "$tmpdir/$(dirname "$file")"
-	git show ":$file" >"$tmpdir/$file"
-done
 
 gitleaks detect \
 	--source "$tmpdir" \
