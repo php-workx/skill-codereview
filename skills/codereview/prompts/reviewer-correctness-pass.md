@@ -69,6 +69,7 @@ When a function builds a dict, object, struct, or data record that is consumed b
    - For file paths: if the producer writes to `/tmp/cover.out` but the consumer looks for `/tmp/coverage.out`, the lookup silently fails.
 3. **Check across the diff boundary.** If the diff changes the producer (adds/renames a field), use **Grep** to find consumers and verify they're updated. If the diff changes the consumer (reads a new field), verify the producer provides it.
 4. **Truncation and transformation.** If the producer transforms a value before storing it (e.g., truncates a summary to 80 chars, hashes a key, lowercases a name), check whether the consumer accounts for the transformation. A consumer that fuzzy-matches on `summary` won't find it if the stored value is a truncated `summary_snippet`.
+5. **Routing table completeness.** When reviewing lookup tables, dispatch dicts, or config maps that route keys to handlers/parsers (e.g., `COVERAGE_ARTIFACTS = {"go": [...], "python": [...]}` → `_parse_coverage()` with `if language == "go": ...`), verify every entry in the table has a corresponding handler. Entries without handlers silently return empty/null results — the lookup succeeds but the consumer can't process what it found.
 
 ---
 
