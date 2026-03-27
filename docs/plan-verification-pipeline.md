@@ -1,6 +1,6 @@
 # Plan: Verification Pipeline
 
-Eleven features focused on review precision, judge architecture, plan compliance, and output integration. Where v1.3 enriches what explorers *see* (context, checklists, prescan signals), Verification Pipeline improves what happens *after* explorers report — verification, synthesis, and how findings reach the user. Features 0-7 from initial design and Kodus-AI analysis. Features 8-10 informed by analysis of the PR-Agent (Qodo) code review platform (`~/workspaces/pr-agent`).
+Twelve features focused on review precision, judge architecture, plan compliance, and output integration. Where v1.3 enriches what explorers *see* (context, checklists, prescan signals), Verification Pipeline improves what happens *after* explorers report — verification, synthesis, and how findings reach the user. Features 0-7 come from the initial design and Kodus-AI analysis. Features 8-10 are informed by analysis of the PR-Agent (Qodo) code review platform (local path `~/workspaces/pr-agent`). Feature 11 comes from CodeRabbit gap analysis around adaptive expert selection and shell-script coverage.
 
 ### Relationship to v1.3
 
@@ -40,7 +40,7 @@ These patterns were identified during the PR-Agent analysis but don't justify st
 
 Currently, the judge does everything in one pass: verify findings, check for contradictions, deduplicate, calibrate severity, and produce a verdict. By extracting verification into a separate step, the judge receives pre-filtered findings and can focus on synthesis and verdict.
 
-Inspired by Claude Octopus's Round 2 verification gate, which assigns a verdict to each finding before synthesis. Architecture significantly refined based on analysis of the **Kodus-AI code review platform** (~/workspaces/kodus-ai), whose 3-stage safeguard pipeline (feature extraction → deterministic triage → agent verification) provides a concrete, production-tested blueprint for this feature.
+Inspired by Claude Octopus's Round 2 verification gate, which assigns a verdict to each finding before synthesis. Architecture significantly refined based on analysis of the **Kodus-AI code review platform** (local path `~/workspaces/kodus-ai`), whose 3-stage safeguard pipeline (feature extraction → deterministic triage → agent verification) provides a concrete, production-tested blueprint for this feature.
 
 ### Architecture
 
@@ -1486,12 +1486,13 @@ Feature 0 (verification round)      ← architectural, do first
 | `skills/codereview/prompts/reviewer-context-sufficiency.md` | 6 |
 | `skills/codereview/scripts/detect-plan-context.sh` | 9 |
 | `skills/codereview/prompts/reviewer-plan-compliance.md` | 9 |
+| `skills/codereview/prompts/reviewer-shell-script-pass.md` | 11 |
 
 ### Total files to modify
 
 | File | Features |
 |------|----------|
-| `skills/codereview/SKILL.md` | 0, 2, 4, 6, 7, 9 |
+| `skills/codereview/SKILL.md` | 0, 2, 4, 6, 7, 9, 11 |
 | `skills/codereview/prompts/reviewer-judge.md` | 0, 1, 3, 5, 8 |
 | `skills/codereview/prompts/reviewer-spec-verification-pass.md` | 9 |
 | `skills/codereview/scripts/enrich-findings.py` | 8 |
@@ -1499,4 +1500,5 @@ Feature 0 (verification round)      ← architectural, do first
 | `skills/codereview/references/report-template.md` | 3 |
 | `skills/codereview/references/findings-schema.json` | 8, 9 |
 | `skills/codereview/references/design.md` | 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 |
-| `skills/codereview/references/acceptance-criteria.md` | 0, 2, 4, 5, 6, 9 |
+| `skills/codereview/references/acceptance-criteria.md` | 0, 2, 4, 5, 6, 9, 11 |
+| `docs/CONFIGURATION.md` | 11 |

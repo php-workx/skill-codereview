@@ -70,7 +70,7 @@ After each explorer completes, immediately:
 2. Write it to `task.output_file`.
 3. Process one result at a time — do not accumulate all results in context.
 
-If `post_wave_task` exists in the launch packet, launch it after all waves complete.
+If `post_wave_task` exists in the launch packet, wait until all waves complete, read `post_wave_task.assembled_prompt_file`, launch the task, wait for it to finish, capture its result, and write that result to `post_wave_task.output_file`. Only proceed to Step 3 after that artifact exists.
 
 Relay progress: `[AI] Launching N explorers in parallel...`, `[AI] M/N complete...`, `[AI] All explorers complete.`
 

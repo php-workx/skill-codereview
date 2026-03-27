@@ -43,7 +43,7 @@ For session/cookie handling in the diff:
 1. Check for **session attributes set from untrusted input** without validation.
 2. Check **cookie security flags**: `Secure`, `HttpOnly`, `SameSite` — flag if missing on auth-related cookies.
 3. Check for **trust elevation without re-authentication** — sensitive operations (password change, role upgrade, payment) should require re-auth.
-4. In Python: check for `@csrf_exempt` on POST endpoints — this disables CSRF protection and is often a security issue.
+4. In Python: check for `@csrf_exempt` on any endpoint that handles unsafe HTTP methods (`POST`, `PUT`, `PATCH`, `DELETE`). Inspect function-based views, class-based views (`post`, `put`, `patch`, `delete`, `dispatch`, `http_method_names`), and `as_view()` wrappers.
 
 ### Phase 5 — Dependency Risk
 For new imports or dependency additions:

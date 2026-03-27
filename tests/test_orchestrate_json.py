@@ -25,7 +25,7 @@ class ExtractJsonFromTextTests(unittest.TestCase):
 
     def test_extract_smart_quotes(self) -> None:
         self.assertEqual(
-            extract_json_from_text('[{"summary": "test", "msg": "use {x} here"}]'),
+            extract_json_from_text("[{“summary”: “test”, “msg”: “use {x} here”}]"),
             [{"summary": "test", "msg": "use {x} here"}],
         )
 
@@ -173,14 +173,14 @@ class ParseExplorerOutputTests(unittest.TestCase):
 
     def test_list_with_non_dict_items(self) -> None:
         raw = [{"summary": "real"}, None, 42, "stray"]
-        findings, reqs = parse_explorer_output(raw, "correctness")
+        findings, _reqs = parse_explorer_output(raw, "correctness")
 
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0]["summary"], "real")
 
     def test_dict_findings_with_non_dict_items(self) -> None:
         raw = {"findings": [{"summary": "ok"}, None], "requirements": []}
-        findings, reqs = parse_explorer_output(raw, "correctness")
+        findings, _reqs = parse_explorer_output(raw, "correctness")
 
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0]["summary"], "ok")

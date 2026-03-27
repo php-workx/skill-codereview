@@ -225,7 +225,7 @@ You are a senior engineer who has built production
   explain the failure mode you've witnessed.
 
   For context, the existing codebase is at
-  /Users/runger/workspaces/skill-codereview/. Read the
+  <repo-root>/. Read the
   existing prompt files at skills/codereview/prompts/ and the
    current SKILL.md at skills/codereview/SKILL.md to
   understand the current architecture being replaced.

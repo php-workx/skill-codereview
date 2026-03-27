@@ -37,7 +37,7 @@ CodeRabbit is a hybrid pipeline + agentic system running on Google Cloud Run.
 - Jailkit inside containers for additional process confinement (belt-and-suspenders after a security incident where unsandboxed RuboCop configs allowed arbitrary code execution)
 - Short-lived repository-specific tokens only — no persistent credentials in sandbox
 
-```
+```text
 Webhook (GitHub/GitLab/Azure/Bitbucket)
     │
     ▼

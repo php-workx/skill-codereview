@@ -184,7 +184,7 @@ Tools for building evaluation pipelines:
 
 ## Kodus-AI's Internal Evaluation (Reference Implementation)
 
-Source: Analysis of ~/workspaces/kodus-ai, specifically `evals/` directory. Uses PromptFoo.
+Source: local path `~/workspaces/kodus-ai`, specifically the `evals/` directory. Uses PromptFoo.
 
 ### Dataset Structure
 
@@ -324,7 +324,7 @@ Run against Martian for external positioning. Build internal evals for developme
 - OWASP Benchmark — https://owasp.org/www-project-benchmark/ | https://github.com/OWASP-Benchmark/BenchmarkJava
 - NIST Juliet / SAMATE SARD — https://samate.nist.gov/SARD/test-suites
 - Survey of Code Review Benchmarks — https://arxiv.org/abs/2602.13377
-- Kodus-AI evals — ~/workspaces/kodus-ai/evals/
+- Kodus-AI evals — local path `~/workspaces/kodus-ai/evals/`
 - CodeRabbit benchmark blog — https://www.coderabbit.ai/blog/coderabbit-tops-martian-code-review-benchmark
 - CodeAnt AI benchmark analysis — https://www.codeant.ai/blogs/ai-code-review-benchmark-results-from-200-000-real-pull-requests
 - Greptile benchmarks — https://www.greptile.com/benchmarks
