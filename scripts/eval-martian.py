@@ -103,7 +103,8 @@ REVIEW_PROMPT = """\
 After the review is complete, extract ALL findings from the review output and save them
 as a JSON array to: {findings_path}
 
-Each element must have at minimum: "summary", "severity", "file", "line", "evidence".
+Each element must have at minimum: "pass", "summary", "severity", "file", "line", "evidence".
+The "pass" field must be one of: correctness, security, reliability, performance, testing, maintainability.
 The file must contain ONLY a valid JSON array, no markdown wrapping.
 If the review produced no findings, write: []
 """
@@ -616,6 +617,25 @@ def run_single_review(
 
     elapsed = time.time() - start
 
+    if r.returncode != 0:
+        findings_path.unlink(missing_ok=True)
+        error_file = reviews_dir / f"{pr.pr_id}.raw.json"
+        with open(error_file, "w") as f:
+            json.dump(
+                {
+                    "elapsed_s": elapsed,
+                    "returncode": r.returncode,
+                    "stdout": r.stdout,
+                    "stderr": r.stderr,
+                },
+                f,
+                indent=2,
+            )
+        with _print_lock:
+            detail = (r.stderr or r.stdout or "claude review failed").strip()
+            print(f"    [{pr.pr_id}] Claude review failed: {detail[:240]}")
+        return False
+
     # Parse claude JSON envelope for metadata (cost, tokens, turns)
     claude_meta: dict = {}
     claude_result_text = ""
@@ -826,9 +846,6 @@ def judge_batch(pairs: list[tuple[int, int, str, str]], model: str) -> list[dict
     )
     prompt = JUDGE_BATCH_PROMPT.format(pairs_text=pairs_text)
 
-    default = [{"match": False, "confidence": 0.0, "reasoning": "batch failed"}] * len(
-        pairs
-    )
     try:
         r = subprocess.run(
             [
@@ -846,6 +863,9 @@ def judge_batch(pairs: list[tuple[int, int, str, str]], model: str) -> list[dict
             text=True,
             timeout=120,
         )
+        if r.returncode != 0:
+            detail = (r.stderr or r.stdout or "judge batch failed").strip()
+            raise RuntimeError(f"claude judge failed: {detail[:240]}")
         text = r.stdout.strip()
         try:
             envelope = json.loads(text)
@@ -866,7 +886,9 @@ def judge_batch(pairs: list[tuple[int, int, str, str]], model: str) -> list[dict
             if len(results) == len(pairs):
                 arr = results
             else:
-                return default
+                raise RuntimeError(
+                    f"judge batch returned {len(results) if results else 0} results for {len(pairs)} pairs"
+                )
 
         return [
             {
@@ -876,8 +898,10 @@ def judge_batch(pairs: list[tuple[int, int, str, str]], model: str) -> list[dict
             }
             for item in arr
         ]
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
-        return default
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("claude judge timed out") from exc
+    except FileNotFoundError as exc:
+        raise RuntimeError("claude CLI not found") from exc
 
 
 def judge_pr(
@@ -1951,6 +1975,8 @@ def _get_diff_stats(repo_dir: Path, base_ref: str, head_ref: str) -> dict:
 def _find_session_file(session_id: str) -> Optional[Path]:
     """Find the session JSONL file for a given session ID."""
     claude_dir = Path.home() / ".claude" / "projects"
+    if not claude_dir.exists():
+        return None
     for project_dir in claude_dir.iterdir():
         if not project_dir.is_dir():
             continue
@@ -1958,6 +1984,57 @@ def _find_session_file(session_id: str) -> Optional[Path]:
         if session_file.exists():
             return session_file
     return None
+
+
+def _aggregate_prompt_test_verdicts(
+    prs_by_id: dict[str, BenchmarkPR],
+    all_findings: dict[str, list[dict]],
+    all_verdicts: list[tuple[str, int, int, bool, float]],
+) -> list[dict]:
+    """Aggregate prompt-test verdicts using one-to-one greedy matching per PR."""
+    matches_by_pr: dict[str, list[tuple[int, int, float]]] = {}
+    for pr_id, golden_idx, candidate_idx, is_match, confidence in all_verdicts:
+        if is_match and confidence >= 0.5:
+            matches_by_pr.setdefault(pr_id, []).append(
+                (golden_idx, candidate_idx, confidence)
+            )
+
+    pr_results: list[dict] = []
+    for pr_id, findings in all_findings.items():
+        pr = prs_by_id.get(pr_id)
+        if not pr:
+            continue
+        matches = sorted(
+            matches_by_pr.get(pr_id, []), key=lambda item: item[2], reverse=True
+        )
+        used_golden: set[int] = set()
+        used_candidates: set[int] = set()
+        tp = 0
+        for golden_idx, candidate_idx, _confidence in matches:
+            if golden_idx in used_golden or candidate_idx in used_candidates:
+                continue
+            used_golden.add(golden_idx)
+            used_candidates.add(candidate_idx)
+            tp += 1
+        fn = len(pr.golden_comments) - tp
+        fp = len(findings) - len(used_candidates)
+        pr_p = tp / (tp + fp) if (tp + fp) > 0 else 0
+        pr_r = tp / (tp + fn) if (tp + fn) > 0 else 0
+        pr_f1 = 2 * pr_p * pr_r / (pr_p + pr_r) if (pr_p + pr_r) > 0 else 0
+        pr_results.append(
+            {
+                "pr_id": pr_id,
+                "language": pr.language,
+                "findings": len(findings),
+                "tp": tp,
+                "fp": fp,
+                "fn": fn,
+                "precision": pr_p,
+                "recall": pr_r,
+                "f1": pr_f1,
+            }
+        )
+    return pr_results
 
 
 def cmd_ingest(args: argparse.Namespace) -> bool:
@@ -2363,18 +2440,20 @@ def cmd_prompt_test(args: argparse.Namespace) -> bool:
     pr_results: list[dict] = []
 
     judge_pairs: list[
-        tuple[str, str, str, str]
-    ] = []  # (pr_id, golden, candidate, golden_severity)
+        tuple[str, int, int, str, str, str]
+    ] = []  # (pr_id, golden_idx, candidate_idx, golden, candidate, golden_severity)
 
     for pr_id, findings in all_findings.items():
         pr = prs_by_id.get(pr_id)
         if not pr:
             continue
-        for gc in pr.golden_comments:
+        for golden_idx, gc in enumerate(pr.golden_comments):
             total_golden += 1
-            for f in findings:
+            for candidate_idx, f in enumerate(findings):
                 summary = f.get("summary", "") + " " + f.get("evidence", "")
-                judge_pairs.append((pr_id, gc.comment, summary, gc.severity))
+                judge_pairs.append(
+                    (pr_id, golden_idx, candidate_idx, gc.comment, summary, gc.severity)
+                )
 
     if not judge_pairs:
         print("  No pairs to judge.")
@@ -2390,10 +2469,13 @@ def cmd_prompt_test(args: argparse.Namespace) -> bool:
             judge_pairs[i : i + JUDGE_BATCH_SIZE]
             for i in range(0, len(judge_pairs), JUDGE_BATCH_SIZE)
         ]
-        all_verdicts: list[tuple[str, str, str, str, bool, float]] = []
+        all_verdicts: list[tuple[str, int, int, bool, float]] = []
 
         def _judge_batch(batch):
-            pairs_for_judge = [(0, 0, g, c) for _, g, c, _ in batch]
+            pairs_for_judge = [
+                (golden_idx, candidate_idx, golden, candidate)
+                for pr_id, golden_idx, candidate_idx, golden, candidate, sev in batch
+            ]
             return judge_batch(pairs_for_judge, judge_model)
 
         batch_num = 0
@@ -2404,13 +2486,19 @@ def cmd_prompt_test(args: argparse.Namespace) -> bool:
                 batch_num += 1
                 try:
                     results = future.result()
-                    for (pr_id, golden, candidate, sev), verdict in zip(batch, results):
+                    for (
+                        pr_id,
+                        golden_idx,
+                        candidate_idx,
+                        golden,
+                        candidate,
+                        sev,
+                    ), verdict in zip(batch, results, strict=True):
                         all_verdicts.append(
                             (
                                 pr_id,
-                                golden,
-                                candidate,
-                                sev,
+                                golden_idx,
+                                candidate_idx,
                                 verdict["match"],
                                 verdict["confidence"],
                             )
@@ -2418,53 +2506,18 @@ def cmd_prompt_test(args: argparse.Namespace) -> bool:
                 except Exception as e:
                     print(f"  Judge batch failed: {e}")
 
-        # Aggregate: for each golden comment, did ANY candidate match?
-        golden_matched: dict[
-            str, dict[str, bool]
-        ] = {}  # pr_id -> {golden_comment -> matched}
-        candidate_matched: dict[
-            str, dict[str, bool]
-        ] = {}  # pr_id -> {candidate -> matched}
-
-        for pr_id, golden, candidate, sev, is_match, conf in all_verdicts:
-            if is_match and conf >= 0.5:
-                golden_matched.setdefault(pr_id, {})[golden] = True
-                candidate_matched.setdefault(pr_id, {})[candidate] = True
-
-        for pr_id, findings in all_findings.items():
-            pr = prs_by_id.get(pr_id)
-            if not pr:
-                continue
-            tp = sum(
-                1
-                for gc in pr.golden_comments
-                if golden_matched.get(pr_id, {}).get(gc.comment, False)
-            )
-            fn = len(pr.golden_comments) - tp
-            matched_candidates = set(candidate_matched.get(pr_id, {}).keys())
-            fp = sum(
-                1
-                for f in findings
-                if (f.get("summary", "") + " " + f.get("evidence", ""))
-                not in matched_candidates
-            )
-            total_tp += tp
-            total_fn += fn
-            total_fp += fp
-            pr_p = tp / (tp + fp) if (tp + fp) > 0 else 0
-            pr_r = tp / (tp + fn) if (tp + fn) > 0 else 0
-            pr_f1 = 2 * pr_p * pr_r / (pr_p + pr_r) if (pr_p + pr_r) > 0 else 0
+        for result in _aggregate_prompt_test_verdicts(
+            prs_by_id, all_findings, all_verdicts
+        ):
+            total_tp += result["tp"]
+            total_fn += result["fn"]
+            total_fp += result["fp"]
             pr_results.append(
                 {
-                    "pr_id": pr_id,
-                    "language": pr.language,
-                    "findings": len(findings),
-                    "tp": tp,
-                    "fp": fp,
-                    "fn": fn,
-                    "precision": round(pr_p, 3),
-                    "recall": round(pr_r, 3),
-                    "f1": round(pr_f1, 3),
+                    **result,
+                    "precision": round(result["precision"], 3),
+                    "recall": round(result["recall"], 3),
+                    "f1": round(result["f1"], 3),
                 }
             )
 
