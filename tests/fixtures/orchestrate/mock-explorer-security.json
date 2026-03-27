@@ -1,0 +1,16 @@
+{
+  "pass": "security",
+  "status": "done",
+  "findings": [
+    {
+      "severity": "high",
+      "confidence": 0.93,
+      "file": "scripts/orchestrate.py",
+      "line": 89,
+      "summary": "Subprocess command is assembled from untrusted input",
+      "evidence": "Command arguments derived from task metadata are passed through without allowlisting.",
+      "failure_mode": "A crafted task could execute arbitrary commands during review orchestration.",
+      "fix": "Validate commands against the configured allowlist before execution."
+    }
+  ]
+}

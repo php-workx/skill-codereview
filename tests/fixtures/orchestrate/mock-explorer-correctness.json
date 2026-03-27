@@ -1,0 +1,24 @@
+{
+  "pass": "correctness",
+  "status": "done",
+  "findings": [
+    {
+      "severity": "medium",
+      "confidence": 0.84,
+      "file": "scripts/orchestrate.py",
+      "line": 112,
+      "summary": "Session directory is resolved too early",
+      "evidence": "Using Path.resolve() here would break macOS /tmp symlink handling.",
+      "fix": "Preserve the provided path without resolving it."
+    },
+    {
+      "severity": "low",
+      "confidence": 0.71,
+      "file": "scripts/orchestrate.py",
+      "line": 176,
+      "summary": "Prompt truncation branch should preserve the lead-in section",
+      "evidence": "The current truncation order can drop the task summary before examples.",
+      "fix": "Keep the task summary ahead of the long examples block."
+    }
+  ]
+}

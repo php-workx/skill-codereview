@@ -1,0 +1,4 @@
+Explorer output follows a noisy preamble.
+This fixture intentionally contains non-JSON text before the payload.
+RESULTS BEGIN
+{"pass":"security","findings":[{"severity":"critical","confidence":0.99,"file":"scripts/orchestrate.py","line":44,"summary":"Leaked secret in logs","evidence":"{\"findings\": []}"}]}

@@ -1,0 +1,48 @@
+{
+  "run_id": "20260327T090000Z-orchestrate",
+  "timestamp": "2026-03-27T09:00:00Z",
+  "review_mode": "standard",
+  "scope": "branch",
+  "base_ref": "main",
+  "head_ref": "feat/python-orchestrator",
+  "files_reviewed": [
+    "scripts/orchestrate.py",
+    "tests/test_orchestrate.py",
+    "prompts/reviewer-judge.md",
+    "skills/codereview/SKILL.md",
+    "tests/fixtures/orchestrate/codereview.yaml"
+  ],
+  "verdict": "WARN",
+  "verdict_reason": "Core behavior looks sound but needs follow-up on command allowlisting.",
+  "strengths": [
+    "Clear separation between orchestration and judgment",
+    "Review envelope stays machine-readable"
+  ],
+  "spec_gaps": [],
+  "spec_requirements": [],
+  "tool_status": {
+    "semgrep": { "status": "ran", "version": "1.56.0", "finding_count": 1, "note": null },
+    "trivy": { "status": "not_installed", "version": null, "finding_count": 0, "note": "brew install trivy" }
+  },
+  "findings": [
+    {
+      "id": "security-allowlist-01",
+      "source": "ai",
+      "pass": "security",
+      "severity": "high",
+      "confidence": 0.93,
+      "file": "scripts/orchestrate.py",
+      "line": 89,
+      "summary": "Subprocess command is assembled from untrusted input",
+      "evidence": "Task metadata reaches the subprocess layer without a visible allowlist check.",
+      "failure_mode": "A crafted review task could execute arbitrary commands.",
+      "fix": "Require allowlisted commands before dispatch.",
+      "action_tier": "must_fix"
+    }
+  ],
+  "tier_summary": {
+    "must_fix": 1,
+    "should_fix": 0,
+    "consider": 0
+  }
+}
