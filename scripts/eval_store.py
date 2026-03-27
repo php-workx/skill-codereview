@@ -20,9 +20,8 @@ import sqlite3
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 -- ─── Static benchmark data ──────────────────────────────────────────────────
@@ -86,7 +85,8 @@ CREATE TABLE IF NOT EXISTS runs (
     total_wall_s    REAL,
     total_cost_usd  REAL,
     avg_turns       REAL,
-    notes           TEXT
+    notes           TEXT,
+    benchmark_metrics_json TEXT
 );
 
 -- ─── Per-PR results within a run ────────────────────────────────────────────
@@ -231,6 +231,12 @@ class EvalStore:
 
     def _init_schema(self):
         self.conn.executescript(SCHEMA)
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        if "benchmark_metrics_json" not in columns:
+            self.conn.execute("ALTER TABLE runs ADD COLUMN benchmark_metrics_json TEXT")
         self.conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
             ("version", str(SCHEMA_VERSION)),
@@ -300,7 +306,7 @@ class EvalStore:
         except Exception:
             return ""
 
-    def create_run(self, benchmark_id: str, config: dict = None) -> str:
+    def create_run(self, benchmark_id: str, config: dict | None = None) -> str:
         run_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[
             :19
         ]  # include microseconds for uniqueness
@@ -340,10 +346,21 @@ class EvalStore:
             "total_cost_usd",
             "avg_turns",
             "notes",
+            "benchmark_metrics_json",
         ]:
             if key in metrics:
                 sets.append(f"{key} = ?")
-                vals.append(metrics[key])
+                value = metrics[key]
+                if key == "benchmark_metrics_json":
+                    value = json.dumps(value) if value is not None else None
+                vals.append(value)
+        if "benchmark_metrics" in metrics:
+            sets.append("benchmark_metrics_json = ?")
+            vals.append(
+                json.dumps(metrics["benchmark_metrics"])
+                if metrics["benchmark_metrics"] is not None
+                else None
+            )
         if sets:
             vals.append(run_id)
             self.conn.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id = ?", vals)
@@ -419,7 +436,7 @@ class EvalStore:
         confidence: float = 0,
         reasoning: str = "",
         judge_model: str = "",
-        golden_id: int = None,
+        golden_id: int | None = None,
     ):
         self.conn.execute(
             """INSERT INTO judge_verdicts
@@ -517,7 +534,7 @@ class EvalStore:
 
     # ─── Session turn analytics ──────────────────────────────────────────
 
-    def query_turn_summary(self, run_id: str = None) -> list[dict]:
+    def query_turn_summary(self, run_id: str | None = None) -> list[dict]:
         """Per-PR turn stats: total turns, tokens, thinking, tool usage."""
         if not run_id:
             run_id = self._latest_run_id()
@@ -542,7 +559,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_model_usage(self, run_id: str = None) -> list[dict]:
+    def query_model_usage(self, run_id: str | None = None) -> list[dict]:
         """Which models are used how much across turns?"""
         if not run_id:
             run_id = self._latest_run_id()
@@ -566,7 +583,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_tool_frequency(self, run_id: str = None) -> list[dict]:
+    def query_tool_frequency(self, run_id: str | None = None) -> list[dict]:
         """Which tools are called most frequently across turns?"""
         if not run_id:
             run_id = self._latest_run_id()
@@ -594,8 +611,8 @@ class EvalStore:
         self,
         benchmark_id: str,
         results_json: dict,
-        reviews_dir: Path = None,
-        classify_json: dict = None,
+        reviews_dir: Path | None = None,
+        classify_json: dict | None = None,
     ):
         """Import a complete evaluation run from the JSON files produced by eval-martian.py."""
         run_id = self.create_run(
@@ -637,7 +654,7 @@ class EvalStore:
                 raw_file = reviews_dir / f"{pr_data['pr_id']}.raw.json"
                 if raw_file.exists():
                     try:
-                        with open(raw_file) as rf:
+                        with open(raw_file, encoding="utf-8") as rf:
                             raw = json.load(rf)
                         meta = raw.get("claude_meta", {})
                         timing = {
@@ -668,7 +685,7 @@ class EvalStore:
                 review_file = reviews_dir / f"{pr_data['pr_id']}.json"
                 if review_file.exists():
                     try:
-                        with open(review_file) as rf:
+                        with open(review_file, encoding="utf-8") as rf:
                             all_findings = json.load(rf)
                         if not isinstance(all_findings, list):
                             all_findings = []
@@ -680,7 +697,7 @@ class EvalStore:
                 # Save judge verdicts for matched findings
                 for tp in pr_data.get("true_positives", []):
                     # Find the matching finding by summary
-                    for fid, f in zip(finding_ids, all_findings):
+                    for fid, f in zip(finding_ids, all_findings, strict=True):
                         cand = f.get("summary", "")
                         if cand and cand in tp.get("candidate", ""):
                             self.save_judge_verdict(
@@ -748,7 +765,7 @@ class EvalStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def query_by_language(self, run_id: str = None) -> list[dict]:
+    def query_by_language(self, run_id: str | None = None) -> list[dict]:
         """Findings breakdown by language for a run (or latest)."""
         if not run_id:
             run_id = self._latest_run_id()
@@ -773,7 +790,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_by_category(self, run_id: str = None) -> list[dict]:
+    def query_by_category(self, run_id: str | None = None) -> list[dict]:
         """Classification category distribution for a run."""
         if not run_id:
             run_id = self._latest_run_id()
@@ -795,7 +812,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_by_severity(self, run_id: str = None) -> list[dict]:
+    def query_by_severity(self, run_id: str | None = None) -> list[dict]:
         """Findings by severity × classification category."""
         if not run_id:
             run_id = self._latest_run_id()
@@ -821,7 +838,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_by_pass(self, run_id: str = None) -> list[dict]:
+    def query_by_pass(self, run_id: str | None = None) -> list[dict]:
         """Which explorer passes find the most real bugs?"""
         if not run_id:
             run_id = self._latest_run_id()
@@ -847,7 +864,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_missed_golden(self, run_id: str = None) -> list[dict]:
+    def query_missed_golden(self, run_id: str | None = None) -> list[dict]:
         """Golden comments we consistently miss (false negatives across runs)."""
         if not run_id:
             run_id = self._latest_run_id()
@@ -886,7 +903,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_timing_detail(self, run_id: str = None) -> list[dict]:
+    def query_timing_detail(self, run_id: str | None = None) -> list[dict]:
         """Per-PR timing breakdown for a run."""
         if not run_id:
             run_id = self._latest_run_id()
@@ -912,7 +929,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_timing_by_language(self, run_id: str = None) -> list[dict]:
+    def query_timing_by_language(self, run_id: str | None = None) -> list[dict]:
         """Average timing metrics by language."""
         if not run_id:
             run_id = self._latest_run_id()
@@ -938,7 +955,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_disputed_findings(self, run_id: str = None) -> list[dict]:
+    def query_disputed_findings(self, run_id: str | None = None) -> list[dict]:
         """Findings where Claude and Codex disagreed — needs human review."""
         if not run_id:
             run_id = self._latest_run_id()
@@ -960,7 +977,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_wrong_findings(self, run_id: str = None) -> list[dict]:
+    def query_wrong_findings(self, run_id: str | None = None) -> list[dict]:
         """Findings classified as wrong — false positive patterns to fix."""
         if not run_id:
             run_id = self._latest_run_id()
@@ -981,7 +998,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_cost_per_real_finding(self, run_id: str = None) -> list[dict]:
+    def query_cost_per_real_finding(self, run_id: str | None = None) -> list[dict]:
         """Cost efficiency: cost per real finding found."""
         if not run_id:
             run_id = self._latest_run_id()
@@ -1009,7 +1026,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_finding_density(self, run_id: str = None) -> list[dict]:
+    def query_finding_density(self, run_id: str | None = None) -> list[dict]:
         """Finding density vs diff size — are we calibrated?"""
         if not run_id:
             run_id = self._latest_run_id()
@@ -1033,7 +1050,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_severity_calibration(self, run_id: str = None) -> list[dict]:
+    def query_severity_calibration(self, run_id: str | None = None) -> list[dict]:
         """Do our severity ratings match reality? High-severity findings that are wrong = problem."""
         if not run_id:
             run_id = self._latest_run_id()
@@ -1082,7 +1099,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_golden_by_type(self, run_id: str = None) -> list[dict]:
+    def query_golden_by_type(self, run_id: str | None = None) -> list[dict]:
         """What types of golden comments do we catch vs miss?"""
         if not run_id:
             run_id = self._latest_run_id()
@@ -1107,7 +1124,7 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def _latest_run_id(self, benchmark_id: str = "martian-offline") -> Optional[str]:
+    def _latest_run_id(self, benchmark_id: str = "martian-offline") -> str | None:
         row = self.conn.execute(
             "SELECT id FROM runs WHERE benchmark_id = ? ORDER BY timestamp DESC LIMIT 1",
             (benchmark_id,),

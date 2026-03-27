@@ -94,29 +94,80 @@ CWE_ALIASES = {
 # Semgrep rulesets for maximum OWASP coverage
 SEMGREP_CONFIGS = ["p/security-audit", "p/python", "p/owasp-top-ten"]
 
-AI_REVIEW_PROMPT = """\
+
+def build_ai_review_prompt(cwe_list: str, files_text: str, lang: str) -> str:
+    """Build a language-aware OWASP review prompt."""
+    lang = (lang or "python").lower()
+    if lang == "java":
+        sources = (
+            "HttpServletRequest.getParameter(), getHeader(), getCookies(), "
+            "request bodies, servlet parameters, file reads, database reads, "
+            "System.getenv(), System.getProperty()."
+        )
+        sinks = (
+            "SQL: Statement.executeQuery()/executeUpdate() with string concatenation; "
+            "Command: Runtime.exec(), ProcessBuilder with untrusted args; "
+            "XPath: XPathExpression with concatenated input; "
+            "LDAP: DirContext.search() with string-built filters; "
+            "Template/XSS: response.getWriter().write(), JSP/Thymeleaf output without escaping; "
+            "File: File/FileInputStream/Paths.get() with user-controlled paths; "
+            'Crypto: MessageDigest.getInstance("MD5"/"SHA-1"), weak javax.crypto usage; '
+            "Deserialization: ObjectInputStream.readObject()."
+        )
+        sanitization = (
+            "PreparedStatement with bind variables IS sanitization for SQL. "
+            "StringEscapeUtils / framework escaping can sanitize HTML sinks. "
+            "Variable reassignment or bean copying is NOT sanitization."
+        )
+        examples = (
+            "- Statement + string concat = VULNERABLE (CWE-89)\n"
+            "- PreparedStatement with ? parameters = SECURE\n"
+            "- Runtime.exec(userInput) = VULNERABLE (CWE-78)\n"
+            "- MessageDigest MD5/SHA-1 for passwords/tokens = VULNERABLE (CWE-328)\n"
+            "- SecureRandom = SECURE, java.util.Random = WEAK (CWE-330)"
+        )
+    else:
+        sources = (
+            "function parameters, configparser reads, os.environ/os.getenv, sys.argv, "
+            "database reads, file reads, request parameters, cookie values, HTTP headers."
+        )
+        sinks = (
+            "SQL: cursor.execute(), connection.execute() with string formatting; "
+            "Command: os.system(), subprocess with shell=True or string args, os.popen(); "
+            "XPath: xpath() / find() with string concatenation; "
+            "LDAP: search_s() / search() with string-formatted filters; "
+            "Template: render_template_string(), Markup(), innerHTML; "
+            "File: open() with dynamic path, os.path.join with unsanitized input; "
+            "Eval: eval(), exec() with dynamic input; "
+            "Deserialization: pickle.loads(), yaml.load() without SafeLoader."
+        )
+        sanitization = (
+            "Indirection (configparser round-trips, dict storage, variable reassignment) "
+            "is NOT sanitization — data flows through unchanged. Parameterized queries "
+            "(%s with tuple, ?, $1) ARE sanitization. html.escape() and "
+            "markupsafe.escape() ARE sanitization for template sinks."
+        )
+        examples = (
+            "- String formatting into SQL (f-string, .format(), %) = VULNERABLE (CWE-89)\n"
+            '- Parameterized queries (cursor.execute("...%s", (val,))) = SECURE\n'
+            "- String concat into XPath/LDAP = VULNERABLE (CWE-643/90)\n"
+            "- configparser round-trips are NOT sanitization\n"
+            "- hashlib.md5()/hashlib.sha1() for passwords = ALWAYS VULNERABLE (CWE-328)\n"
+            "- hashlib.sha256()/sha384()/sha512() = SECURE hash algorithms\n"
+            "- random.Random()/random.randint() = WEAK, secrets.* / os.urandom() = SECURE"
+        )
+
+    return f"""\
 You are a security auditor performing taint analysis. For EACH file below:
 
-1. ENUMERATE SOURCES: List all data entry points (function parameters, \
-configparser reads, os.environ/os.getenv, sys.argv, database reads, file reads, \
-request parameters, cookie values, HTTP headers).
+1. ENUMERATE SOURCES: List all data entry points ({sources})
 
 2. ENUMERATE SINKS: List all dangerous function calls:
-   - SQL: cursor.execute(), connection.execute() with string formatting
-   - Command: os.system(), subprocess with shell=True or string args, os.popen()
-   - XPath: xpath() / find() with string concatenation
-   - LDAP: search_s() / search() with string-formatted filters
-   - Template: render_template_string(), Markup(), innerHTML
-   - File: open() with dynamic path, os.path.join with unsanitized input
-   - Eval: eval(), exec() with dynamic input
-   - Deserialization: pickle.loads(), yaml.load() without SafeLoader
+   {sinks}
 
 3. TRACE PATHS: For each source that reaches a sink, check:
    - Is the data sanitized, validated, or parameterized between source and sink?
-   - Indirection (configparser round-trips, dict storage, variable reassignment) \
-is NOT sanitization — data flows through unchanged.
-   - Parameterized queries (%s with tuple, ?, $1) ARE sanitization.
-   - html.escape(), markupsafe.escape() ARE sanitization for template sinks.
+   - {sanitization}
 
 4. VERDICT: Is there a vulnerability?
 
@@ -127,25 +178,14 @@ For INJECTION (CWE-89, 78, 90, 643, 79, 22, 94, 601): use taint analysis.
 
 For WEAK CRYPTO/HASH (CWE-327, 328, 330): use algorithm analysis, NOT taint.
   The question is: is a weak algorithm used in a security context?
-  MD5/SHA-1 for password storage is ALWAYS vulnerable regardless of input source.
-  A hardcoded string hashed with MD5 and written to passwordFile.txt is vulnerable.
   Security context signals: file/variable names with "password", "credential",
   "token", "secret", "auth"; writing hashes to storage.
   Non-security context (suppress): checksums, cache keys, etags, content dedup.
 
 For COOKIES (CWE-614): check the secure/httponly/samesite flags, not taint.
-  set_cookie(..., secure=True, httponly=True) = SECURE
-  set_cookie(..., secure=False) or missing flags = VULNERABLE
 
 Key distinctions:
-- random.Random() / random.random() / random.randint() = WEAK (CWE-330)
-- random.SystemRandom() / secrets.* / os.urandom() = SECURE
-- String formatting into SQL (f-string, .format(), %) = VULNERABLE (CWE-89)
-- Parameterized queries (cursor.execute("...%s", (val,))) = SECURE
-- String concat into XPath/LDAP = VULNERABLE (CWE-643/90)
-- configparser round-trips are NOT sanitization — data passes through unchanged
-- hashlib.md5() / hashlib.sha1() for passwords = ALWAYS VULNERABLE (CWE-328)
-- hashlib.sha256() / hashlib.sha384() / hashlib.sha512() = SECURE hash algorithms
+{examples}
 
 CWE categories to use (ONLY these): {cwe_list}
 
@@ -153,9 +193,8 @@ Files to analyze:
 {files_text}
 
 Respond with ONLY a JSON array, one object per file:
-[{{"file": "BenchmarkTest00001.py", "vulnerable": true, "cwe": 89, \
-"reasoning": "source: configparser.get() at line X → sink: cursor.execute() \
-at line Y, no parameterization"}}]"""
+[{{"file": "BenchmarkTest00001", "vulnerable": true, "cwe": 89, "reasoning": "source reaches sink without sanitization"}}]"""
+
 
 AI_BATCH_SIZE = 5  # files per claude call (reduced from 10 — taint protocol needs more time per file)
 
@@ -401,7 +440,7 @@ def review_batch(files: list[TestCase], cwe_list: str, lang: str) -> list[dict]:
             content = "(could not read file)"
         files_text += f"\n--- File: {tc.name}.{'py' if lang == 'python' else 'java'} ---\n{content}\n"
 
-    prompt = AI_REVIEW_PROMPT.format(cwe_list=cwe_list, files_text=files_text)
+    prompt = build_ai_review_prompt(cwe_list=cwe_list, files_text=files_text, lang=lang)
 
     try:
         r = subprocess.run(
@@ -420,6 +459,10 @@ def review_batch(files: list[TestCase], cwe_list: str, lang: str) -> list[dict]:
             text=True,
             timeout=300,
         )
+        if r.returncode != 0:
+            raise subprocess.CalledProcessError(
+                r.returncode, r.args, output=r.stdout, stderr=r.stderr
+            )
         text = r.stdout.strip()
         try:
             envelope = json.loads(text)
@@ -630,7 +673,8 @@ def cmd_score(args: argparse.Namespace) -> bool:
             # AI didn't review — fall back to semgrep
             findings[name] = scan_findings[name]
 
-    if not findings and not tests:
+    has_artifacts = scan_file.exists() or review_file.exists()
+    if not findings and not has_artifacts:
         print("No results to score. Run 'scan' or 'review' first.")
         return False
 
@@ -732,12 +776,23 @@ def cmd_score(args: argparse.Namespace) -> bool:
         store.update_run_metrics(
             run_id,
             {
-                "precision": avg_tpr,  # map TPR to precision field for consistency
-                "recall": avg_tpr,
-                "f1": avg_youden,  # map Youden to F1 field
+                "precision": None,
+                "recall": None,
+                "f1": None,
                 "prs_evaluated": len(tests),
                 "total_findings": sum(len(v) for v in findings.values()),
-                "notes": f"Youden={avg_youden:.3f} TPR={avg_tpr:.3f} FPR={avg_fpr:.3f}",
+                "benchmark_metrics": {
+                    "avg_tpr": round(avg_tpr, 3),
+                    "avg_fpr": round(avg_fpr, 3),
+                    "avg_youden": round(avg_youden, 3),
+                    "prs_evaluated": len(tests),
+                    "total_findings": sum(len(v) for v in findings.values()),
+                    "notes": f"Youden={avg_youden:.3f} TPR={avg_tpr:.3f} FPR={avg_fpr:.3f}",
+                },
+                "notes": (
+                    "OWASP benchmark metrics: "
+                    f"{json.dumps({'avg_tpr': round(avg_tpr, 3), 'avg_fpr': round(avg_fpr, 3), 'avg_youden': round(avg_youden, 3)})}"
+                ),
             },
         )
         store.close()
