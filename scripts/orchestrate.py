@@ -419,7 +419,7 @@ def build_launch_packet(
         "context_summary": context_summary,
         "_config": filter_config_allowlist(config, CONFIG_ALLOWLIST),
         "chunks": chunks,
-        "triage": triage_result if triage_result else None,
+        "triage_result": triage_result if triage_result else None,
         "triage_summary": triage_summary if triage_summary else None,
         "diff_result": {
             "mode": diff_result.mode,
@@ -628,8 +628,7 @@ def assemble_expert_panel(
                     panel.append(_build_expert(sec_expert, config, "security_alias"))
         known_experts = set(CORE_EXPERTS) | set(EXTENDED_EXPERT_PATTERNS)
         invalid = sorted(allowed_passes - known_experts)
-        valid = allowed_passes & known_experts
-        if invalid and not valid:
+        if invalid:
             raise ValueError(f"Unknown pass names: {', '.join(invalid)}")
         panel = [expert for expert in panel if expert["name"] in allowed_passes]
         if not panel:
@@ -1297,7 +1296,13 @@ def _ensure_session_dir(args: argparse.Namespace, *, create_if_missing: bool) ->
         raise ValueError(
             f"Refusing to use existing non-directory path for --session-dir: {path}"
         )
-    if create_if_missing and path.exists() and path.is_dir():
+    if not create_if_missing:
+        if not path.exists() or not path.is_dir():
+            raise ValueError(f"Session directory does not exist: {path}")
+        if not _has_session_marker(path):
+            raise ValueError(f"Session directory missing session marker: {path}")
+        return path
+    if path.exists() and path.is_dir():
         if not _has_session_marker(path):
             try:
                 has_entries = any(path.iterdir())
@@ -1519,7 +1524,9 @@ def prepare(args: argparse.Namespace) -> int:
                     context_results[name] = future.result()
                 except Exception as exc:
                     progress("context_gather_failed", task=name, error=str(exc))
-                    context_results[name] = {}
+                    raise RuntimeError(
+                        f"Context gather failed for {name}: {exc}"
+                    ) from exc
 
         (session_dir / "scans.json").write_text(
             json.dumps(context_results["scans"], indent=2),

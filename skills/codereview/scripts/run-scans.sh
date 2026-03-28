@@ -1093,7 +1093,7 @@ for tool_key in semgrep ast_grep trivy gitleaks shellcheck actionlint clippy ruf
 			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
 				if [ -s "$SCRATCH/actionlint.out" ]; then
 					# actionlint -format json outputs one JSON object per line
-					jq -s '[.[] | {file: .filepath, line: .line, tool: "actionlint", severity: "medium", rule_id: .kind, message: .message}]' \
+					jq -s '[.[] | {file: .filepath, line: .line, tool: "actionlint", source: "actionlint", summary: .message, evidence: .message, pass: false, confidence: "medium", rule_id: .kind}]' \
 						<"$SCRATCH/actionlint.out" >"$SCRATCH/findings/actionlint.json" 2>/dev/null || echo '[]' >"$SCRATCH/findings/actionlint.json"
 				else
 					echo '[]' >"$SCRATCH/findings/actionlint.json"

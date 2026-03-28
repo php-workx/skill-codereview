@@ -823,7 +823,7 @@ class OrchestratePlumbingTests(unittest.TestCase):
         result = _chunk_diff(diff_text, ["new_name.py"])
 
         self.assertIn("rename to new_name.py", result)
-        self.assertNotEqual(result, diff_text if False else "")
+        self.assertNotEqual(result, "")
 
     def test_chunk_diff_returns_empty_when_no_chunk_files_match(self) -> None:
         diff_text = (
