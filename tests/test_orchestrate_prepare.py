@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -35,7 +36,7 @@ class OrchestratePrepareTests(unittest.TestCase):
             repo = self._init_repo(Path(tmpdir))
             self._run(["git", "checkout", "-b", "feature"], cwd=repo)
             (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
-            self._run(["git", "commit", "-am", "update"], cwd=repo)
+            self._run(["git", "commit", "--no-verify", "-am", "update"], cwd=repo)
 
             result = extract_diff(repo_root=repo, mode="base", base_ref="main")
 
@@ -419,17 +420,19 @@ class OrchestratePrepareTests(unittest.TestCase):
         self._run(["git", "config", "user.email", "test@example.com"], cwd=repo)
         (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
         self._run(["git", "add", "tracked.txt"], cwd=repo)
-        self._run(["git", "commit", "-m", "initial"], cwd=repo)
+        self._run(["git", "commit", "--no-verify", "-m", "initial"], cwd=repo)
         return repo
 
     @staticmethod
     def _run(command: list[str], cwd: Path) -> None:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         subprocess.run(
             command,
             cwd=cwd,
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
 
 

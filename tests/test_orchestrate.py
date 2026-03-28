@@ -1,4 +1,5 @@
 import json
+import os
 from argparse import Namespace
 import subprocess
 import sys
@@ -745,23 +746,30 @@ class OrchestratePlumbingTests(unittest.TestCase):
             self.assertTrue(any(review_dir.glob("*.md")))
 
     @staticmethod
-    def _run(command: list[str], cwd: Path) -> None:
+    def _git_env() -> dict[str, str]:
+        """Return env dict with GIT_* vars removed to isolate temp repos."""
+        return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+    @classmethod
+    def _run(cls, command: list[str], cwd: Path) -> None:
         subprocess.run(
             command,
             cwd=cwd,
             check=True,
             capture_output=True,
             text=True,
+            env=cls._git_env(),
         )
 
-    @staticmethod
-    def _capture(command: list[str], cwd: Path) -> str:
+    @classmethod
+    def _capture(cls, command: list[str], cwd: Path) -> str:
         result = subprocess.run(
             command,
             cwd=cwd,
             check=True,
             capture_output=True,
             text=True,
+            env=cls._git_env(),
         )
         return result.stdout
 
@@ -775,13 +783,13 @@ class OrchestratePlumbingTests(unittest.TestCase):
         if add_second_file:
             (repo / "second.txt").write_text("alpha\n", encoding="utf-8")
         self._run(["git", "add", "."], cwd=repo)
-        self._run(["git", "commit", "-m", "initial"], cwd=repo)
+        self._run(["git", "commit", "--no-verify", "-m", "initial"], cwd=repo)
         self._run(["git", "checkout", "-b", "feature"], cwd=repo)
         (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
         if add_second_file:
             (repo / "second.txt").write_text("alpha\nbeta\n", encoding="utf-8")
         self._run(["git", "add", "."], cwd=repo)
-        self._run(["git", "commit", "-m", "update"], cwd=repo)
+        self._run(["git", "commit", "--no-verify", "-m", "update"], cwd=repo)
         return repo
 
     def test_check_token_budget_raises_when_exceeds_after_truncation(self) -> None:
