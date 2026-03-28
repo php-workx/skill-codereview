@@ -356,9 +356,9 @@ def cmd_scan(args: argparse.Namespace) -> bool:
     try:
         data = json.loads(r.stdout)
         results = data.get("results", [])
-    except json.JSONDecodeError:
-        print("  Could not parse semgrep output")
-        results = []
+    except json.JSONDecodeError as e:
+        print(f"  Could not parse semgrep output: {e}")
+        return False
 
     print(f"  {len(results)} raw findings in {elapsed:.0f}s")
 
@@ -635,7 +635,15 @@ def cmd_review(args: argparse.Namespace) -> bool:
 
     latest = results_dir / f"review-{lang}-latest.json"
     with open(latest, "w") as f:
-        json.dump({"source": "ai", "findings_by_test": findings_by_test}, f, indent=2)
+        json.dump(
+            {
+                "source": "ai",
+                "findings_by_test": findings_by_test,
+                "raw_results": all_results,
+            },
+            f,
+            indent=2,
+        )
 
     print(
         f"\n  {len(findings_by_test)}/{len(tests)} test cases flagged → {review_file.name}"
@@ -687,18 +695,19 @@ def cmd_score(args: argparse.Namespace) -> bool:
             review_data = json.load(f)
         ai_findings = review_data.get("findings_by_test", {})
         # Determine which tests the AI actually reviewed (not just flagged)
-        raw_results = {}
-        # Check the timestamped file for raw_results (reviewed but not flagged)
-        for candidate in sorted(
-            results_dir.glob(f"review-{lang}-*.json"), reverse=True
-        ):
-            if candidate.name.endswith("-latest.json"):
-                continue
-            with open(candidate) as f:
-                raw_data = json.load(f)
-            if raw_data.get("raw_results"):
-                raw_results = raw_data["raw_results"]
-                break
+        raw_results = review_data.get("raw_results", {})
+        if not raw_results:
+            # Fallback: check timestamped files for raw_results
+            for candidate in sorted(
+                results_dir.glob(f"review-{lang}-*.json"), reverse=True
+            ):
+                if candidate.name.endswith("-latest.json"):
+                    continue
+                with open(candidate) as f:
+                    raw_data = json.load(f)
+                if raw_data.get("raw_results"):
+                    raw_results = raw_data["raw_results"]
+                    break
         ai_reviewed = set(raw_results.keys()) | set(ai_findings.keys())
 
     # Merge: AI verdict takes precedence for reviewed files

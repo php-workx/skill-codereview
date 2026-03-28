@@ -296,7 +296,16 @@ class EvalOwaspTests(unittest.TestCase):
             ):
                 ok = self.mod.cmd_score(Namespace(lang="python"))
 
-        self.assertTrue(ok)
+            self.assertTrue(ok)
+            score_file = results_dir / "score-python-latest.json"
+            self.assertTrue(score_file.exists())
+            with open(score_file) as f:
+                score = json.load(f)
+            self.assertEqual(score["overall"]["avg_youden"], 1.0)
+            self.assertEqual(len(score["per_category"]), 1)
+            self.assertEqual(score["per_category"][0]["fp"], 0)
+            self.assertEqual(score["per_category"][0]["tp"], 1)
+            self.assertEqual(score["per_category"][0]["tn"], 1)
 
 
 if __name__ == "__main__":

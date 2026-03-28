@@ -1049,19 +1049,23 @@ class EvalStore:
         return [
             dict(r)
             for r in self.conn.execute(
-                """SELECT bp.language,
-                      COUNT(DISTINCT rp.benchmark_pr_id) AS prs,
-                      SUM(rp.cost_usd) AS total_cost,
-                      SUM(rp.findings_count) AS total_findings,
-                      SUM(CASE WHEN c.category IN ('confirmed_bug','confirmed_vuln','valid_concern') THEN 1 ELSE 0 END) AS real_findings,
-                      ROUND(SUM(rp.cost_usd) / NULLIF(
-                        SUM(CASE WHEN c.category IN ('confirmed_bug','confirmed_vuln','valid_concern') THEN 1 ELSE 0 END), 0
-                      ), 2) AS cost_per_real_finding
-               FROM run_prs rp
-               JOIN benchmark_prs bp ON rp.benchmark_pr_id = bp.id
-               LEFT JOIN findings f ON f.run_id = rp.run_id AND f.benchmark_pr_id = rp.benchmark_pr_id
-               LEFT JOIN classifications c ON c.finding_id = f.id
-               WHERE rp.run_id = ?
+                """WITH pr_stats AS (
+                       SELECT rp.run_id, rp.benchmark_pr_id, rp.cost_usd, rp.findings_count,
+                              COUNT(DISTINCT CASE WHEN c.category IN ('confirmed_bug','confirmed_vuln','valid_concern') THEN f.id END) AS real_findings
+                       FROM run_prs rp
+                       LEFT JOIN findings f ON f.run_id = rp.run_id AND f.benchmark_pr_id = rp.benchmark_pr_id
+                       LEFT JOIN classifications c ON c.finding_id = f.id
+                       WHERE rp.run_id = ?
+                       GROUP BY rp.run_id, rp.benchmark_pr_id, rp.cost_usd, rp.findings_count
+                   )
+                   SELECT bp.language,
+                      COUNT(DISTINCT ps.benchmark_pr_id) AS prs,
+                      SUM(ps.cost_usd) AS total_cost,
+                      SUM(ps.findings_count) AS total_findings,
+                      SUM(ps.real_findings) AS real_findings,
+                      ROUND(SUM(ps.cost_usd) / NULLIF(SUM(ps.real_findings), 0), 2) AS cost_per_real_finding
+               FROM pr_stats ps
+               JOIN benchmark_prs bp ON ps.benchmark_pr_id = bp.id
                GROUP BY bp.language
                ORDER BY cost_per_real_finding DESC""",
                 (run_id,),
@@ -1118,17 +1122,23 @@ class EvalStore:
 
     def query_stability(self, benchmark_id: str | None = None) -> list[dict]:
         """Cross-run finding stability — same PR, different runs: how many findings overlap?"""
-        query = """SELECT f1.benchmark_pr_id,
+        query = """WITH per_run AS (
+                       SELECT run_id, benchmark_pr_id, COUNT(*) AS total
+                       FROM findings GROUP BY run_id, benchmark_pr_id
+                   )
+                   SELECT f1.benchmark_pr_id,
                       r1.id AS run_a, r2.id AS run_b,
-                      COUNT(DISTINCT f1.id) AS findings_a,
-                      COUNT(DISTINCT f2.id) AS findings_b,
-                      COUNT(DISTINCT CASE WHEN f1.summary = f2.summary THEN f1.id END) AS exact_overlap
+                      pa.total AS findings_a,
+                      pb.total AS findings_b,
+                      COUNT(DISTINCT f1.id) AS exact_overlap
                FROM findings f1
                JOIN findings f2 ON f1.benchmark_pr_id = f2.benchmark_pr_id
                                 AND f1.summary = f2.summary
                                 AND f1.run_id != f2.run_id
                JOIN runs r1 ON f1.run_id = r1.id
-               JOIN runs r2 ON f2.run_id = r2.id"""
+               JOIN runs r2 ON f2.run_id = r2.id
+               JOIN per_run pa ON pa.run_id = f1.run_id AND pa.benchmark_pr_id = f1.benchmark_pr_id
+               JOIN per_run pb ON pb.run_id = f2.run_id AND pb.benchmark_pr_id = f2.benchmark_pr_id"""
         params: list[str] = []
         if benchmark_id is not None:
             query += """ WHERE r1.benchmark_id = ? AND r2.benchmark_id = ?

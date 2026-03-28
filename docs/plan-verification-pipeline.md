@@ -2,7 +2,7 @@
 
 Twelve features focused on review precision, judge architecture, plan compliance, and output integration. Where v1.3 enriches what explorers *see* (context, checklists, prescan signals), Verification Pipeline improves what happens *after* explorers report — verification, synthesis, and how findings reach the user. Features 0-7 come from the initial design and Kodus-AI analysis. Features 8-10 are informed by analysis of the PR-Agent (Qodo) code review platform (local path `~/workspaces/pr-agent`). Feature 11 comes from CodeRabbit gap analysis around adaptive expert selection and shell-script coverage.
 
-### Relationship to v1.3
+## Relationship to v1.3
 
 | v1.3 Feature | Relevance to Verification Pipeline |
 |-------------|-------------------|
@@ -482,7 +482,7 @@ See `docs/research-multi-model-council.md` for broader research on multi-model a
 
 ### Architecture
 
-```
+```text
 Judge produces findings
     │
     ▼
@@ -1303,7 +1303,7 @@ For bash scripts that construct structured data (JSON, YAML, XML, SQL):
   "failure_mode": "On malformed input, the validation script crashes instead of reporting a clean FAIL. The review pipeline sees exit code 5 (jq error) instead of exit code 1 (validation failure).",
   "fix": "After the type check fails, set FINDING_COUNT=0 and skip all per-finding validation blocks: if [ \"$(jq '.findings | type' ...)\" != '\"array\"' ]; then FINDING_COUNT=0; else FINDING_COUNT=$(jq '.findings | length' ...); fi"
 }
-```text
+```
 
 ### True Positive — JSON Injection via Bash Interpolation (Medium Confidence)
 ```json
