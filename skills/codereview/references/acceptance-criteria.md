@@ -159,6 +159,70 @@ Validation criteria for the codereview skill. Not needed at runtime — use for 
 | Monorepo with multiple project contexts | `discover-project.py` groups files by context, agent interprets each context's build files |
 | Empty CHANGED_FILES | All scripts produce valid JSON with empty findings/hotspots/contexts |
 
+## Code Intelligence Module (F0c: `scripts/code_intel.py`)
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| tree-sitter installed | `code_intel.py` subcommands use AST parsing. Output includes `"analyzer": "tree-sitter"`. All 6 patterns checked including `unused-import`, `unreachable-code`, `resource-leak`. |
+| tree-sitter not installed | Falls back to regex-only mode. Output includes `"analyzer": "regex-only"`. `treesitter_only` patterns (`unused-import`, `unreachable-code`, `resource-leak`) are skipped. |
+| radon available, Python files in diff | `code_intel.py complexity` uses radon for Python files. `tool_status.radon: "ran"`. |
+| gocyclo available, Go files in diff | `code_intel.py complexity` uses gocyclo for Go files. `tool_status.gocyclo: "ran"`. |
+| Neither radon nor gocyclo | Falls back to regex branch counting. Complexity scores still produced (lower accuracy). `tool_status` shows `"not_installed"` for missing tools. |
+| `code_intel.py patterns` with semgrep absent | Produces deterministic findings with `source: "deterministic"`, `confidence: 1.0` for regex-matchable patterns (sql-injection, command-injection, empty-error-handler). |
+| python3 not available | `code_intel.py` cannot run. Orchestrator logs warning, skips code intelligence. Review proceeds without complexity/functions/patterns context. |
+| Script produces invalid JSON | Orchestrator validates with `jq`, falls back to manual execution if invalid. |
+| Script crashes (non-zero exit) | Orchestrator logs stderr, skips code intelligence context, continues with review. |
+| Per-language output | Each subcommand respects `EXTENSION_MAP` — only processes files with known extensions. Unknown extensions are silently skipped. |
+
+## Enrichment Script (F0b: `scripts/enrich-findings.py`)
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| Confidence below floor (< 0.65) | Finding is removed from `findings[]` array. Count reflected in enrichment summary. |
+| Evidence downgrade | Finding with `severity: "high"` or `"critical"` but no `failure_mode` populated has confidence reduced by 0.15. If confidence drops below 0.65, finding is removed. |
+| Tier assignment | Each finding receives `action_tier`: Must Fix (critical/high), Should Fix (medium), Consider (low). Classification is deterministic based on severity. |
+| `llm_prompt` generation | Script produces a summary prompt field for downstream LLM consumption based on enriched findings. |
+| Empty findings input | Valid JSON output with `"findings": []`. No crash, no enrichment errors. |
+
+## Prescan Signal Detection (F1: `scripts/prescan.py`)
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| All checkers active | `prescan.py` runs all `PatternChecker` subclasses (P-SEC, P-ERR, P-LEN, P-TODO, P-COMMENT, P-DEAD, P-STUB, P-UNWIRED). Outputs JSON with per-file signals. |
+| Regex fallback (no tree-sitter) | All regex-based checkers produce signals. P-UNWIRED returns empty (requires import graph). Output includes `"mode": "regex"`. |
+| Per-language checks | Function extraction uses language-specific regex from `_FUNC_START_RE`. Python uses indentation-based end detection; brace languages use brace counting. |
+| python3 not available | `prescan.py` cannot run. Orchestrator logs warning, skips prescan. Explorers still work without prescan context. |
+| Empty CHANGED_FILES or no matching files | Valid JSON with `"files": []`, `"signals": []`. No crash. |
+| Wall-clock timeout (15s) or per-file timeout (0.5s) | Prescan terminates gracefully. Partial results for already-processed files are returned. |
+
+## Domain Checklists (F2)
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| SQL patterns detected in diff | SQL domain checklist loaded. Explorer prompts include SQL-specific investigation items (injection, N+1, missing indexes, transaction safety). |
+| LLM/AI patterns detected | LLM domain checklist loaded with prompt injection, token limit, and model API checks. |
+| Concurrency patterns detected | Concurrency domain checklist loaded with race condition, deadlock, and shared state checks. |
+| Multiple domains detected | All matching checklists loaded and concatenated. Token budget respected — least-relevant checklist dropped first if over budget. |
+| No domain patterns detected | No checklists loaded. Explorer prompts omit the domain checklist section entirely. |
+
+## Cross-File Planner (F12)
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| Symmetric operation detected (e.g., serialize/deserialize) | Planner identifies cross-file relationship. Explorer prompts include instructions to verify both sides are consistent. |
+| No cross-file relationships | Planner returns empty results. Explorer prompts omit cross-file context section. No wasted tokens. |
+| Planner timeout | Orchestrator enforces timeout on Haiku call. Falls back to no cross-file context. Review proceeds normally. |
+| Malformed JSON from planner | Orchestrator validates response, discards malformed output. Logs warning. Review proceeds without cross-file context. |
+
+## REVIEW.md Directives (F13)
+
+| Scenario | Expected Behavior |
+|----------|-------------------|
+| `REVIEW.md` present in repo root | Directives parsed and injected into explorer prompts under `review_md_directives` section. Token budget respected (P6 priority, 800 token cap). |
+| `REVIEW.md` absent | No directives loaded. Explorer prompts omit the directives section. No error, no warning. |
+| `REVIEW.md` partially populated | Valid sections are loaded; empty or malformed sections are skipped. |
+| `REVIEW.md` combined with `.codereview.yaml` | Both are loaded independently. Config YAML controls pipeline behavior; REVIEW.md provides review prose directives. No conflict — complementary sources. |
+
 ## Validation Script
 
 ```bash

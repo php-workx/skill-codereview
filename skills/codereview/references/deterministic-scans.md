@@ -206,6 +206,49 @@ Record `tool_status` for each tool (`ran` / `skipped` / `not_installed` / `sandb
 | `ai_spec_verification` | Explorer: spec verification (extended) |
 | `ai_judge` | Review judge |
 
+## `code_intel.py patterns` — Lightweight Semgrep Fallback
+
+When semgrep is not installed, `scripts/code_intel.py patterns` provides a regex-based fallback for the most common static analysis checks. It activates automatically — the orchestrator calls it as part of deterministic scan collection when semgrep is absent.
+
+### Patterns checked (6)
+
+| Pattern | Severity | Requires tree-sitter | What it detects |
+|---------|----------|---------------------|-----------------|
+| `sql-injection` | high | No | String concatenation or f-strings in SQL execution calls (`execute`, `query`, `cursor.execute`) |
+| `command-injection` | high | No | String concatenation or f-strings in command execution calls (`subprocess.run`, `os.system`, `popen`) |
+| `empty-error-handler` | medium | No | Exception/catch blocks with empty bodies (`except ...: pass`, `catch(...) {}`) |
+| `unused-import` | low | Yes | Imported symbol not referenced anywhere in the file |
+| `unreachable-code` | low | Yes | Code after `return`/`raise`/`throw` statements |
+| `resource-leak` | medium | Yes | `open()`/`connect()` without matching `close()` |
+
+Without tree-sitter, only the first 3 patterns (regex-matchable) are checked. The remaining 3 require AST analysis and are silently skipped.
+
+### Output format
+
+Findings use the same shape as `run-scans.sh` normalized output:
+
+```json
+{
+  "pattern": "sql-injection",
+  "severity": "high",
+  "file": "src/db.py",
+  "line": 42,
+  "summary": "String concatenation/f-string in SQL execution call",
+  "evidence": "cursor.execute(f\"SELECT * FROM users WHERE id = {user_id}\")",
+  "source": "deterministic",
+  "confidence": 1.0
+}
+```
+
+The top-level response includes `"analyzer": "tree-sitter"` or `"analyzer": "regex-only"` so the orchestrator knows which mode was used.
+
+### Limitations vs semgrep
+
+- **Far fewer rules:** 6 patterns vs semgrep's thousands of community rules. Only covers the highest-signal checks.
+- **Regex-based matching:** Without tree-sitter, patterns match syntactically — they cannot distinguish string interpolation inside a parameterized query wrapper from actual injection risks. Higher false-positive rate than semgrep's semantic analysis.
+- **No custom rules:** Semgrep supports project-specific `.semgrep.yml` rules; `code_intel.py patterns` has a fixed pattern set.
+- **No cross-function analysis:** Each pattern matches within a single line or small block. Semgrep's taint tracking and dataflow analysis are not replicated.
+
 ## Tool Status Classification Rules
 
 - `not_installed`: command not found on PATH.
