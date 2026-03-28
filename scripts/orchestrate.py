@@ -23,6 +23,18 @@ try:
 except ImportError:  # pragma: no cover - exercised in tests via monkeypatch.
     yaml = None
 
+# Resolve the skill directory that contains prompts/, scripts/, references/.
+# When installed (e.g. ~/.claude/skills/codereview/scripts/orchestrate.py),
+# the skill root is one level up from scripts/.
+# When running from the dev repo (scripts/orchestrate.py at repo root),
+# the skill root is at skills/codereview/ under the repo root.
+_SCRIPT_PARENT = Path(__file__).resolve().parent.parent
+SKILL_DIR = (
+    _SCRIPT_PARENT
+    if (_SCRIPT_PARENT / "prompts" / "reviewer-global-contract.md").exists()
+    else _SCRIPT_PARENT / "skills" / "codereview"
+)
+
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "cadence": "manual",
@@ -641,7 +653,7 @@ def _prompt_path_for_expert(expert_name: str) -> Path:
         filename = EXPERT_PROMPT_FILES[expert_name]
     except KeyError as exc:
         raise ValueError(f"Unknown expert {expert_name!r}") from exc
-    return detect_repo_root() / "skills" / "codereview" / "prompts" / filename
+    return SKILL_DIR / "prompts" / filename
 
 
 _SUPPRESS_MISSING_TESTS = """\
@@ -1073,11 +1085,10 @@ def load_language_standards(changed_files: list[str]) -> str:
     if not languages:
         return ""
 
-    repo_root = detect_repo_root()
     sections: list[str] = []
     for language in languages:
         candidates = [
-            repo_root / "skills" / "codereview" / "references" / f"{language}.md",
+            SKILL_DIR / "references" / f"{language}.md",
             Path.home()
             / ".claude"
             / "skills"
@@ -1152,9 +1163,9 @@ def _apply_spec_scope(spec_content: str, spec_scope: str | None) -> str:
     return spec_content
 
 
-def validate_prompt_files(repo_root: Path) -> None:
+def validate_prompt_files() -> None:
     """Ensure required prompt files exist before prepare runs."""
-    prompts_dir = repo_root / "skills" / "codereview" / "prompts"
+    prompts_dir = SKILL_DIR / "prompts"
     required = {
         prompts_dir / "reviewer-global-contract.md",
         prompts_dir / "reviewer-judge.md",
@@ -1424,7 +1435,7 @@ def prepare(args: argparse.Namespace) -> int:
     progress("prepare_started")
     phase_started = time.monotonic()
     repo_root = detect_repo_root()
-    validate_prompt_files(repo_root)
+    validate_prompt_files()
     try:
         session_dir = _ensure_session_dir(args, create_if_missing=True)
     except ValueError as exc:
@@ -1479,7 +1490,7 @@ def prepare(args: argparse.Namespace) -> int:
         )
         changed_files_input = _changed_files_input(diff_result.changed_files)
 
-        scripts_dir = repo_root / "skills" / "codereview" / "scripts"
+        scripts_dir = SKILL_DIR / "scripts"
         progress("prepare_step", step=3, total=8, message="Discovering project")
         discover_result = run_subprocess_json(
             ["python3", str(scripts_dir / "discover-project.py")],
@@ -1813,9 +1824,13 @@ def post_explorers(args: argparse.Namespace) -> int:
     progress("post_explorers_started")
     phase_started = time.monotonic()
     session_dir = _ensure_session_dir(args, create_if_missing=False)
-    launch_packet = json.loads(
-        (session_dir / "launch.json").read_text(encoding="utf-8")
-    )
+    try:
+        launch_packet = json.loads(
+            (session_dir / "launch.json").read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+        progress("post_explorers_error", error=f"Cannot read launch.json: {exc}")
+        return 1
     launch_status = launch_packet.get("status", "ready")
     if launch_status != "ready":
         skipped = {
@@ -2128,9 +2143,13 @@ def finalize(args: argparse.Namespace) -> int:
     phase_started = time.monotonic()
     session_dir = _ensure_session_dir(args, create_if_missing=False)
     repo_root = detect_repo_root()
-    launch_packet = json.loads(
-        (session_dir / "launch.json").read_text(encoding="utf-8")
-    )
+    try:
+        launch_packet = json.loads(
+            (session_dir / "launch.json").read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+        progress("finalize_error", error=f"Cannot read launch.json: {exc}")
+        return 1
     launch_status = launch_packet.get("status", "ready")
     if launch_status != "ready":
         skipped = {
@@ -2149,7 +2168,7 @@ def finalize(args: argparse.Namespace) -> int:
     judge_output_path = Path(args.judge_output or judge_output_default)
     judge_output = extract_json_from_text(judge_output_path.read_text(encoding="utf-8"))
 
-    scripts_dir = repo_root / "skills" / "codereview" / "scripts"
+    scripts_dir = SKILL_DIR / "scripts"
     scan_results_path = session_dir / "scan-results.json"
     scan_results_path.write_text(
         json.dumps(launch_packet.get("scan_results", {}), indent=2), encoding="utf-8"

@@ -499,24 +499,40 @@ def review_batch(files: list[TestCase], cwe_list: str, lang: str) -> list[dict]:
         except json.JSONDecodeError:
             pass
 
-        # Fallback: find the largest JSON array in the text
-        best = []
-        for m in re.finditer(r"\[", text):
-            start = m.start()
-            # Try progressively longer substrings from this [
-            for end in range(len(text), start, -1):
-                if text[end - 1] == "]":
-                    try:
-                        parsed = json.loads(text[start:end])
-                        if isinstance(parsed, list) and len(parsed) > len(best):
-                            if all(isinstance(x, dict) for x in parsed):
-                                best = parsed
+        # Fallback: bracket-balanced extraction
+        for start_match in re.finditer(r"\[", text):
+            start = start_match.start()
+            depth = 0
+            in_str = False
+            esc = False
+            for i in range(start, len(text)):
+                ch = text[i]
+                if esc:
+                    esc = False
+                    continue
+                if ch == "\\":
+                    esc = True
+                    continue
+                if ch == '"' and not esc:
+                    in_str = not in_str
+                    continue
+                if in_str:
+                    continue
+                if ch == "[":
+                    depth += 1
+                elif ch == "]":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            parsed = json.loads(text[start : i + 1])
+                            if isinstance(parsed, list) and all(
+                                isinstance(x, dict) for x in parsed
+                            ):
+                                return parsed
+                        except json.JSONDecodeError:
+                            pass
                         break
-                    except json.JSONDecodeError:
-                        continue
-            if best:
-                break
-        return best
+        return []
     except (subprocess.TimeoutExpired, FileNotFoundError):
         raise
 

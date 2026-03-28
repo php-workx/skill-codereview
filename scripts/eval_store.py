@@ -330,9 +330,9 @@ class EvalStore:
             return ""
 
     def create_run(self, benchmark_id: str, config: dict | None = None) -> str:
-        run_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[
-            :19
-        ]  # include microseconds for uniqueness
+        run_id = datetime.now().strftime(
+            "%Y%m%d-%H%M%S-%f"
+        )  # include microseconds for uniqueness
         self.conn.execute(
             """INSERT INTO runs(id, benchmark_id, timestamp, skill_git_hash, config_json,
                orchestrator_model, explorer_model, judge_model)
@@ -377,7 +377,7 @@ class EvalStore:
                 if key == "benchmark_metrics_json":
                     value = json.dumps(value) if value is not None else None
                 vals.append(value)
-        if "benchmark_metrics" in metrics:
+        if "benchmark_metrics" in metrics and "benchmark_metrics_json" not in metrics:
             sets.append("benchmark_metrics_json = ?")
             vals.append(
                 json.dumps(metrics["benchmark_metrics"])

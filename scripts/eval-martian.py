@@ -688,12 +688,13 @@ def run_single_review(
     if not findings and num_turns <= 2 and elapsed > 30:
         with _print_lock:
             print(
-                f"    [{pr.pr_id}] 0 findings in {num_turns} turns ({elapsed:.0f}s) — retrying..."
+                f"    [{pr.pr_id}] 0 findings in {num_turns} turns ({elapsed:.0f}s) — recovering..."
             )
-        # Also check doubled path
+        # Check for findings file written by skill at a doubled path
         for candidate in repo_dir.rglob(f".eval-findings-{pr.pr_id}.json"):
             try:
-                recovered = json.load(open(candidate))
+                with open(candidate) as fh:
+                    recovered = json.load(fh)
                 if isinstance(recovered, list) and recovered:
                     findings = recovered
                     with _print_lock:
@@ -703,6 +704,10 @@ def run_single_review(
                     break
             except (json.JSONDecodeError, TypeError):
                 pass
+        if not findings:
+            with _print_lock:
+                print(f"    [{pr.pr_id}] Recovery failed — marking as failed")
+            return False
 
     # Save findings + metadata together
     output_file = reviews_dir / f"{pr.pr_id}.json"
@@ -735,15 +740,39 @@ def run_single_review(
 
 
 def _extract_json_array(text: str) -> list[dict]:
-    """Try to find and parse a JSON array from unstructured text."""
-    # Look for JSON arrays (greedy, try largest matches first)
-    for m in re.finditer(r"\[[\s\S]*?\]", text):
-        try:
-            arr = json.loads(m.group())
-            if isinstance(arr, list) and all(isinstance(x, dict) for x in arr):
-                return arr
-        except json.JSONDecodeError:
-            continue
+    """Try to find and parse a JSON array from unstructured text using bracket balancing."""
+    for start_match in re.finditer(r"\[", text):
+        start = start_match.start()
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"' and not escape:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        arr = json.loads(text[start : i + 1])
+                        if isinstance(arr, list) and all(
+                            isinstance(x, dict) for x in arr
+                        ):
+                            return arr
+                    except json.JSONDecodeError:
+                        pass
+                    break
     return []
 
 
@@ -889,7 +918,8 @@ def judge_batch(pairs: list[tuple[int, int, str, str]], model: str) -> list[dict
         f'[{i + 1}] Golden: "{g[:300]}" | Candidate: "{c[:300]}"'
         for i, (_, _, g, c) in enumerate(pairs)
     )
-    prompt = JUDGE_BATCH_PROMPT.format(pairs_text=pairs_text)
+    safe_pairs = pairs_text.replace("{", "{{").replace("}", "}}")
+    prompt = JUDGE_BATCH_PROMPT.format(pairs_text=safe_pairs)
 
     try:
         r = subprocess.run(
@@ -1200,34 +1230,33 @@ def cmd_judge(args: argparse.Namespace) -> bool:
 
     # Auto-ingest into SQLite
     try:
-        store = _get_store()
-        store.ensure_benchmark(
-            "martian-offline",
-            "Martian CodeReBench Offline",
-            "https://codereview.withmartian.com/",
-        )
-        prs = load_prs()
-        for pr_data in prs:
-            bp_id = store.ensure_benchmark_pr(
+        with _get_store() as store:
+            store.ensure_benchmark(
                 "martian-offline",
-                {
-                    "pr_id": pr_data.pr_id,
-                    "repo_key": pr_data.repo_key,
-                    "language": pr_data.language,
-                    "pr_title": pr_data.pr_title,
-                    "pr_number": pr_data.pr_number,
-                    "commit_sha": pr_data.commit_sha,
-                },
+                "Martian CodeReBench Offline",
+                "https://codereview.withmartian.com/",
             )
-            store.ensure_golden_comments(
-                bp_id,
-                [
-                    {"comment": g.comment, "severity": g.severity}
-                    for g in pr_data.golden_comments
-                ],
-            )
-        run_id = store.import_from_json("martian-offline", output, reviews_dir)
-        store.close()
+            prs = load_prs()
+            for pr_data in prs:
+                bp_id = store.ensure_benchmark_pr(
+                    "martian-offline",
+                    {
+                        "pr_id": pr_data.pr_id,
+                        "repo_key": pr_data.repo_key,
+                        "language": pr_data.language,
+                        "pr_title": pr_data.pr_title,
+                        "pr_number": pr_data.pr_number,
+                        "commit_sha": pr_data.commit_sha,
+                    },
+                )
+                store.ensure_golden_comments(
+                    bp_id,
+                    [
+                        {"comment": g.comment, "severity": g.severity}
+                        for g in pr_data.golden_comments
+                    ],
+                )
+            run_id = store.import_from_json("martian-offline", output, reviews_dir)
         print(f"Ingested into DB as run {run_id}")
     except Exception as e:
         print(f"DB ingest warning: {e}")
@@ -1569,7 +1598,9 @@ def classify_pr(
         for i, f in enumerate(findings)
     )
 
-    prompt = CLASSIFY_PROMPT.format(diff=diff_text, findings_text=findings_text)
+    safe_diff = diff_text.replace("{", "{{").replace("}", "}}")
+    safe_findings = findings_text.replace("{", "{{").replace("}", "}}")
+    prompt = CLASSIFY_PROMPT.format(diff=safe_diff, findings_text=safe_findings)
     tmp = EVAL_DIR / "classify-tmp"
     tmp.mkdir(exist_ok=True)
 
@@ -1780,31 +1811,28 @@ def cmd_classify(args: argparse.Namespace) -> bool:
 
     # Auto-ingest classifications into DB (attach to latest run)
     try:
-        store = _get_store()
-        latest_run = store._latest_run_id("martian-offline")
-        if latest_run:
-            for pr_cls in all_results:
-                bp_id = f"martian-offline:{pr_cls['pr_id']}"
-                findings = store.conn.execute(
-                    "SELECT id, finding_index FROM findings WHERE run_id=? AND benchmark_pr_id=? ORDER BY finding_index",
-                    (latest_run, bp_id),
-                ).fetchall()
-                fid_map = {row["finding_index"]: row["id"] for row in findings}
-                for cls in pr_cls.get("classifications", []):
-                    fid = fid_map.get(cls.get("finding_index"))
-                    if fid:
-                        store.save_classification(fid, latest_run, cls)
-            store.update_run_metrics(
-                latest_run,
-                {
-                    "adjusted_precision": agg_adj_p,
-                    "inclusive_precision": agg_inc_p,
-                },
-            )
-            store.close()
-            print(f"Ingested classifications into DB (run {latest_run})")
-        else:
-            store.close()
+        with _get_store() as store:
+            latest_run = store._latest_run_id("martian-offline")
+            if latest_run:
+                for pr_cls in all_results:
+                    bp_id = f"martian-offline:{pr_cls['pr_id']}"
+                    findings = store.conn.execute(
+                        "SELECT id, finding_index FROM findings WHERE run_id=? AND benchmark_pr_id=? ORDER BY finding_index",
+                        (latest_run, bp_id),
+                    ).fetchall()
+                    fid_map = {row["finding_index"]: row["id"] for row in findings}
+                    for cls in pr_cls.get("classifications", []):
+                        fid = fid_map.get(cls.get("finding_index"))
+                        if fid:
+                            store.save_classification(fid, latest_run, cls)
+                store.update_run_metrics(
+                    latest_run,
+                    {
+                        "adjusted_precision": agg_adj_p,
+                        "inclusive_precision": agg_inc_p,
+                    },
+                )
+                print(f"Ingested classifications into DB (run {latest_run})")
     except Exception as e:
         print(f"DB ingest warning: {e}")
 

@@ -313,14 +313,12 @@ class OrchestrateAlignmentTests(unittest.TestCase):
 
     def test_load_language_standards_reads_local_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            reference = repo_root / "skills" / "codereview" / "references" / "python.md"
+            skill_dir = Path(tmpdir) / "skills" / "codereview"
+            reference = skill_dir / "references" / "python.md"
             reference.parent.mkdir(parents=True)
             reference.write_text("Prefer typed functions.\n", encoding="utf-8")
 
-            with mock.patch(
-                "scripts.orchestrate.detect_repo_root", return_value=repo_root
-            ):
+            with mock.patch("scripts.orchestrate.SKILL_DIR", skill_dir):
                 standards = load_language_standards(["src/app.py"])
 
             self.assertIn("Prefer typed functions.", standards)

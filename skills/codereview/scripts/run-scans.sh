@@ -88,7 +88,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC2034  # RUN_ID exported for sub-scripts
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SCRATCH="$(mktemp -d /tmp/codereview-scans-XXXXXX)"
-trap 'rm -rf "$SCRATCH" "${SONAR_OUT_DIR:-}"' EXIT INT TERM
+trap 'rm -rf "$SCRATCH"' EXIT INT TERM
 
 # ---------------------------------------------------------------------------
 # Language detection from CHANGED_FILES
@@ -589,37 +589,6 @@ normalize_pmd() {
   ' 2>/dev/null || echo '[]'
 }
 
-normalize_sonarqube() {
-	jq '
-    [(.issues // [])[] |
-      {
-        file: (.component // "unknown" | sub("^[^:]*:"; "")),
-        line: (.line // 0),
-        summary: (.message // "sonarqube issue"),
-        severity: (
-          if .severity == "BLOCKER" then "critical"
-          elif .severity == "CRITICAL" then "high"
-          elif .severity == "MAJOR" then "medium"
-          elif .severity == "MINOR" then "low"
-          elif .severity == "INFO" then "low"
-          else "medium"
-          end
-        ),
-        confidence: 1.0,
-        evidence: ((.rule // "") + (if .effort then " effort=" + .effort else "" end)),
-        pass: (
-          if (.type // "" | test("BUG")) then "correctness"
-          elif (.type // "" | test("VULNERABILITY")) then "security"
-          else "maintainability"
-          end
-        ),
-        source: "deterministic",
-        tool: "sonarqube"
-      }
-    ]
-  ' 2>/dev/null || echo '[]'
-}
-
 normalize_precommit() {
 	# pre-commit outputs plain text, not JSON. We create a single finding
 	# from the output if non-empty.
@@ -1092,8 +1061,8 @@ for tool_key in semgrep ast_grep trivy gitleaks shellcheck actionlint clippy ruf
 		actionlint)
 			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
 				if [ -s "$SCRATCH/actionlint.out" ]; then
-					# actionlint -format json outputs one JSON object per line
-					jq -s '[.[] | {file: .filepath, line: .line, tool: "actionlint", source: "actionlint", summary: .message, evidence: .message, pass: false, confidence: "medium", rule_id: .kind}]' \
+					# actionlint -format '{{json .}}' outputs a single JSON array
+					jq '[.[] | {file: .filepath, line: .line, tool: "actionlint", source: "deterministic", summary: .message, evidence: .message, severity: "medium", pass: "security", confidence: 1.0, rule_id: .kind}]' \
 						<"$SCRATCH/actionlint.out" >"$SCRATCH/findings/actionlint.json" 2>/dev/null || echo '[]' >"$SCRATCH/findings/actionlint.json"
 				else
 					echo '[]' >"$SCRATCH/findings/actionlint.json"
@@ -1300,35 +1269,6 @@ if [ -f "$SCRATCH/pre_commit.status" ]; then
 		log "pre_commit: ${local_count} findings (status=${status})"
 	else
 		record_status "pre_commit" "$status" "$version" 0
-	fi
-fi
-
-# sonarqube
-if [ -f "$SCRATCH/sonarqube.status" ]; then
-	status="$(cat "$SCRATCH/sonarqube.status")"
-	version="$(get_version sonarqube)"
-	if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
-		# sonarqube output may be in the output dir or in the tool's stdout
-		SONAR_FINDINGS=""
-		if [ -f "$SONAR_OUT_DIR/findings.json" ]; then
-			SONAR_FINDINGS="$SONAR_OUT_DIR/findings.json"
-		elif [ -s "$SCRATCH/sonarqube.out" ]; then
-			SONAR_FINDINGS="$SCRATCH/sonarqube.out"
-		fi
-		if [ -n "$SONAR_FINDINGS" ]; then
-			normalize_sonarqube <"$SONAR_FINDINGS" >"$SCRATCH/findings/sonarqube.json"
-		else
-			echo '[]' >"$SCRATCH/findings/sonarqube.json"
-		fi
-		local_count=0
-		if [ -f "$SCRATCH/findings/sonarqube.json" ]; then
-			local_count="$(jq 'length // 0' "$SCRATCH/findings/sonarqube.json" 2>/dev/null || echo 0)"
-			case "$local_count" in '' | *[!0-9]*) local_count=0 ;; esac
-		fi
-		record_status "sonarqube" "$status" "$version" "$local_count"
-		log "sonarqube: ${local_count} findings (status=${status})"
-	else
-		record_status "sonarqube" "$status" "$version" 0
 	fi
 fi
 

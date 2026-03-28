@@ -343,6 +343,22 @@ assert_json_field "ruff F821 maps to high severity" "$RUFF_NORM" \
 	"any(f['evidence']=='F821' and f['severity']=='high' for f in d)"
 rm -f "$TEST_TMPDIR/test-ruff-input.json"
 
+# 5j2. Actionlint normalizer produces valid schema-conformant findings
+ACTIONLINT_INPUT='[{"filepath":".github/workflows/ci.yml","line":10,"column":5,"message":"unexpected key \"on\"","kind":"syntax-check","level":"error"}]'
+echo "$ACTIONLINT_INPUT" >"$TEST_TMPDIR/test-actionlint-input.json"
+ACTIONLINT_NORM=$(jq '[.[] | {file: .filepath, line: .line, tool: "actionlint", source: "deterministic", summary: .message, evidence: .message, severity: "medium", pass: "security", confidence: 1.0, rule_id: .kind}]' \
+	<"$TEST_TMPDIR/test-actionlint-input.json" 2>/dev/null || echo '[]')
+assert_json_valid "actionlint normalizer produces valid JSON" "$ACTIONLINT_NORM"
+assert_json_field "actionlint source is deterministic" "$ACTIONLINT_NORM" \
+	"all(f['source']=='deterministic' for f in d)"
+assert_json_field "actionlint pass is a string" "$ACTIONLINT_NORM" \
+	"all(isinstance(f['pass'], str) for f in d)"
+assert_json_field "actionlint confidence is a float" "$ACTIONLINT_NORM" \
+	"all(isinstance(f['confidence'], float) for f in d)"
+assert_json_field "actionlint has severity field" "$ACTIONLINT_NORM" \
+	"all('severity' in f for f in d)"
+rm -f "$TEST_TMPDIR/test-actionlint-input.json"
+
 # 5k. osv-scanner has been removed in favor of trivy
 if grep -Fq 'record_status "osv_scanner" "removed"' "$SCRIPTS/run-scans.sh"; then
 	pass "run-scans.sh marks osv-scanner as removed"

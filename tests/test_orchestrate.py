@@ -462,20 +462,33 @@ class OrchestratePlumbingTests(unittest.TestCase):
                 diff_text="@@\n+two\n",
             )
 
-            side_effect = [
-                {"language": "python"},
-                {"hotspots": [{"file": "tracked.txt", "score": "C"}]},
-                {"tiers": [{"file": "tracked.txt", "tier": "high"}]},
-                {"findings": [{"tool": "semgrep"}]},
-                {"coverage": [{"file": "tracked.txt", "lines": 75}]},
-            ]
+            context_responses = {
+                "discover-project.py": {"language": "python"},
+                "complexity.sh": {"hotspots": [{"file": "tracked.txt", "score": "C"}]},
+                "git-risk.sh": {"tiers": [{"file": "tracked.txt", "tier": "high"}]},
+                "run-scans.sh": {"findings": [{"tool": "semgrep"}]},
+                "coverage-collect.py": {
+                    "coverage": [{"file": "tracked.txt", "lines": 75}]
+                },
+            }
+
+            def fake_run(command, *args, **kwargs):
+                from pathlib import Path
+
+                name = next(
+                    (Path(p).name for p in command if p.endswith((".py", ".sh"))),
+                    None,
+                )
+                if name and name in context_responses:
+                    return context_responses[name]
+                return {}
 
             with (
                 mock.patch(
                     "scripts.orchestrate.extract_diff", return_value=diff_result
                 ),
                 mock.patch(
-                    "scripts.orchestrate.run_subprocess_json", side_effect=side_effect
+                    "scripts.orchestrate.run_subprocess_json", side_effect=fake_run
                 ),
                 mock.patch(
                     "scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT

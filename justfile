@@ -1,5 +1,5 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
-test_modules := "tests.test_orchestrate tests.test_orchestrate_prepare tests.test_orchestrate_json tests.test_orchestrate_phases tests.test_orchestrate_alignment"
+test_modules := "tests.test_orchestrate tests.test_orchestrate_prepare tests.test_orchestrate_json tests.test_orchestrate_phases tests.test_orchestrate_alignment tests.test_eval_store tests.test_eval_owasp"
 
 default:
   @just --list
