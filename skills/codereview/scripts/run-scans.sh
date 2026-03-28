@@ -721,6 +721,34 @@ if command -v semgrep >/dev/null 2>&1; then
 else
 	log "semgrep: not installed"
 	record_status "semgrep" "not_installed" "null" 0 "pip install semgrep"
+
+	# --- code_intel.py patterns fallback (when semgrep is unavailable) ---
+	CODE_INTEL_SCRIPT="$SCRIPT_DIR/../../../scripts/code_intel.py"
+	if command -v python3 >/dev/null 2>&1 && [ -f "$CODE_INTEL_SCRIPT" ]; then
+		log "code_intel patterns: running as semgrep fallback"
+		(
+			PATTERN_OUT="$SCRATCH/code_intel_patterns.out"
+			printf '%s\n' "${FILES[@]}" | python3 "$CODE_INTEL_SCRIPT" patterns >"$PATTERN_OUT" 2>/dev/null
+			PATTERN_RC=$?
+			if [ "$PATTERN_RC" -eq 0 ] && [ -s "$PATTERN_OUT" ]; then
+				# code_intel.py patterns output already uses the standard finding shape
+				# (source: "deterministic", confidence: 1.0). Extract findings array.
+				jq '.findings // []' "$PATTERN_OUT" >"$SCRATCH/findings/code_intel_patterns.json" 2>/dev/null ||
+					echo '[]' >"$SCRATCH/findings/code_intel_patterns.json"
+				check_normalized "$SCRATCH/findings/code_intel_patterns.json" "code_intel_patterns"
+				local_count="$(jq 'length // 0' "$SCRATCH/findings/code_intel_patterns.json" 2>/dev/null || echo 0)"
+				case "$local_count" in '' | *[!0-9]*) local_count=0 ;; esac
+				record_status "code_intel_patterns" "ran" "code_intel.py" "$local_count" "semgrep fallback"
+				log "code_intel patterns: ${local_count} findings"
+			else
+				record_status "code_intel_patterns" "failed" "code_intel.py" 0 "exit code ${PATTERN_RC}"
+				log "code_intel patterns: failed (rc=${PATTERN_RC})"
+			fi
+		) &
+		TIER1_PIDS="$TIER1_PIDS $!"
+	else
+		log "code_intel patterns: skipped (python3 or code_intel.py not available)"
+	fi
 fi
 
 # --- ast-grep (security rules) ---

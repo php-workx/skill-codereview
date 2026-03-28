@@ -18,6 +18,7 @@ Use this skill to run a local review end to end. Do not reimplement the pipeline
 /codereview --spec docs/plan.md --spec-scope "Auth" --base main  # one section of spec
 /codereview --base main --no-chunk                           # force standard mode on large diffs
 /codereview 42                                               # PR #42
+/codereview --setup                                          # re-run dependency setup
 ```
 
 ## When to Use / When NOT to Use
@@ -31,6 +32,32 @@ Use this skill to run a local review end to end. Do not reimplement the pipeline
 ### Error handling (applies to all steps)
 
 After each script phase, check the `status` field in the output JSON. If `"error"`: report the message to the user and stop. After each agent step, if the agent fails or returns no output, report the failure and offer to retry or skip.
+
+### Step 0: Dependency Setup (first review only)
+
+If `.codereview-cache/setup-complete` does NOT exist:
+
+1. Run: `python3 scripts/code_intel.py setup --check --json`
+2. Parse the JSON output.
+3. If `summary.missing_by_tier.full > 0`:
+   Show the user the human-readable check output.
+   Ask: "I recommend installing the full dependency set for the best review quality.
+         This includes semantic code search, AST security rules, and language-specific
+         linters. One-time install, ~250MB.
+
+         Install? (yes / skip)"
+
+   If yes: Run `python3 scripts/code_intel.py setup --install --tier full`
+           Show install results.
+   If skip: Note in report footer: "Some optional tools are missing.
+            Run `code_intel.py setup --check` for details."
+
+4. Write `.codereview-cache/setup-complete` with timestamp.
+5. Proceed to Step 1.
+
+If `.codereview-cache/setup-complete` EXISTS: skip to Step 1.
+
+To re-run setup: `/codereview --setup` (deletes marker and re-runs Step 0)
 
 ### Step 1: Prepare
 
@@ -54,6 +81,7 @@ Read the launch packet. For each wave in `waves[]`:
 
 Launch ALL tasks in the wave in parallel (single message, multiple Agent tool calls). For each task:
 - Read the assembled prompt from `task.assembled_prompt_file`
+  - The assembled prompt includes prescan signals (when available) as a "Prescan Signals" section. Explorers should investigate flagged areas but prescan signals are not findings themselves.
 - Set `model` from `task.model` (if present; omit for default)
 - Set `description` to `"Review explorer: <task.name>"`
 - Set `run_in_background: true` for parallel execution
@@ -130,8 +158,9 @@ The suppress subcommand goes directly to `lifecycle.py`, not through `orchestrat
 ## What The Script Owns
 
 - target detection, diff extraction, and config loading
-- launch packet assembly and prompt shaping
+- launch packet assembly and prompt shaping (includes prescan signals when available)
 - explorer/judge packet generation
+- code intelligence via `code_intel.py` (replaces `complexity.sh` for complexity analysis; provides functions/callers context and LLM-optimized diffs)
 - report rendering, artifact writing, and lifecycle state
 
 ## Configuration
