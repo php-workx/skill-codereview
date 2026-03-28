@@ -802,17 +802,32 @@ _DEPS: list[dict[str, Any]] = [
 
 def cmd_setup(args: argparse.Namespace) -> dict[str, Any]:
     if getattr(args, "check", False):
+        deps_list = [
+            {
+                "name": d["name"],
+                "installed": d["check"](),
+                "installer": d["installer"],
+                "package": d["package"],
+                "tier": d["tier"],
+            }
+            for d in _DEPS
+        ]
+        missing_minimal = sum(
+            1 for d in deps_list if not d["installed"] and d["tier"] == "minimal"
+        )
+        missing_full = sum(
+            1 for d in deps_list if not d["installed"] and d["tier"] == "full"
+        )
         return {
-            "dependencies": [
-                {
-                    "name": d["name"],
-                    "installed": d["check"](),
-                    "installer": d["installer"],
-                    "package": d["package"],
-                    "tier": d["tier"],
-                }
-                for d in _DEPS
-            ]
+            "dependencies": deps_list,
+            "summary": {
+                "installed": sum(1 for d in deps_list if d["installed"]),
+                "total": len(deps_list),
+                "missing_by_tier": {
+                    "minimal": missing_minimal,
+                    "full": missing_full + missing_minimal,
+                },
+            },
         }
     if getattr(args, "install", False):
         tier = getattr(args, "tier", "minimal")

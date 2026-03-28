@@ -388,6 +388,15 @@ class TestSetupSubcommand(unittest.TestCase):
             self.assertIn("name", dep)
             self.assertIn("installed", dep)
             self.assertIn("installer", dep)
+        # summary key with missing_by_tier counts
+        self.assertIn("summary", result)
+        summary = result["summary"]
+        self.assertIn("installed", summary)
+        self.assertIn("total", summary)
+        self.assertEqual(summary["total"], len(result["dependencies"]))
+        self.assertIn("missing_by_tier", summary)
+        self.assertIn("minimal", summary["missing_by_tier"])
+        self.assertIn("full", summary["missing_by_tier"])
 
     def test_setup_install_produces_commands(self) -> None:
         from argparse import Namespace
@@ -463,6 +472,8 @@ class TestCLISubprocess(unittest.TestCase):
     def test_cli_setup_check(self) -> None:
         result = self._run_subcommand("setup", extra_args=["--check"])
         self.assertIn("dependencies", result)
+        self.assertIn("summary", result)
+        self.assertIn("missing_by_tier", result["summary"])
 
     def test_cli_empty_stdin(self) -> None:
         result = self._run_subcommand("complexity", stdin="")
