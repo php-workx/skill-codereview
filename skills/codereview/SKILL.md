@@ -19,7 +19,15 @@ Use this skill to run a local review end to end. Do not reimplement the pipeline
 /codereview --base main --no-chunk                           # force standard mode on large diffs
 /codereview 42                                               # PR #42
 /codereview --setup                                          # re-run dependency setup
+/codereview --provenance ai-assisted --base main             # AI-assisted code: elevate AI-codegen risk patterns
+/codereview --provenance autonomous --base main              # Fully autonomous code: all AI risk patterns + placeholders
 ```
+
+**Flags:**
+
+| Flag | Values | Default | Description |
+|------|--------|---------|-------------|
+| `--provenance` | `human`, `ai-assisted`, `autonomous`, `unknown` | `unknown` | Code provenance: how the reviewed code was produced. Affects review rigor level. |
 
 ## When to Use / When NOT to Use
 
@@ -77,6 +85,38 @@ If `.codereview-cache/setup-complete` EXISTS: skip to Step 1.
 
 To re-run setup: `/codereview --setup` (deletes marker and re-runs Step 0)
 
+### Step 0.5: Spec File Detection (if --spec not provided)
+
+If the user did NOT provide `--spec`:
+
+1. Run: `python3 $SKILL_DIR/scripts/orchestrate.py find-spec-candidates --session-dir $SESSION_DIR`
+   This returns a JSON array of candidate paths with metadata.
+
+2. If candidates are found, show the user:
+   ```
+   I found potential spec files for this review:
+     1. .agents/plans/2026-03-28-feature-plan.md (3.2 KB, modified today)
+     2. docs/plan.md (1.5 KB, modified 2 days ago)
+
+   Use one of these for spec verification? (enter number, path, or "skip")
+   ```
+
+3. If no candidates found, inform the user:
+   ```
+   No spec file detected. Spec verification catches requirement gaps that
+   code-level review misses. Provide a spec/plan file path, or say "skip".
+   ```
+
+4. If user provides a path → set `--spec` to that path
+5. If user says "skip" → proceed without spec, add to report footer:
+   `Spec verification was skipped. Run with --spec <path> for requirement tracing.`
+
+**Skip conditions (do not prompt):**
+- `--spec` was already provided
+- `.codereview.yaml` has `spec.prompt: false`
+- Non-interactive context (CI, piped input)
+- `{session_dir}/.spec-skipped` marker exists (user skipped in previous run)
+
 ### Step 1: Prepare
 
 Create a session directory and run the orchestrator:
@@ -85,6 +125,11 @@ Create a session directory and run the orchestrator:
 SKILL_SCRIPTS="<SKILL_BASE>/scripts"
 SESSION_DIR=$(mktemp -d /tmp/codereview-XXXXXXXX)
 python3 "$SKILL_SCRIPTS/orchestrate.py" prepare --session-dir "$SESSION_DIR" [flags from user]
+```
+
+If `--provenance` was provided, pass it through to orchestrate.py and add the following to the context packet sent to explorers:
+```
+Code Provenance: <value>
 ```
 
 Read `$SESSION_DIR/launch.json`. Check the `status` field:
@@ -202,6 +247,6 @@ Optional repo-level config via `.codereview.yaml`. See `docs/CONFIGURATION.md` f
 | `prompts/reviewer-concurrency-pass.md` | Concurrency explorer (activated) |
 | `prompts/reviewer-spec-verification-pass.md` | Spec verification explorer (activated) |
 | `prompts/reviewer-reliability-performance-pass.md` | Shell script explorer (activated; shared prompt) |
-| `prompts/reviewer-judge.md` | Review judge (adversarial validation) |
+| `prompts/reviewer-judge-*.md` | Review judge (5 composable parts: main, gatekeeper, verifier, calibrator, synthesizer) |
 
 If you need to understand the review internals, inspect `scripts/orchestrate.py` instead of expanding this skill.

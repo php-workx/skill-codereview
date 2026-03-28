@@ -22,11 +22,13 @@ from scripts.orchestrate import (
     assemble_explorer_prompt,
     assemble_report_envelope,
     build_cross_file_context,
+    build_launch_packet,
     build_parser,
     check_token_budget,
     drop_least_relevant_checklist,
     extract_diff,
     finalize,
+    find_spec_candidates,
     load_config,
     load_domain_checklists,
     load_path_instructions,
@@ -631,13 +633,7 @@ class OrchestratePlumbingTests(unittest.TestCase):
                 ],
                 "judge": {
                     "prompt_file": str(
-                        (
-                            REPO_ROOT
-                            / "skills"
-                            / "codereview"
-                            / "prompts"
-                            / "reviewer-judge.md"
-                        ).absolute()
+                        (REPO_ROOT / "skills" / "codereview" / "prompts").absolute()
                     ),
                     "output_file": str((session_dir / "judge.json").absolute()),
                 },
@@ -1576,6 +1572,153 @@ class CrossFilePlanningTests(unittest.TestCase):
         )
         self.assertNotIn("#### x", result)
         self.assertIn("#### valid_name", result)
+
+
+class FindSpecCandidatesTests(unittest.TestCase):
+    def test_finds_agents_plans_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            plans_dir = repo / ".agents" / "plans"
+            plans_dir.mkdir(parents=True)
+            plan_a = plans_dir / "2026-03-27-plan.md"
+            plan_b = plans_dir / "2026-03-28-plan.md"
+            plan_a.write_text("# Older plan\n", encoding="utf-8")
+            plan_b.write_text("# Newer plan\n", encoding="utf-8")
+            # Ensure plan_b has a newer mtime
+            import os
+            import time
+
+            os.utime(plan_a, (time.time() - 10, time.time() - 10))
+            os.utime(plan_b, (time.time(), time.time()))
+
+            candidates = find_spec_candidates(repo, [])
+
+        paths = [c["path"] for c in candidates]
+        self.assertIn(".agents/plans/2026-03-28-plan.md", paths)
+        self.assertIn(".agents/plans/2026-03-27-plan.md", paths)
+        # Newer file should come first (sorted by mtime descending)
+        self.assertLess(
+            paths.index(".agents/plans/2026-03-28-plan.md"),
+            paths.index(".agents/plans/2026-03-27-plan.md"),
+        )
+
+    def test_finds_spec_files_near_changed_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            src_dir = repo / "src"
+            src_dir.mkdir()
+            spec_file = src_dir / "SPEC.md"
+            spec_file.write_text("# Spec\n", encoding="utf-8")
+            changed_files = ["src/app.py"]
+
+            candidates = find_spec_candidates(repo, changed_files)
+
+        paths = [c["path"] for c in candidates]
+        self.assertIn("src/SPEC.md", paths)
+
+    def test_finds_common_root_spec_locations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "SPEC.md").write_text("# Root spec\n", encoding="utf-8")
+            docs = repo / "docs"
+            docs.mkdir()
+            (docs / "plan.md").write_text("# Docs plan\n", encoding="utf-8")
+
+            candidates = find_spec_candidates(repo, [])
+
+        paths = [c["path"] for c in candidates]
+        self.assertIn("SPEC.md", paths)
+        self.assertIn("docs/plan.md", paths)
+
+    def test_deduplicates_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            spec_file = repo / "SPEC.md"
+            spec_file.write_text("# Spec\n", encoding="utf-8")
+            # changed file in root dir will also find SPEC.md via pattern search
+            changed_files = ["app.py"]
+
+            candidates = find_spec_candidates(repo, changed_files)
+
+        paths = [c["path"] for c in candidates]
+        # SPEC.md should appear only once even though it matches both
+        # the near-changed-files search and the common-root-locations search
+        self.assertEqual(paths.count("SPEC.md"), 1)
+
+    def test_returns_correct_metadata_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            spec_file = repo / "PLAN.md"
+            spec_file.write_text("# Plan\n", encoding="utf-8")
+
+            candidates = find_spec_candidates(repo, [])
+
+        self.assertEqual(len(candidates), 1)
+        c = candidates[0]
+        self.assertIn("path", c)
+        self.assertIn("mtime", c)
+        self.assertIn("size", c)
+        self.assertIsInstance(c["mtime"], float)
+        self.assertIsInstance(c["size"], int)
+
+    def test_returns_empty_list_when_no_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            candidates = find_spec_candidates(repo, [])
+
+        self.assertEqual(candidates, [])
+
+
+class BuildLaunchPacketTests(unittest.TestCase):
+    """Tests for build_launch_packet spec_source field."""
+
+    def _make_diff_result(self) -> DiffResult:
+        return DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base=None,
+            changed_files=["foo.py"],
+            diff_text="+new line\n",
+        )
+
+    def _base_kwargs(self, session_dir: Path) -> dict:
+        return dict(
+            session_dir=session_dir,
+            diff_result=self._make_diff_result(),
+            review_mode="standard",
+            waves=[],
+            judge={},
+            scan_results={},
+            spec_file=None,
+            config=DEFAULT_CONFIG,
+        )
+
+    def test_spec_source_file_when_spec_file_provided(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kwargs = self._base_kwargs(Path(tmpdir))
+            kwargs["spec_file"] = "/some/path/spec.md"
+            kwargs["spec_source"] = "file"
+            packet = build_launch_packet(**kwargs)
+        self.assertEqual(packet["spec_source"], "file")
+
+    def test_spec_source_none_when_no_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kwargs = self._base_kwargs(Path(tmpdir))
+            packet = build_launch_packet(**kwargs)
+        self.assertEqual(packet["spec_source"], "none")
+
+    def test_spec_source_pr_body_when_explicitly_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kwargs = self._base_kwargs(Path(tmpdir))
+            kwargs["spec_source"] = "pr_body"
+            packet = build_launch_packet(**kwargs)
+        self.assertEqual(packet["spec_source"], "pr_body")
+
+    def test_spec_source_present_in_packet_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kwargs = self._base_kwargs(Path(tmpdir))
+            packet = build_launch_packet(**kwargs)
+        self.assertIn("spec_source", packet)
 
 
 if __name__ == "__main__":
