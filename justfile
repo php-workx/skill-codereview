@@ -20,7 +20,7 @@ test-scripts:
   bash tests/test-scripts.sh
 
 test-unit:
-  python3 -m unittest {{test_modules}}
+  uv run python -m unittest {{test_modules}}
 
 test-integration:
   bash tests/test-orchestrate-integration.sh

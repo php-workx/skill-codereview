@@ -1588,11 +1588,7 @@ def prepare(args: argparse.Namespace) -> int:
 
         progress("prepare_step", step=6, total=8, message="Rendering explorer prompts")
         global_contract = (
-            repo_root
-            / "skills"
-            / "codereview"
-            / "prompts"
-            / "reviewer-global-contract.md"
+            SKILL_DIR / "prompts" / "reviewer-global-contract.md"
         ).read_text(encoding="utf-8")
         prompt_budget = config.get("token_budget", {}).get("explorer_prompt", 70_000)
         waves: list[dict[str, Any]] = []
@@ -1690,13 +1686,7 @@ def prepare(args: argparse.Namespace) -> int:
             waves=waves,
             judge={
                 "prompt_file": str(
-                    (
-                        repo_root
-                        / "skills"
-                        / "codereview"
-                        / "prompts"
-                        / "reviewer-judge.md"
-                    ).absolute()
+                    (SKILL_DIR / "prompts" / "reviewer-judge.md").absolute()
                 ),
                 "model": config.get("judge_model", "sonnet"),
                 "output_file": str((session_dir / "judge.json").absolute()),

@@ -1,0 +1,11 @@
+[project]
+name = "skill-codereview"
+version = "1.3.0"
+description = "AI-powered multi-pass code review skill for Claude Code and Codex"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
