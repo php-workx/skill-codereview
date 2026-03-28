@@ -329,7 +329,7 @@ def malformed_explorer_failure() -> None:
             }
         ],
         "judge": {
-            "prompt_file": str((PROMPTS / "reviewer-judge.md").absolute()),
+            "prompt_file": str(PROMPTS.absolute()),
             "output_file": str((session_dir / "judge.json").absolute()),
         },
         "scan_results": {"findings": []},
@@ -365,7 +365,7 @@ def invalid_judge_output_failure() -> None:
         "diff_result": {"changed_files": ["scripts/orchestrate.py"]},
         "scan_results": {"findings": []},
         "judge": {
-            "prompt_file": str((PROMPTS / "reviewer-judge.md").absolute()),
+            "prompt_file": str(PROMPTS.absolute()),
             "output_file": str((session_dir / "judge.json").absolute()),
         },
     }

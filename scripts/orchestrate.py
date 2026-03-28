@@ -708,6 +708,7 @@ def build_launch_packet(
     scan_results: dict[str, Any],
     spec_file: str | None,
     config: dict[str, Any],
+    spec_source: str = "none",
     chunks: list[dict[str, Any]] | None = None,
     triage_result: dict[str, str] | None = None,
     triage_summary: str | None = None,
@@ -740,6 +741,7 @@ def build_launch_packet(
         "tool_status": scan_results.get("tool_status", {}),
         "scan_results": scan_results,
         "spec_file": spec_file,
+        "spec_source": spec_source,
         "context_summary": context_summary,
         "_config": filter_config_allowlist(config, CONFIG_ALLOWLIST),
         "chunks": chunks,
@@ -1580,12 +1582,83 @@ def _apply_spec_scope(spec_content: str, spec_scope: str | None) -> str:
     return spec_content
 
 
+def find_spec_candidates(
+    repo_root: Path,
+    changed_files: list[str],
+) -> list[dict[str, Any]]:
+    """Find likely spec/plan files in the repo for spec-verification prompting.
+
+    Returns a list of candidate dicts with keys: path, mtime, size.
+    """
+    candidates: list[Path] = []
+
+    # 1. Recent plan files in .agents/plans/
+    plans_dir = repo_root / ".agents" / "plans"
+    if plans_dir.is_dir():
+        for f in sorted(
+            plans_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True
+        )[:3]:
+            candidates.append(f)
+
+    # 2. Spec/plan files near changed files
+    changed_dirs = {(repo_root / Path(f)).parent for f in changed_files if f}
+    for d in changed_dirs:
+        if d.is_dir():
+            for pattern in [
+                "spec*.md",
+                "plan*.md",
+                "SPEC.md",
+                "PLAN.md",
+                "requirements*.md",
+            ]:
+                candidates.extend(d.glob(pattern))
+
+    # 3. Common spec locations at repo root
+    for name in [
+        "SPEC.md",
+        "PLAN.md",
+        "docs/spec.md",
+        "docs/plan.md",
+        "docs/requirements.md",
+    ]:
+        p = repo_root / name
+        if p.exists():
+            candidates.append(p)
+
+    # Deduplicate preserving order, convert to relative paths
+    seen: set[Path] = set()
+    result: list[dict[str, Any]] = []
+    for c in candidates:
+        resolved = c.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            rel = c.relative_to(repo_root)
+        except ValueError:
+            rel = c
+        stat = c.stat()
+        result.append(
+            {
+                "path": str(rel),
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+            }
+        )
+
+    return result
+
+
 def validate_prompt_files() -> None:
     """Ensure required prompt files exist before prepare runs."""
     prompts_dir = SKILL_DIR / "prompts"
     required = {
         prompts_dir / "reviewer-global-contract.md",
-        prompts_dir / "reviewer-judge.md",
+        prompts_dir / "reviewer-judge-main.md",
+        prompts_dir / "reviewer-judge-gatekeeper.md",
+        prompts_dir / "reviewer-judge-verifier.md",
+        prompts_dir / "reviewer-judge-calibrator.md",
+        prompts_dir / "reviewer-judge-synthesizer.md",
     }
     required.update(prompts_dir / filename for filename in EXPERT_PROMPT_FILES.values())
     missing = [str(path) for path in sorted(required) if not path.exists()]
@@ -2296,21 +2369,28 @@ def prepare(args: argparse.Namespace) -> int:
             waves = [{"wave": 1, "tasks": wave_tasks}]
 
         progress("prepare_step", step=7, total=8, message="Building launch packet")
+        # Determine spec_source
+        _spec_file = getattr(args, "spec", None)
+        if _spec_file:
+            _spec_source = "file"
+        elif getattr(args, "pr", None) is not None:
+            _spec_source = "pr_body"  # PR body can serve as lightweight spec
+        else:
+            _spec_source = "none"
         packet = build_launch_packet(
             session_dir=session_dir,
             diff_result=diff_result,
             review_mode=review_mode,
             waves=waves,
             judge={
-                "prompt_file": str(
-                    (SKILL_DIR / "prompts" / "reviewer-judge.md").absolute()
-                ),
+                "prompt_file": str((SKILL_DIR / "prompts").absolute()),
                 "model": config.get("judge_model", "sonnet"),
                 "output_file": str((session_dir / "judge.json").absolute()),
             },
             scan_results=context_results["scans"],
-            spec_file=getattr(args, "spec", None),
+            spec_file=_spec_file,
             config=config,
+            spec_source=_spec_source,
             chunks=chunks,
             triage_result=triage_result,
             triage_summary=triage_summary,
@@ -2351,20 +2431,46 @@ def prepare(args: argparse.Namespace) -> int:
 
 def parse_explorer_output(
     raw: Any, explorer_name: str
-) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]]]:
-    """Normalize explorer output into findings and optional requirements."""
+) -> tuple[
+    list[dict[str, Any]] | None,
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+]:
+    """Normalize explorer output into findings, requirements, certification, and completeness_gate.
+
+    Returns a 4-tuple: (findings, requirements, certification, completeness_gate).
+    findings is None when the input has an unrecognized shape.
+    requirements, certification, and completeness_gate default to [] / None / None.
+    Unknown keys in a dict trigger a warning log.
+    """
+    _KNOWN_KEYS = {
+        "findings",
+        "requirements",
+        "certification",
+        "completeness_gate",
+        "pass",
+    }
+
     if isinstance(raw, list):
         findings = [
             dict(item, **({"pass": explorer_name} if "pass" not in item else {}))
             for item in raw
             if isinstance(item, dict)
         ]
-        return findings, []
+        return findings, [], None, None
     if isinstance(raw, dict):
         findings = raw.get("findings", [])
         requirements = raw.get("requirements", [])
         if not isinstance(findings, list) or not isinstance(requirements, list):
-            return None, []
+            return None, [], None, None
+        unknown = set(raw.keys()) - _KNOWN_KEYS
+        if unknown:
+            progress(
+                "parse_explorer_output_unexpected_keys",
+                explorer=explorer_name,
+                keys=sorted(unknown),
+            )
         normalized = [
             dict(
                 item,
@@ -2377,8 +2483,10 @@ def parse_explorer_output(
             for item in findings
             if isinstance(item, dict)
         ]
-        return normalized, requirements
-    return None, []
+        certification = raw.get("certification")
+        completeness_gate = raw.get("completeness_gate")
+        return normalized, requirements, certification, completeness_gate
+    return None, [], None, None
 
 
 def dedup_exact(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2400,6 +2508,15 @@ def dedup_exact(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(deduped.values())
 
 
+JUDGE_PROMPT_PARTS = [
+    "reviewer-judge-main.md",
+    "reviewer-judge-gatekeeper.md",
+    "reviewer-judge-verifier.md",
+    "reviewer-judge-calibrator.md",
+    "reviewer-judge-synthesizer.md",
+]
+
+
 def assemble_judge_prompt(
     *,
     judge_prompt_file: Path,
@@ -2409,12 +2526,51 @@ def assemble_judge_prompt(
     spec_file: str | None = None,
     context_summary: str = "",
 ) -> str:
-    """Render the judge prompt with findings and supporting context."""
-    prompt = judge_prompt_file.read_text(encoding="utf-8")
+    """Render the judge prompt with findings and supporting context.
+
+    The judge prompt is composed from multiple part files in a fixed order.
+    ``judge_prompt_file`` may point to the prompts directory (preferred) or
+    to a single legacy file for backward compatibility.
+    """
+    path = judge_prompt_file
+    if path.is_dir():
+        parts = []
+        for name in JUDGE_PROMPT_PARTS:
+            parts.append((path / name).read_text(encoding="utf-8"))
+        prompt = "\n\n---\n\n".join(parts)
+    elif path.name in JUDGE_PROMPT_PARTS:
+        # Pointer is to one of the part files — use its parent as the dir
+        parts = []
+        for name in JUDGE_PROMPT_PARTS:
+            parts.append((path.parent / name).read_text(encoding="utf-8"))
+        prompt = "\n\n---\n\n".join(parts)
+    else:
+        # Legacy single-file fallback
+        prompt = path.read_text(encoding="utf-8")
+    # Build explorer summary table for judge triage
+    pass_groups: dict[str, list[dict[str, Any]]] = {}
+    for f in explorer_findings:
+        pass_groups.setdefault(f.get("pass", "unknown"), []).append(f)
+
+    summary_lines = [
+        "| Explorer | Findings | Signals |",
+        "|----------|----------|---------|",
+    ]
+    for pass_name in sorted(pass_groups):
+        findings = pass_groups[pass_name]
+        high_count = sum(
+            1 for f in findings if f.get("severity") in ("high", "critical")
+        )
+        signal = (
+            f"{high_count} high/critical" if high_count else f"{len(findings)} total"
+        )
+        summary_lines.append(f"| {pass_name} | {len(findings)} | {signal} |")
+    summary_table = "\n".join(summary_lines)
+
     sections = [
         prompt,
-        "## Explorer Findings",
-        json.dumps(explorer_findings, indent=2),
+        "## Explorer Findings\n\n### Summary\n\n" + summary_table,
+        "### Details\n\n" + json.dumps(explorer_findings, indent=2),
         "## Spec Requirements",
         json.dumps(spec_requirements, indent=2),
         "## Deterministic Scan Results",
@@ -2457,6 +2613,8 @@ def post_explorers(args: argparse.Namespace) -> int:
     explorer_status: dict[str, Any] = {}
     spec_requirements: list[dict[str, Any]] = []
     chunk_counts: dict[int, int] = {}
+    explorer_certifications: dict[str, Any] = {}
+    explorer_completeness_gates: dict[str, Any] = {}
 
     for task in get_all_tasks(launch_packet):
         output_path = Path(task["output_file"])
@@ -2473,12 +2631,18 @@ def post_explorers(args: argparse.Namespace) -> int:
                 "error": str(exc),
             }
             continue
-        findings, requirements = parse_explorer_output(raw, name)
+        findings, requirements, certification, completeness_gate = (
+            parse_explorer_output(raw, name)
+        )
         if findings is None:
             explorer_status[name] = {"status": "wrong_shape", "findings": 0}
             continue
         all_findings.extend(findings)
         spec_requirements.extend(requirements)
+        if certification is not None:
+            explorer_certifications[name] = certification
+        if completeness_gate is not None:
+            explorer_completeness_gates[name] = completeness_gate
         explorer_status[name] = {"status": "ok", "findings": len(findings)}
         if task.get("chunk_id") is not None:
             chunk_counts[task["chunk_id"]] = chunk_counts.get(
@@ -2511,7 +2675,18 @@ def post_explorers(args: argparse.Namespace) -> int:
     judge_prompt_path = session_dir / "judge-prompt.md"
     judge_prompt_path.write_text(judge_prompt, encoding="utf-8")
 
-    judge_input = {
+    # F5: Validate certifications — file coverage check
+    certification_warnings: list[str] = []
+    for pass_name, cert in explorer_certifications.items():
+        if not isinstance(cert, dict):
+            continue
+        files_checked = set(cert.get("files_checked", []))
+        if not files_checked:
+            certification_warnings.append(
+                f"Explorer {pass_name} certified clean but listed no files_checked"
+            )
+
+    judge_input: dict[str, Any] = {
         "status": "ready_for_judge",
         "raw_finding_count": raw_count,
         "explorer_finding_count": len(all_findings),
@@ -2522,6 +2697,12 @@ def post_explorers(args: argparse.Namespace) -> int:
         "judge_output_file": launch_packet["judge"]["output_file"],
         "judge_model": launch_packet["judge"].get("model", "sonnet"),
     }
+    if certification_warnings:
+        judge_input["certification_warnings"] = certification_warnings
+    if explorer_certifications:
+        judge_input["explorer_certifications"] = explorer_certifications
+    if explorer_completeness_gates:
+        judge_input["explorer_completeness_gates"] = explorer_completeness_gates
     (session_dir / "judge-input.json").write_text(
         json.dumps(judge_input, indent=2), encoding="utf-8"
     )
@@ -2974,6 +3155,28 @@ def cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_find_spec_candidates(args: argparse.Namespace) -> int:
+    """Find spec file candidates and output as JSON."""
+    session_dir = getattr(args, "session_dir", None)
+    repo_root = detect_repo_root()
+
+    # Get changed files from launch.json if available
+    changed_files: list[str] = []
+    if session_dir:
+        try:
+            launch_data = json.loads(
+                (Path(session_dir) / "launch.json").read_text(encoding="utf-8")
+            )
+            diff_result = launch_data.get("diff_result", {})
+            changed_files = diff_result.get("changed_files", [])
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            pass
+
+    candidates = find_spec_candidates(repo_root, changed_files)
+    print(json.dumps(candidates, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Create the orchestrator CLI parser."""
     parser = argparse.ArgumentParser(prog="orchestrate.py")
@@ -2989,6 +3192,7 @@ def build_parser() -> argparse.ArgumentParser:
         "post-explorers": post_explorers,
         "finalize": finalize,
         "cleanup": cleanup,
+        "find-spec-candidates": cmd_find_spec_candidates,
     }
     for name, handler in commands.items():
         command_parser = subparsers.add_parser(name)
@@ -3043,7 +3247,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.command:
         parser.error(
-            "a subcommand is required (prepare, post-explorers, finalize, cleanup)"
+            "a subcommand is required (prepare, post-explorers, finalize, cleanup, find-spec-candidates)"
         )
 
     return args.handler(args)
