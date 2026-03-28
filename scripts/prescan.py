@@ -410,7 +410,12 @@ ALL_CHECKERS: list[PatternChecker] = [
 
 
 def _assess_completeness(
-    fp: str, content: str, lang: str | None, all_files: list[str], stub_files: set[str]
+    fp: str,
+    content: str,
+    lang: str | None,
+    all_files: list[str],
+    stub_files: set[str],
+    file_cache: dict[str, str] | None = None,
 ) -> str:
     """L1 exists, L2 substantive, L3 wired, L4 functional."""
     if not lang:
@@ -430,18 +435,20 @@ def _assess_completeness(
     )
     if not has_sub:
         return "L1_exists"
-    if fp in stub_files:
-        return "L2_substantive"
     stem = Path(fp).stem
+    cache = file_cache or {}
     wired = any(
-        _read_file_safe(o) is not None
-        and re.search(r"\b" + re.escape(stem) + r"\b", _read_file_safe(o) or "")
+        re.search(r"\b" + re.escape(stem) + r"\b", cache[o])
         for o in all_files
-        if o != fp
+        if o != fp and o in cache
     )
-    if not wired:
+    if wired and fp not in stub_files:
+        return "L4_functional"
+    if wired and fp in stub_files:
+        return "L3_wired"
+    if has_sub:
         return "L2_substantive"
-    return "L3_wired" if fp in stub_files else "L4_functional"
+    return "L1_exists"
 
 
 # --- main scan --------------------------------------------------------------
@@ -476,6 +483,7 @@ def run_prescan(file_paths: list[str]) -> dict[str, Any]:
     }
     languages: set[str] = set()
     stub_files: set[str] = set()
+    file_cache: dict[str, str] = {}
     timed_out = False
 
     for fpath in filtered:
@@ -487,6 +495,7 @@ def run_prescan(file_paths: list[str]) -> dict[str, Any]:
             continue
         if len(content.splitlines()) > MAX_FILE_LINES:
             continue
+        file_cache[fpath] = content
         lang = _detect_language(fpath)
         if lang:
             languages.add(lang)
@@ -515,11 +524,16 @@ def run_prescan(file_paths: list[str]) -> dict[str, Any]:
     levels = dict(empty_levels)
     assessed = 0
     for fpath in filtered:
-        content = _read_file_safe(fpath)
+        if time.monotonic() - start_time >= WALL_CLOCK_LIMIT:
+            timed_out = True
+            break
+        content = file_cache.get(fpath)
         if content is None:
             continue
         lang = _detect_language(fpath)
-        level = _assess_completeness(fpath, content, lang, filtered, stub_files)
+        level = _assess_completeness(
+            fpath, content, lang, filtered, stub_files, file_cache
+        )
         levels[level].append(fpath)
         assessed += 1
     lc = {k: len(v) for k, v in levels.items() if v}

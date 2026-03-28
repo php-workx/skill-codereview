@@ -857,9 +857,12 @@ class OrchestratePlumbingTests(unittest.TestCase):
         self.assertIn("### Prescan Signals\nCRITICAL: 1 secret", rendered)
         self.assertIn("### Domain-Specific Checklists\n## SQL Safety", rendered)
         self.assertIn("### Cross-File Context\nviews.py calls login()", rendered)
-        self.assertIn("### Repo-Level Review Directives\nalways check auth", rendered)
         self.assertIn(
-            "### Path-Specific Instructions\nsrc/auth: focus on bypass", rendered
+            "<review-directives>\nalways check auth\n</review-directives>", rendered
+        )
+        self.assertIn(
+            "<path-instructions>\nsrc/auth: focus on bypass\n</path-instructions>",
+            rendered,
         )
         self.assertIn("### Function Definitions\n| f.py | login", rendered)
         self.assertIn("### Dependency Graph\nchanged: login -> callers", rendered)

@@ -249,7 +249,7 @@ def apply_code_intel(findings: list, graph: dict) -> list:
     # Count how many callers reference each file (target)
     file_caller_count: dict[str, int] = {}
     for edge in edges:
-        target = edge.get("target", "")
+        target = edge.get("to", "")
         if target:
             file_caller_count[target] = file_caller_count.get(target, 0) + 1
 
