@@ -44,6 +44,20 @@ Set confidence based on evidence strength, not gut feeling:
 | Possible: code looks suspicious, but defenses may exist elsewhere | 0.65 – 0.69 |
 | Uncertain: might be an issue but cannot verify | Below 0.65 — suppress |
 
+### Self-Check: Phantom Knowledge Detection
+
+Before reporting any finding, ask yourself these four questions:
+
+1. **Did I actually read this code, or am I assuming what it does?** If you haven't used Read/Grep to verify the behavior, your confidence must be ≤ 0.69 and you must note the assumption in `evidence_source`.
+
+2. **Am I relying on knowledge about this framework/library that I haven't verified in this codebase?** Default configurations, middleware behavior, and framework guarantees vary by version. If your finding depends on framework behavior, verify it or note the assumption.
+
+3. **Am I inferring behavior across a boundary I can't see?** DI containers, dynamic dispatch, macro expansion, and code generation create opaque boundaries. Findings about code behind these boundaries must cite the assumption.
+
+4. **Would removing this finding change the review's actionability?** If the finding is speculative and removing it doesn't weaken the review, it's probably noise.
+
+**Key principle:** Assumption-based findings are NOT suppressed — they set confidence ≤ 0.69 and cite the assumption in `evidence_source`. The judge can then evaluate the assumption's validity. This preserves findings about code behind opaque abstractions while flagging their evidentiary basis.
+
 ---
 
 ## Output Schema
@@ -80,7 +94,77 @@ Output each finding as a JSON object in an array. Set `pass` to the category tha
 
 **Note:** The orchestrator will assign `id`, `source`, and `action_tier` to your findings after collection. You do not need to include these fields.
 
-Return `[]` if no issues found in your focus area.
+**Evidence source requirement:** Every finding's `evidence_source` field must cite either a tool call (e.g., "Read src/auth/login.py:45-60") or cross-file context. Findings based on assumptions must set confidence ≤ 0.69 and note the assumption in `evidence_source` (e.g., "Assumption: Django default middleware handles CSRF — not verified in this project's settings.py").
+
+## Empty Result Certification
+
+If you find NO issues in your focus area, you MUST NOT return a bare `[]`.
+Instead, return a certification object explaining what you checked:
+
+```json
+{
+  "certification": {
+    "status": "clean",
+    "files_checked": ["src/auth/login.py", "src/auth/session.py"],
+    "checks_performed": [
+      "Traced all 3 callers of login() — none assume a return value that changed",
+      "Verified session.pop() uses default=None (safe for missing keys)"
+    ],
+    "tools_used": ["Grep: callers of login()", "Read: src/auth/session.py:40-60"]
+  },
+  "findings": []
+}
+```
+
+**Certification rules:**
+1. `files_checked` must list every relevant changed file for your focus area. If you skipped a file, explain why.
+2. `checks_performed` must list 3-5 concrete checks you did — each referencing a specific function, line, or pattern.
+3. `tools_used` must list the actual Grep/Read/Glob calls you made.
+4. If the diff contains no code relevant to your focus area, use: `"status": "not_applicable", "reason": "No code in diff is relevant to [focus area]"`.
+
+## Investigation Scope
+
+Your investigation MUST stay within the scope of the diff and its direct dependencies.
+
+- **In scope:** Changed files, callers of changed functions, callees of changed functions, types/interfaces used by changed code, test files for changed code.
+- **Out of scope:** Code unrelated to the diff, even if it has bugs.
+
+If you discover a bug in unrelated code while tracing a call path, do NOT report it as a standalone finding. Your job is to review THIS diff, not audit the entire repository.
+
+---
+
+## Pre-Existing vs Introduced Bugs
+
+When investigating, you may discover bugs in code that was NOT changed by the diff. Classify these correctly:
+
+1. **Introduced** (default) — The diff creates this bug. Leave `pre_existing` unset or false.
+2. **Pre-existing, newly reachable** — The bug exists in unchanged code, but the diff creates a new code path that triggers it. Set `pre_existing: true` AND `pre_existing_newly_reachable: true`. Report it — the activation is the finding.
+3. **Pre-existing, unrelated** — The bug exists in unchanged code and the diff does NOT change the likelihood of it being triggered. DO NOT report it.
+
+**Key question:** "Does this diff change the likelihood of this bug being triggered?" If yes, report with both flags. If no, suppress.
+
+If you are unsure whether a bug is pre-existing, omit the flags (defaults to introduced). This is the safer default — it's better to report a finding that the judge can filter than to miss a real issue.
+
+---
+
+## Provenance-Aware Investigation
+
+When the context packet includes a `Code Provenance` header, adjust your investigation depth:
+
+**`human` or `unknown` (default):** Standard review. No additional patterns.
+
+**`ai-assisted` (Copilot, Claude-assisted):** Elevate attention to AI-codegen risk patterns:
+- **Over-abstraction:** Interfaces, factories, or wrapper classes around a single implementation. If only one concrete type implements an interface, question whether the abstraction is justified.
+- **Weak tests:** Tests that assert code runs without checking behavior (`assert not raises`, `expect(fn).not.toThrow()`). Tests with no meaningful assertions.
+- **Unnecessary flexibility:** Feature flags with no second use case, option-heavy APIs where no caller uses the options, configuration that could be a constant.
+- **Premature generalization:** Generic type parameters with only one instantiation, abstract base classes with one subclass.
+
+**`autonomous` (Codex, crank, fully autonomous agents):** All AI-assisted checks PLUS:
+- **Placeholder logic:** TODO-driven control flow, stub returns (`return None`, `return {}`, `pass`), hardcoded test data in production paths.
+- **Unwired components:** Functions/classes defined but never imported or called. Dead code that looks intentional but has no consumers.
+- **Mock/test data in production:** Hardcoded URLs (`localhost`, `example.com`), test credentials, sample data that should be parameterized.
+- **Silent failure handling:** Broad `except Exception: pass` or empty catch blocks. Error paths that log but don't propagate.
+- **Missing rollback:** Multi-step operations where failure partway through leaves inconsistent state.
 
 ---
 
