@@ -1,0 +1,7 @@
+{
+  "findings": [
+    {"pass": "security", "severity": "high", "confidence": 1.0, "file": "src/auth.py", "line": 15, "summary": "Hardcoded credential", "source": "deterministic", "evidence": "password = 'admin123'"},
+    {"pass": "security", "severity": "medium", "confidence": 1.0, "file": "src/api.py", "line": 30, "summary": "Missing HTTPS check", "source": "deterministic"},
+    {"pass": "quality", "severity": "low", "confidence": 1.0, "file": "src/utils.py", "line": 5, "summary": "Unused import", "source": "deterministic"}
+  ]
+}

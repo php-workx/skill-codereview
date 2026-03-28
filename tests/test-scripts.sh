@@ -125,8 +125,8 @@ assert_json_field "judge findings have source=ai" "$ENRICH_OUT" \
 # 2e. Tier assignment rules
 assert_json_field "high/0.92 → must_fix" "$ENRICH_OUT" \
 	"any(f['action_tier']=='must_fix' and f['severity']=='high' and f.get('confidence',0)>=0.80 for f in d['findings'])"
-assert_json_field "medium findings → should_fix" "$ENRICH_OUT" \
-	"any(f['action_tier']=='should_fix' and f['severity']=='medium' for f in d['findings'])"
+assert_json_field "high without failure_mode → should_fix" "$ENRICH_OUT" \
+	"any(f['action_tier']=='should_fix' and f['severity']=='high' and not f.get('failure_mode') for f in d['findings'])"
 
 # 2f. Severity preserved: deterministic high/critical findings without failure_mode keep their severity
 # The scan fixture has a high semgrep finding and a critical gitleaks finding — neither has failure_mode.
@@ -159,6 +159,119 @@ assert_json_field "empty input has zero findings" "$ENRICH_EMPTY" \
 	"len(d['findings']) == 0"
 assert_json_field "empty input has zero tier_summary" "$ENRICH_EMPTY" \
 	"d['tier_summary'] == {'must_fix': 0, 'should_fix': 0, 'consider': 0}"
+
+# 2j. Evidence check: AI high/critical without failure_mode → downgrade to medium
+# Build a finding with high severity, AI source, no failure_mode
+cat >$TEST_TMPDIR/test-evidence-check.json <<'EJSON'
+{"findings": [
+  {"pass": "reliability", "severity": "high", "confidence": 0.88, "file": "src/db.py", "line": 55, "summary": "Missing error handling", "evidence": "bare except"},
+  {"pass": "security", "severity": "critical", "confidence": 0.90, "file": "src/api.py", "line": 10, "summary": "Open redirect", "evidence": "url param unchecked"}
+]}
+EJSON
+ENRICH_EVIDENCE=$(python3 "$SCRIPTS/enrich-findings.py" --judge-findings $TEST_TMPDIR/test-evidence-check.json 2>/dev/null)
+assert_json_field "AI high without failure_mode downgraded to medium" "$ENRICH_EVIDENCE" \
+	"all(f['severity']=='medium' for f in d['findings'] if f['source']=='ai' and f.get('pass')=='reliability')"
+assert_json_field "AI critical without failure_mode downgraded to medium" "$ENRICH_EVIDENCE" \
+	"all(f['severity']=='medium' for f in d['findings'] if f['source']=='ai' and f.get('pass')=='security')"
+assert_json_field "dropped.downgraded_to_medium counts correctly" "$ENRICH_EVIDENCE" \
+	"d['dropped']['downgraded_to_medium'] == 2"
+rm -f $TEST_TMPDIR/test-evidence-check.json
+
+# 2k. llm_prompt field generated for all findings
+assert_json_field "all findings have llm_prompt field" "$ENRICH_OUT" \
+	"all('llm_prompt' in f for f in d['findings'])"
+assert_json_field "llm_prompt contains file path" "$ENRICH_OUT" \
+	"all(f['file'] in f['llm_prompt'] for f in d['findings'])"
+assert_json_field "llm_prompt contains severity" "$ENRICH_OUT" \
+	"all(f['severity'] in f['llm_prompt'] for f in d['findings'])"
+
+# 2l. --no-llm-prompts flag suppresses llm_prompt
+ENRICH_NO_LLM=$(python3 "$SCRIPTS/enrich-findings.py" \
+	--judge-findings "$FIXTURES/judge-output.json" \
+	--scan-findings "$FIXTURES/scan-findings.json" \
+	--no-llm-prompts 2>/dev/null)
+assert_json_valid "--no-llm-prompts produces valid JSON" "$ENRICH_NO_LLM"
+assert_json_field "--no-llm-prompts: no llm_prompt fields" "$ENRICH_NO_LLM" \
+	"all('llm_prompt' not in f for f in d['findings'])"
+
+# 2m. --code-intel-output: severity boost for high-caller findings
+cat >$TEST_TMPDIR/test-graph.json <<'GJSON'
+{"nodes": [], "edges": [
+  {"source": "src/main.py", "target": "src/auth.py"},
+  {"source": "src/views.py", "target": "src/auth.py"},
+  {"source": "src/api.py", "target": "src/auth.py"},
+  {"source": "src/admin.py", "target": "src/auth.py"},
+  {"source": "src/main.py", "target": "src/utils.py"}
+]}
+GJSON
+ENRICH_INTEL=$(python3 "$SCRIPTS/enrich-findings.py" \
+	--judge-findings "$FIXTURES/judge-output.json" \
+	--scan-findings "$FIXTURES/scan-output.json" \
+	--code-intel-output $TEST_TMPDIR/test-graph.json 2>/dev/null)
+assert_json_valid "code-intel enrichment produces valid JSON" "$ENRICH_INTEL"
+assert_json_field "code-intel: findings have affected_callers field" "$ENRICH_INTEL" \
+	"all('affected_callers' in f for f in d['findings'])"
+assert_json_field "code-intel: src/auth.py has 4 callers" "$ENRICH_INTEL" \
+	"any(f['affected_callers']==4 and f['file']=='src/auth.py' for f in d['findings'])"
+assert_json_field "code-intel: severity boosted for high-caller file" "$ENRICH_INTEL" \
+	"any(f['file']=='src/auth.py' and f['affected_callers']>3 for f in d['findings'])"
+rm -f $TEST_TMPDIR/test-graph.json
+
+# 2n. --code-intel-output omitted: backward-compatible (no affected_callers)
+ENRICH_NO_INTEL=$(python3 "$SCRIPTS/enrich-findings.py" \
+	--judge-findings "$FIXTURES/judge-output.json" 2>/dev/null)
+assert_json_valid "no code-intel produces valid JSON" "$ENRICH_NO_INTEL"
+assert_json_field "no code-intel: no affected_callers" "$ENRICH_NO_INTEL" \
+	"all('affected_callers' not in f for f in d['findings'])"
+
+# 2o. Missing file/line field → finding skipped with warning
+cat >$TEST_TMPDIR/test-missing-fields.json <<'MJSON'
+{"findings": [
+  {"pass": "correctness", "severity": "high", "confidence": 0.9, "line": 10, "summary": "No file field"},
+  {"pass": "correctness", "severity": "high", "confidence": 0.9, "file": "src/ok.py", "summary": "No line field"},
+  {"pass": "correctness", "severity": "high", "confidence": 0.9, "file": "src/ok.py", "line": 5, "summary": "Valid finding"}
+]}
+MJSON
+ENRICH_MISSING=$(python3 "$SCRIPTS/enrich-findings.py" --judge-findings $TEST_TMPDIR/test-missing-fields.json 2>/dev/null)
+assert_json_valid "missing fields produces valid JSON" "$ENRICH_MISSING"
+assert_json_field "missing fields: only valid finding kept" "$ENRICH_MISSING" \
+	"len(d['findings']) == 1 and d['findings'][0]['summary'] == 'Valid finding'"
+rm -f $TEST_TMPDIR/test-missing-fields.json
+
+# 2p. scan-output.json fixture works as scan input
+ENRICH_SCAN_OUT=$(python3 "$SCRIPTS/enrich-findings.py" \
+	--scan-findings "$FIXTURES/scan-output.json" 2>/dev/null)
+assert_json_valid "scan-output.json fixture produces valid JSON" "$ENRICH_SCAN_OUT"
+assert_json_field "scan-output.json: has 3 findings" "$ENRICH_SCAN_OUT" \
+	"len(d['findings']) == 3"
+assert_json_field "scan-output.json: all deterministic" "$ENRICH_SCAN_OUT" \
+	"all(f['source']=='deterministic' for f in d['findings'])"
+
+# 2q. Action tier rules: must_fix for critical, high+failure_mode; should_fix for high, medium+failure_mode
+cat >$TEST_TMPDIR/test-tiers.json <<'TJSON'
+{"findings": [
+  {"pass": "security", "severity": "critical", "confidence": 0.9, "file": "a.py", "line": 1, "summary": "Critical issue", "failure_mode": "crash"},
+  {"pass": "security", "severity": "high", "confidence": 0.9, "file": "b.py", "line": 2, "summary": "High with failure", "failure_mode": "data loss"},
+  {"pass": "correctness", "severity": "high", "confidence": 0.9, "file": "c.py", "line": 3, "summary": "High without failure"},
+  {"pass": "quality", "severity": "medium", "confidence": 0.9, "file": "d.py", "line": 4, "summary": "Medium with failure", "failure_mode": "slow"},
+  {"pass": "quality", "severity": "medium", "confidence": 0.9, "file": "e.py", "line": 5, "summary": "Medium without failure"},
+  {"pass": "quality", "severity": "low", "confidence": 0.9, "file": "f.py", "line": 6, "summary": "Low finding"}
+]}
+TJSON
+ENRICH_TIERS=$(python3 "$SCRIPTS/enrich-findings.py" --judge-findings $TEST_TMPDIR/test-tiers.json 2>/dev/null)
+assert_json_field "tier: critical → must_fix" "$ENRICH_TIERS" \
+	"any(f['action_tier']=='must_fix' and f['summary']=='Critical issue' for f in d['findings'])"
+assert_json_field "tier: high+failure_mode → must_fix" "$ENRICH_TIERS" \
+	"any(f['action_tier']=='must_fix' and f['summary']=='High with failure' for f in d['findings'])"
+assert_json_field "tier: high without failure → should_fix (after evidence downgrade)" "$ENRICH_TIERS" \
+	"any(f['action_tier']=='consider' and f['summary']=='High without failure' for f in d['findings'])"
+assert_json_field "tier: medium+failure_mode → should_fix" "$ENRICH_TIERS" \
+	"any(f['action_tier']=='should_fix' and f['summary']=='Medium with failure' for f in d['findings'])"
+assert_json_field "tier: medium without failure → consider" "$ENRICH_TIERS" \
+	"any(f['action_tier']=='consider' and f['summary']=='Medium without failure' for f in d['findings'])"
+assert_json_field "tier: low → consider" "$ENRICH_TIERS" \
+	"any(f['action_tier']=='consider' and f['summary']=='Low finding' for f in d['findings'])"
+rm -f $TEST_TMPDIR/test-tiers.json
 
 # ============================================================
 echo ""
