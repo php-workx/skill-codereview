@@ -49,7 +49,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "passes": [],
     "force_all_passes": False,
     "triage": {
-        "enabled": False,
+        "enabled": True,
         "trivial_line_threshold": 3,
         "always_review_extensions": [
             ".py",
@@ -626,7 +626,14 @@ def assemble_expert_panel(
             for sec_expert in ("security-dataflow", "security-config"):
                 if sec_expert not in panel_names and sec_expert not in disabled:
                     panel.append(_build_expert(sec_expert, config, "security_alias"))
+        known_experts = set(CORE_EXPERTS) | set(EXTENDED_EXPERT_PATTERNS)
+        invalid = sorted(allowed_passes - known_experts)
+        valid = allowed_passes & known_experts
+        if invalid and not valid:
+            raise ValueError(f"Unknown pass names: {', '.join(invalid)}")
         panel = [expert for expert in panel if expert["name"] in allowed_passes]
+        if not panel:
+            raise ValueError("No review passes remain after applying configuration.")
     return panel
 
 
@@ -1182,6 +1189,13 @@ def _cleanup_stale_session(session_dir: Path) -> None:
     for pattern in (
         "explorer-*.json",
         "explorer-*-prompt.md",
+        "judge-input.json",
+        "judge-prompt.md",
+        "judge.json",
+        "enriched.json",
+        "report.*",
+        "finalize.json",
+        "timing.jsonl",
         "launch.json",
         "diff.patch",
         "changed-files.txt",
@@ -1925,9 +1939,11 @@ def assemble_report_envelope(
 ) -> dict[str, Any]:
     """Build the final review report envelope."""
     final_findings = lifecycle.get("findings", [])
-    tier_summary = enriched.get(
-        "tier_summary", {"must_fix": 0, "should_fix": 0, "consider": 0}
-    )
+    tier_summary = {"must_fix": 0, "should_fix": 0, "consider": 0}
+    for finding in final_findings:
+        action_tier = finding.get("action_tier")
+        if action_tier in tier_summary:
+            tier_summary[action_tier] += 1
     verdict, verdict_reason = derive_verdict(final_findings, tier_summary)
     files_reviewed = launch_packet.get("changed_files", [])
     tool_status = launch_packet.get("tool_status") or {

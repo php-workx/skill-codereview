@@ -13,11 +13,13 @@ from scripts.orchestrate import (
     PromptBudgetExceeded,
     PromptContext,
     SubprocessError,
+    _cleanup_stale_session,
     _apply_spec_scope,
     _chunk_diff,
     _count_changed_lines_for_file,
     assemble_expert_panel,
     assemble_explorer_prompt,
+    assemble_report_envelope,
     build_parser,
     check_token_budget,
     extract_diff,
@@ -204,6 +206,68 @@ class OrchestratePlumbingTests(unittest.TestCase):
         names = [e["name"] for e in panel]
         self.assertIn("security-dataflow", names)
         self.assertIn("security-config", names)
+
+    def test_assemble_expert_panel_rejects_unknown_only_passes(self) -> None:
+        diff_result = DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base="abc123",
+            changed_files=["src/app.py"],
+            diff_text="@@\n+print('ok')\n",
+        )
+        with self.assertRaisesRegex(ValueError, "Unknown pass names"):
+            assemble_expert_panel(
+                diff_result,
+                config={"passes": ["definitely-not-a-pass"]},
+                spec_content=None,
+            )
+
+    def test_cleanup_stale_session_removes_judge_and_report_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir)
+            (session_dir / ".codereview-session").write_text("ok\n", encoding="utf-8")
+            stale_files = [
+                "judge-input.json",
+                "judge-prompt.md",
+                "judge.json",
+                "enriched.json",
+                "report.json",
+                "report.md",
+                "finalize.json",
+                "timing.jsonl",
+            ]
+            for name in stale_files:
+                (session_dir / name).write_text("stale\n", encoding="utf-8")
+
+            _cleanup_stale_session(session_dir)
+
+            for name in stale_files:
+                self.assertFalse((session_dir / name).exists())
+
+    def test_assemble_report_envelope_uses_lifecycle_findings_for_tier_summary(
+        self,
+    ) -> None:
+        report = assemble_report_envelope(
+            launch_packet={"changed_files": ["a.py"]},
+            enriched={"tier_summary": {"must_fix": 1, "should_fix": 0, "consider": 0}},
+            lifecycle={
+                "findings": [{"summary": "warn", "action_tier": "should_fix"}],
+                "suppressed_findings": [],
+                "lifecycle_summary": {
+                    "new": 1,
+                    "recurring": 0,
+                    "rejected": 0,
+                    "deferred": 0,
+                    "deferred_resurfaced": 0,
+                },
+            },
+            judge_output={},
+        )
+
+        self.assertEqual(
+            report["tier_summary"], {"must_fix": 0, "should_fix": 1, "consider": 0}
+        )
+        self.assertEqual(report["verdict"], "WARN")
 
     def test_build_expert_pass_models_security_alias(self):
         from scripts.orchestrate import _build_expert
