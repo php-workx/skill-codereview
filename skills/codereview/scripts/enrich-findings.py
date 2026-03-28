@@ -217,6 +217,82 @@ def boost_severity(severity: str) -> str:
     return SEVERITY_ORDER[next_idx]
 
 
+def downgrade_action_tier(tier: str) -> str:
+    """Downgrade action_tier by one level (must_fix→should_fix→consider)."""
+    if tier == "must_fix":
+        return "should_fix"
+    if tier == "should_fix":
+        return "consider"
+    return "consider"
+
+
+def apply_pre_existing_rules(findings: list) -> tuple[list, int]:
+    """F8: Pre-existing bug classification.
+
+    Rules:
+    - pre_existing=True, newly_reachable=False → drop (unrelated to diff)
+    - pre_existing=True, newly_reachable=True, severity medium/low → downgrade tier by one level
+    - pre_existing and newly_reachable pass through to output unchanged
+
+    Returns (kept_findings, dropped_count).
+    """
+    kept = []
+    dropped = 0
+    for f in findings:
+        pre_existing = f.get("pre_existing", False)
+        newly_reachable = f.get("pre_existing_newly_reachable", False)
+
+        if pre_existing and not newly_reachable:
+            # Safety net: drop non-reachable pre-existing findings
+            dropped += 1
+            continue
+
+        if pre_existing and newly_reachable:
+            severity = f.get("severity", "low").lower()
+            if severity in ("medium", "low"):
+                f["action_tier"] = downgrade_action_tier(
+                    f.get("action_tier", "consider")
+                )
+
+        kept.append(f)
+    return kept, dropped
+
+
+AI_CODEGEN_PATTERNS = [
+    "placeholder",
+    "stub",
+    "todo",
+    "unwired",
+    "unused",
+    "dead code",
+    "mock data",
+    "hardcoded",
+    "localhost",
+    "example.com",
+    "silent",
+    "swallow",
+    "empty catch",
+    "pass",
+    "over-abstract",
+    "unnecessary",
+    "premature",
+]
+
+
+def apply_provenance_boost(findings: list[dict], provenance: str) -> list[dict]:
+    """Boost severity of AI-codegen risk findings when provenance indicates AI generation."""
+    if provenance not in ("ai-assisted", "autonomous"):
+        return findings
+    for finding in findings:
+        summary_lower = (
+            finding.get("summary", "") + " " + finding.get("evidence", "")
+        ).lower()
+        if finding.get("action_tier") == "consider":
+            if any(p in summary_lower for p in AI_CODEGEN_PATTERNS):
+                finding["action_tier"] = "should_fix"
+    return findings
+
+
 def load_code_intel(path: str) -> dict:
     """Load code-intel graph JSON.  Returns empty dict on failure."""
     if not path:
@@ -307,6 +383,12 @@ def main():
         default=False,
         help="Skip generating llm_prompt fields.",
     )
+    parser.add_argument(
+        "--provenance",
+        choices=["human", "ai-assisted", "autonomous", "unknown"],
+        default="unknown",
+        help="Code provenance: human, ai-assisted, autonomous, unknown (default: unknown).",
+    )
     args = parser.parse_args()
 
     # 1. Load both finding sets
@@ -351,6 +433,12 @@ def main():
     for f in combined:
         f["action_tier"] = assign_action_tier(f)
 
+    # 9b. F8: Pre-existing bug classification — drop non-reachable, downgrade reachable medium/low
+    combined, dropped_pre_existing = apply_pre_existing_rules(combined)
+
+    # 9c. F9: Provenance boost — elevate AI-codegen risk findings from consider→should_fix
+    combined = apply_provenance_boost(combined, args.provenance)
+
     # 10. Generate llm_prompt (deterministic template, not an LLM call)
     if not args.no_llm_prompts:
         for f in combined:
@@ -366,9 +454,11 @@ def main():
     output = {
         "findings": combined,
         "tier_summary": tier_summary,
+        "provenance": args.provenance,
         "dropped": {
             "below_confidence_floor": below_confidence_floor,
             "downgraded_to_medium": downgraded_to_medium,
+            "pre_existing_not_reachable": dropped_pre_existing,
         },
     }
     json.dump(output, sys.stdout, indent=2)

@@ -10,6 +10,11 @@
       "enum": ["standard", "chunked"],
       "description": "Whether the review used standard mode or chunked mode for large changesets"
     },
+    "provenance": {
+      "type": ["string", "null"],
+      "enum": ["human", "ai-assisted", "autonomous", "unknown", null],
+      "description": "How the reviewed code was produced. Affects review rigor level."
+    },
     "chunk_count": {
       "type": ["integer", "null"],
       "description": "Number of review chunks (null or omitted in standard mode)"
@@ -264,6 +269,10 @@
             "type": ["string", "null"],
             "description": "Concrete evidence: code snippet, tool output, or reproduction steps"
           },
+          "evidence_source": {
+            "type": ["string", "null"],
+            "description": "How the evidence was obtained. Must reference a specific tool call (e.g., 'Read src/auth/login.py:45-60') or cross-file context. If assumption-based, must state the assumption."
+          },
           "failure_mode": {
             "type": ["string", "null"],
             "description": "What breaks and when. Required for high/critical severity."
@@ -282,6 +291,20 @@
             "items": { "type": "string", "enum": ["unit", "integration", "e2e"] },
             "description": "Which categories of tests are needed for this finding"
           },
+          "test_level": {
+            "type": ["string", "null"],
+            "enum": ["L0", "L1", "L2", "L3", "L4", "L5", null],
+            "description": "Test pyramid level classification (L0=Contract through L5=E2E). Populated by test-adequacy findings."
+          },
+          "bug_finding_level": {
+            "type": ["string", "null"],
+            "enum": ["BF1", "BF2", "BF4", "BF6", "BF8", null],
+            "description": "Bug-finding test level (BF1=Property through BF8=Backward-compat). Populated by test-adequacy findings."
+          },
+          "gap_reason": {
+            "type": ["string", "null"],
+            "description": "Why the identified test level is needed for this specific code. Populated by test-adequacy findings."
+          },
           "action_tier": {
             "type": "string",
             "enum": ["must_fix", "should_fix", "consider"],
@@ -295,6 +318,14 @@
             "type": "string",
             "enum": ["new", "recurring"],
             "description": "Whether this finding appeared in a previous review"
+          },
+          "pre_existing": {
+            "type": "boolean",
+            "description": "True when the bug exists in unchanged code but is surfaced because the diff creates a new path to it. Default false (omitted = introduced by diff)."
+          },
+          "pre_existing_newly_reachable": {
+            "type": "boolean",
+            "description": "True when a pre-existing bug existed before but the diff creates a new code path to trigger it. Only meaningful when pre_existing is true."
           }
         }
       }
