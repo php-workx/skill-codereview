@@ -1,1204 +1,158 @@
 ---
 name: codereview
-description: 'Use when reviewing local code changes — staged files, branches, commit ranges, or paths — before they become a PR. Runs deterministic scans (semgrep, trivy, shellcheck) and parallel AI explorer-judge passes to find bugs, security issues, missing tests, and spec gaps. Also works on PRs but optimized for pre-merge local review.'
+description: "Use when reviewing local code changes before they become a PR. Deterministic work lives in scripts/orchestrate.py; this skill is the thin wrapper that drives the flow."
 ---
 
 # Code Review Skill
 
-> **Purpose:** Comprehensive AI code review using deterministic tools and parallel specialized passes with explorer sub-agents. Finds everything worth fixing — code agents are fast, so surface all actionable issues.
-
-**YOU MUST EXECUTE THIS WORKFLOW. Do not just describe it.**
+Use this skill to run a local review end to end. Do not reimplement the pipeline in the skill; delegate deterministic work to `scripts/orchestrate.py`.
 
 ## Quick Start
 
-```bash
-/codereview                             # review staged changes or HEAD~1
-/codereview 42                          # review PR #42
-/codereview --base main                 # all commits on branch since main
-/codereview --range abc123..def456      # specific commit range
-/codereview --spec docs/plan.md         # review against a spec/plan
-/codereview src/auth/                   # review changes in specific path
-/codereview --base main --spec plan.md  # branch review with spec check
-/codereview --base main --no-chunk     # force standard mode (skip chunking)
-/codereview --force-chunk              # force chunked mode for testing
-/codereview suppress <finding-id> --status rejected --reason "explanation"
-/codereview suppress <finding-id> --status deferred --defer-days 30 --reason "next sprint"
+```text
+/codereview                                                  # staged changes or HEAD~1
+/codereview --base main                                      # entire feature branch
+/codereview --range HEAD~5..HEAD                             # specific commits
+/codereview src/auth/                                        # specific path
+/codereview --spec docs/plan.md --base main                  # verify against spec
+/codereview --spec docs/plan.md --spec-scope "Auth" --base main  # one section of spec
+/codereview --base main --no-chunk                           # force standard mode on large diffs
+/codereview 42                                               # PR #42
 ```
 
----
+## When to Use / When NOT to Use
 
-## When to Use
+**Use** when you have local changes that would benefit from a structured review before they become a PR. Works on staged changes, commits, branches, ranges, paths, and open PRs.
 
-- **Before creating a PR** — review your work locally first, catch issues before review roundtrips
-- **After implementing a feature** — verify nothing was missed before sharing
-- **Before merging a feature branch** — wave-end review with `--base main`
-- **After writing code against a spec** — verify requirements with `--spec docs/plan.md`
-- **When you want deeper analysis than linters** — AI explorers trace call paths, check callers, verify test coverage
-- **Agent-assisted workflows** — findings include fix suggestions agents can execute immediately
+**Do NOT use** for reviewing merged code, auditing entire repositories, or as a replacement for CI checks. This skill reviews diffs, not entire codebases.
 
-### Which Mode to Use
+## Execution
 
-| You want to review... | Command |
-|----------------------|---------|
-| Staged changes | `/codereview` (no args) |
-| Last commit (nothing staged) | `/codereview` (no args) |
-| Entire feature branch | `/codereview --base main` |
-| Specific commits | `/codereview --range abc..def` |
-| Specific files/paths | `/codereview src/auth/` |
-| A pull request | `/codereview 42` |
-| Changes against a spec | `/codereview --spec docs/plan.md --base main` |
-| One section of a spec | `/codereview --spec docs/plan.md --spec-scope "Auth" --base main` |
+### Error handling (applies to all steps)
 
----
+After each script phase, check the `status` field in the output JSON. If `"error"`: report the message to the user and stop. After each agent step, if the agent fails or returns no output, report the failure and offer to retry or skip.
 
-## When NOT to Use
+### Step 1: Prepare
 
-- **Single-line typo fixes** — just fix it, no review needed
-- **Documentation-only changes** — markdown/comment edits don't need multi-pass review
-- **Generated code** (protobuf, OpenAPI stubs) — review the generator config, not the output
-- **Reverts** — if reverting a known-bad commit, skip the review
-- **Empty diffs** — the skill detects this and exits, but don't invoke it if you already know there's nothing to review
-
----
-
-## Execution Steps
-
-### Timing Protocol (Observability)
-
-Record timing for observability throughout the review. This data helps identify bottlenecks and optimize the pipeline.
-
-At the start of each review, if `scripts/timing.sh` exists:
-```bash
-[ -f scripts/timing.sh ] && bash scripts/timing.sh reset
-[ -f scripts/timing.sh ] && bash scripts/timing.sh start "review_total"
-```
-
-Wrap each major step with timing calls (skip silently if timing.sh is absent):
-```bash
-[ -f scripts/timing.sh ] && bash scripts/timing.sh start "<step_name>"
-# ... step execution ...
-[ -f scripts/timing.sh ] && bash scripts/timing.sh stop "<step_name>"
-```
-
-Step names to use:
-- `step_1_target` — target detection and diff computation
-- `step_2a1_discover` — project tooling discovery
-- `step_2d_complexity` — complexity analysis
-- `step_2i_git_risk` — git history risk scoring
-- `step_2j_coverage` — test coverage collection
-- `step_2_context` — remaining context gathering (callers, types, dead code)
-- `step_3_scans` — deterministic scan execution
-- `step_4_explorers` — AI explorer sub-agent execution (start when launched, stop when all complete)
-- `step_4_judge` — AI judge execution
-- `step_5_enrich` — finding enrichment (enrich-findings.py)
-- `step_5_lifecycle` — finding lifecycle (lifecycle.py)
-- `step_6_report` — report formatting
-
-Use `mark` for point events:
-```bash
-bash scripts/timing.sh mark "files_reviewed" "$FILE_COUNT"
-bash scripts/timing.sh mark "findings_count" "$FINDING_COUNT"
-```
-
-After all steps:
-```bash
-[ -f scripts/timing.sh ] && bash scripts/timing.sh stop "review_total"
-[ -f scripts/timing.sh ] && bash scripts/timing.sh summary > /tmp/codereview-timing.json
-```
-
-Include the timing summary in the JSON review envelope as `_timing` and in the markdown report as a "Timing" section. If `timing.sh` is not available, skip all timing calls silently — timing must never block the review.
-
-### Step 1: Determine Review Target
-
-Parse the argument to determine what to review:
-
-**If PR number provided** (digits only):
-```bash
-gh pr diff <number> > /tmp/codereview-diff.patch
-CHANGED_FILES=$(gh pr view <number> --json files --jq '.files[].path')
-gh pr view <number> --json title,body,files --jq '{title: .title, body: .body, files: [.files[].path]}' 2>/dev/null
-# SCOPE=pr, PR_NUMBER=<number>
-```
-
-**If `--base <branch>` provided** (branch review — all commits since divergence):
-```bash
-# Three-dot diff: everything committed on this branch since it diverged from <branch>
-MERGE_BASE=$(git merge-base <branch> HEAD)
-git diff $MERGE_BASE..HEAD
-CHANGED_FILES=$(git diff $MERGE_BASE..HEAD --name-only)
-# SCOPE=branch, BASE_REF=<branch>, HEAD_REF=HEAD
-```
-This is the primary mode for **wave-end reviews** — review all work done on a feature branch.
-
-**If `--range <from>..<to>` provided** (specific commit range):
-```bash
-git diff <from>..<to>
-CHANGED_FILES=$(git diff <from>..<to> --name-only)
-# SCOPE=range, BASE_REF=<from>, HEAD_REF=<to>
-```
-Use this for reviewing a specific wave of commits (e.g., "review the last 5 commits").
-
-**If path provided:**
-```bash
-git diff HEAD -- <path>
-CHANGED_FILES=$(git diff HEAD --name-only -- <path>)
-# SCOPE=path
-```
-
-**If no argument (auto-detect):**
-```bash
-# Try staged changes first
-STAGED=$(git diff --cached --stat 2>/dev/null)
-if [ -n "$STAGED" ]; then
-  git diff --cached
-  CHANGED_FILES=$(git diff --cached --name-only)
-  # SCOPE=staged
-else
-  # Fall back to last commit
-  git diff HEAD~1
-  CHANGED_FILES=$(git diff HEAD~1 --name-only)
-  # SCOPE=commit
-fi
-```
-
-**Flags can be combined:** `/codereview --spec docs/plan.md --spec-scope "Authentication" --base main` applies `--base` (for the diff target), `--spec` (for requirements checking), and `--spec-scope` (to restrict to a section of the spec). Parse all flags before selecting the diff mode.
-
-**If `--spec <path>` provided:** Read the spec/plan file. It will be included in the context packet so AI passes can check implementation completeness. This also enables the spec-verification explorer pass.
-
-**If `--spec-scope <text>` provided:** Store the scope text for use by the spec-verification explorer. The explorer will filter requirements to the matching section/milestone of the spec. Requires `--spec` — if given without `--spec`, warn the user and ignore.
-
-**Pre-flight check:** If the diff is empty, tell the user "No changes found to review" and stop.
-
-**Store results for later steps:**
-- `DIFF` — the full diff content
-- `CHANGED_FILES` — list of changed file paths (one per line, extracted via `--name-only`)
-- `SCOPE` — one of `branch`, `range`, `staged`, `commit`, `pr`, `path`
-- `BASE_REF` / `HEAD_REF` — the base and head references
-- `PR_NUMBER` — the PR number in PR mode, `null` otherwise
-- `SPEC_CONTENT` — the spec/plan file content, if `--spec` was provided
-- `SPEC_SCOPE` — the scope filter text from `--spec-scope`, if provided
-
-These variables are referenced throughout subsequent steps.
-
-**If `--no-chunk` provided:** Force standard (non-chunked) review mode even if the diff exceeds large-diff thresholds. Useful when you want the original single-explorer behavior and accept context truncation risk.
-
-**If `--force-chunk` provided:** Force chunked review mode even if the diff is below thresholds. Useful for testing the chunked pipeline on small diffs.
-
-### Step 1.5: Mode Selection, Diff Triage & File Clustering
-
-After Step 1, determine whether to use standard mode or large-diff chunked mode.
-
-**1.5a. Mode selection:**
+Create a session directory and run the orchestrator:
 
 ```bash
-FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l | tr -d ' ')
-DIFF_LINES=$(echo "$DIFF" | wc -l | tr -d ' ')
+SESSION_DIR=$(mktemp -d /tmp/codereview-XXXXXXXX)
+python3 scripts/orchestrate.py prepare --session-dir "$SESSION_DIR" [flags from user]
 ```
 
-| Condition | Mode |
-|-----------|------|
-| `--force-chunk` flag provided | Large-diff (chunked) mode |
-| `--no-chunk` flag provided | Standard mode |
-| `FILE_COUNT > 80` OR `DIFF_LINES > 8000` | Large-diff (chunked) mode |
-| Otherwise | Standard mode |
+Read `$SESSION_DIR/launch.json`. Check the `status` field:
+- `"empty"`: tell user "No changes found to review" and stop.
+- `"error"`: report the error message and stop.
+- `"ready"`: proceed.
 
-Thresholds are configurable via `.codereview.yaml` (`large_diff.file_threshold` and `large_diff.line_threshold`). Defaults: 80 files, 8000 lines.
+If `mode` is `"chunked"`: tell user "Chunked review mode is not yet available. Proceeding in standard mode." and continue with the standard flow below.
 
-If large-diff mode activates, emit:
-```
-Large changeset detected (<N> files, <N> lines changed). Activating chunked review mode.
-```
+### Step 2: Launch Explorers
 
-If standard mode: skip the rest of Step 1.5 and proceed directly to Step 2 (the existing flow is unchanged).
+Read the launch packet. For each wave in `waves[]`:
 
-**1.5b. Build changeset manifest:**
+Launch ALL tasks in the wave in parallel (single message, multiple Agent tool calls). For each task:
+- Read the assembled prompt from `task.assembled_prompt_file`
+- Set `model` from `task.model` (if present; omit for default)
+- Set `description` to `"Review explorer: <task.name>"`
+- Set `run_in_background: true` for parallel execution
 
-The manifest is a lightweight structured summary of the entire changeset (~3-5k tokens even for 200+ files). It replaces the full diff in contexts where space is constrained (cross-chunk synthesis, hierarchical judge prompts).
+Wait for all tasks in this wave to complete before starting the next wave.
+
+**Explorer failure handling:**
+- If a task with `core: true` fails, retry it once. If it fails again, warn the user: "`<name>` analysis unavailable — review may miss issues in this area."
+- If a non-core (activated) task fails, skip it and log a warning. Do not retry.
+- If zero core explorers succeed after retries, warn the user prominently: "No core analysis completed. Consider retrying the full review." Continue only if the user confirms.
+
+After each explorer completes, immediately:
+1. Extract the JSON array or object from its response (find the `[...]` or `{...}`).
+2. Write it to `task.output_file`.
+3. Process one result at a time — do not accumulate all results in context.
+
+If `post_wave_task` exists in the launch packet, wait until all waves complete, read `post_wave_task.assembled_prompt_file`, launch the task, wait for it to finish, capture its result, and write that result to `post_wave_task.output_file`. Only proceed to Step 3 after that artifact exists.
+
+Relay progress: `[AI] Launching N explorers in parallel...`, `[AI] M/N complete...`, `[AI] All explorers complete.`
+
+### Step 3: Post-Explorer Processing
 
 ```bash
-# Produce per-file change stats
-git diff $BASE_REF..$HEAD_REF --numstat
+python3 scripts/orchestrate.py post-explorers --session-dir "$SESSION_DIR"
 ```
 
-For each file in `CHANGED_FILES`, record:
+Read `$SESSION_DIR/judge-input.json`. Check for errors.
 
-```
-<path> | <lines_added>+/<lines_removed>- | <file_type> | <change_category> | <risk_tier>
-```
+### Step 4: Launch Judge
 
-Where:
-- `file_type` — detected from extension (`.py` = python, `.go` = go, `.ts` = typescript, etc.)
-- `change_category` — one of `new_file`, `deleted_file`, `renamed`, `modified`
-- `risk_tier` — assigned per the rules below
+Launch a single sub-agent:
+- Read the prompt from `judge_prompt_file` in the judge input JSON
+- Set `model` from `judge_model`
+- Set `description` to `"Review judge: synthesize findings"`
 
-**1.5c. File risk tiering:**
+The judge needs Read, Grep, and Glob tools for adversarial verification — use a general-purpose sub-agent, not a limited one.
 
-Assign each file a risk tier. Evaluate in order — first match wins:
+After the judge completes, extract JSON from its response and write it to `judge_output_file`.
 
-**Tier 1 (Critical)** — any of:
-- Path contains: `auth`, `security`, `crypto`, `payment`, `billing`, `secret`, `credential`, `session`, `token`
-- Path matches any `focus_paths` pattern from `.codereview.yaml`
-- `lines_added + lines_removed > 200`
-- Diff for this file contains new route/endpoint definitions (grep for `route|endpoint|handler|@app\.|@api\.|@router\.`)
-- Historical risk = high (from `scripts/git-risk.sh` output — file has frequent bug-related commits; available after Step 2i runs; apply retroactively if Step 1.5c runs before 2i)
-
-**Tier 3 (Low-risk)** — any of (unless already Tier 1):
-- Path matches any `ignore_paths` pattern from `.codereview.yaml`
-- File is a test file (matches `test_*.py`, `*_test.go`, `*.test.ts`, `*.spec.ts`, etc.)
-- File is documentation (`.md`, `.txt`, `.rst`)
-- File is config (`.yaml`, `.yml`, `.json`, `.toml`, `.env.example`)
-- File is a migration or schema file
-- File is generated (matches `*.generated.*`, `*.pb.go`, `*.g.dart`, etc.)
-- `lines_added + lines_removed < 20`
-
-**Tier 2 (Standard)** — everything else.
-
-Store: `MANIFEST` — the full manifest text, `TIER1_FILES`, `TIER2_FILES`, `TIER3_FILES` — file lists by tier.
-
-**1.5d. File clustering:**
-
-Group files into review chunks of 8-15 files each, with max 2000 diff lines per chunk.
-
-**Phase 1 — Directory-based grouping:**
-Group files by their top-level directory (or first two directory levels for deep trees):
-```
-src/auth/login.py         → cluster: src/auth
-src/auth/session.py       → cluster: src/auth
-src/api/orders.py         → cluster: src/api
-tests/test_auth.py        → cluster: tests (initially)
-```
-
-**Phase 2 — Test pairing:**
-Associate test files with their implementation cluster:
-- `tests/test_auth.py` → pairs with `src/auth/` cluster
-- `src/auth/login_test.go` → pairs with `src/auth/` cluster
-- Test files that cannot be paired stay in a "tests" cluster
-
-**Phase 3 — Size balancing:**
-
-| Constraint | Default | Config Key |
-|-----------|---------|-----------|
-| Max files per chunk | 15 | `large_diff.max_chunk_files` |
-| Max diff lines per chunk | 2000 | `large_diff.max_chunk_lines` |
-| Min files per chunk | 3 | — |
-
-- **Split** clusters that exceed max files or max diff lines. Keep closely related files together (same subdirectory, shared imports from the diff).
-- **Merge** clusters with fewer than 3 files and under 500 total diff lines into the most related neighboring cluster (same parent directory).
-
-Store: `CHUNKS` — an array of chunk definitions, each with:
-- `chunk_id` — sequential number (1, 2, 3, ...)
-- `description` — directory path(s) covered (e.g., "src/auth/*")
-- `files` — list of file paths in this chunk
-- `risk_tier` — highest tier of any file in the chunk (Tier 1 > Tier 2 > Tier 3)
-- `diff_lines` — total lines changed in this chunk
-- `cross_chunk_deps` — files in this chunk that import/reference files in other chunks
-
-Also store: `CHUNK_COUNT` — total number of chunks, `REVIEW_MODE` — `"chunked"`.
-
-**1.5e. Diff offloading for orchestrator context protection:**
-
-Write the full diff to a temp file instead of holding it in context:
-```bash
-git diff $BASE_REF..$HEAD_REF > /tmp/codereview-diff.patch
-```
-
-Extract chunk-specific diffs fresh from git when needed:
-```bash
-# For chunk N, extract diff for only its files
-git diff $BASE_REF..$HEAD_REF -- file1.py file2.py file3.py > /tmp/codereview-chunk-N.patch
-```
-
-This prevents the orchestrator's context window from being consumed by the full diff (~40-80k tokens for large changesets).
-
-### Step 2: Gather Context (Agentic Exploration)
-
-Before reviewing, understand the surrounding code. This is critical for catching integration bugs.
-
-> **Large-diff mode:** If `REVIEW_MODE = "chunked"`, use the **tiered context gathering** described in Step 2-L below instead of Steps 2a–2h. In standard mode, continue with 2a–2h as written.
-
-**2a. Identify scope from the diff:**
-- Extract changed file paths, function names, class names
-- Note added/removed imports and dependencies
-
-**2a-1. Discover project tooling (implemented by `scripts/discover-project.py` + agent interpretation — do not reimplement):**
-
-Run the project discovery script to find the project's build system, quality commands, and monorepo structure:
-```bash
-echo "$CHANGED_FILES" | python3 scripts/discover-project.py > /tmp/codereview-project.json
-```
-
-The script outputs raw data: which build files exist, target/script names, config sections, CI file paths, monorepo orchestrator. It does NOT interpret what targets do — that's your job.
-
-After the script runs, **read the build files it identified** (Makefile, package.json, Justfile, etc.) using the Read tool:
-1. For targets/scripts with unclear names (`preflight`, `verify`, `checks`, `ci`), read their definitions to understand what they actually run
-2. Identify quality-relevant commands (linting, testing, coverage, type checking, security scanning)
-3. Map each to standard categories: `lint`, `test`, `coverage`, `typecheck`, `security`
-4. For monorepos, decide whether to run via orchestrator (`turbo run lint --filter=...`) or directly in project root
-
-Write the interpreted profile to `/tmp/codereview-project-interpreted.json` for `run-scans.sh` to consume via `--project-profile`.
-
-If the script is not available or fails, skip project discovery — `run-scans.sh` still runs Tier 1 and Tier 2 tools without a project profile.
-
-**2b. Explore surrounding code using tools:**
-
-Use `Grep`, `Glob`, and `Read` to examine:
-1. **Callers** of changed functions — who calls this code?
-2. **Callees** — what does the changed code depend on?
-3. **Related test files** — do tests exist for the changed code?
-4. **Type definitions and interfaces** referenced in the diff
-5. **Configuration files** that might be affected
-
-**2c. Dead code / YAGNI check:**
-
-For each changed or newly added function, check if it's actually called:
-```bash
-# For each new/modified function name, grep for callers
-# If a function has zero callers outside its own file and tests, flag it
-```
-Include dead-code findings in the context packet so the review judge can flag YAGNI issues rather than reviewing unused code in detail.
-
-**2d. Complexity analysis (implemented by `scripts/complexity.sh` — do not reimplement):**
-
-Run the complexity analysis script:
-```bash
-echo "$CHANGED_FILES" | bash scripts/complexity.sh > /tmp/codereview-complexity.json
-```
-
-The script detects `.py` files (runs `radon` if installed) and `.go` files (runs `gocyclo` if installed). It only reports functions rated C or worse (complexity >= 11). Output is JSON with `hotspots[]` and `tool_status`.
-
-If the script is not available or fails, fall back to running radon/gocyclo manually per the logic in `references/deterministic-scans.md`.
-
-| Score | Rating | Implication |
-|-------|--------|-------------|
-| A (1-5) | Simple | Good |
-| B (6-10) | Moderate | OK |
-| C (11-20) | Complex | Flag for review |
-| D (21-30) | Very complex | Recommend refactor |
-| F (31+) | Untestable | Must refactor |
-
-Include complexity hotspots in the context packet so AI passes can flag high-complexity functions.
-
-**2e. Check for repo-level review instructions:**
-```bash
-for f in .github/codereview.md .codereview.yaml .codereview.md AGENTS.md .github/copilot-instructions.md; do
-  if [ -f "$f" ]; then
-    echo "Found review instructions: $f"
-  fi
-done
-```
-
-If a config file exists, read it and incorporate its instructions into the review passes.
-
-**2f. Load language standards (if available):**
-
-Check if the `standards` skill is installed. If found, load the Tier 1 reference for each language detected in `CHANGED_FILES`. These give explorers concrete rules to check against (e.g., bare `except:` in Python, missing `err != nil` in Go).
+### Step 5: Finalize
 
 ```bash
-# Detect languages from CHANGED_FILES extensions
-LANGS=""
-echo "$CHANGED_FILES" | grep -qE '\.py$'  && LANGS="$LANGS python"
-echo "$CHANGED_FILES" | grep -qE '\.go$'  && LANGS="$LANGS go"
-echo "$CHANGED_FILES" | grep -qE '\.(ts|tsx)$' && LANGS="$LANGS typescript"
-# JS/JSX maps to typescript — the standards skill uses a single typescript.md for both
-echo "$CHANGED_FILES" | grep -qE '\.(js|jsx)$' && LANGS="$LANGS typescript"
-echo "$CHANGED_FILES" | grep -qE '\.sh$'  && LANGS="$LANGS shell"
-
-# Try to find standards skill references
-STANDARDS_DIR=""
-for dir in \
-  skills/standards/references \
-  .claude/plugins/cache/agentops-marketplace/agentops/*/skills/standards/references; do
-  if [ -d "$dir" ]; then
-    STANDARDS_DIR="$dir"
-    break
-  fi
-done
-
-if [ -n "$STANDARDS_DIR" ]; then
-  for lang in $LANGS; do
-    if [ -f "$STANDARDS_DIR/${lang}.md" ]; then
-      echo "Loaded standards: $STANDARDS_DIR/${lang}.md"
-      # Read and include in context packet
-    fi
-  done
-else
-  echo "INFO: standards skill not installed. Install for language-specific review rules."
-  echo "  See: agentops marketplace → standards"
-fi
+python3 scripts/orchestrate.py finalize --session-dir "$SESSION_DIR"
 ```
 
-Include loaded standards in the context packet so explorers can check code against language-specific best practices. Without standards installed, explorers still work — they just rely on their built-in knowledge.
+Read `$SESSION_DIR/finalize.json`. Present the report to the user:
+- Show the verdict, tier summary, and `report_preview`
+- Tell user where full artifacts are saved (`json_artifact`, `markdown_artifact` paths)
 
-**2g. Load spec/plan (if provided or auto-detected):**
+### Step 6: PR Comments (optional)
 
-If `--spec <path>` was provided, read it. Otherwise, look for a plan reference:
-```bash
-# Check git log for issue/bead references
-git log --oneline HEAD~3..HEAD 2>/dev/null | head -5
-# Check for plan docs
-ls .agents/plans/ docs/plans/ 2>/dev/null | head -5
-```
-If a spec is found, include it in the context packet for requirements completeness checking.
+If in PR mode and the user asks, post findings as inline PR comments using `gh api`. Always ask before posting — never auto-post.
 
-**2h. Build a context packet** — a summary containing:
-- The full diff
-- List of changed files with brief descriptions
-- Key surrounding code snippets (callers, interfaces, types)
-- Dead code flags (functions with no callers)
-- Complexity hotspots (from `scripts/complexity.sh` output at `/tmp/codereview-complexity.json`)
-- Git history risk scores (from `scripts/git-risk.sh` output at `/tmp/codereview-git-risk.json`)
-- Test coverage data (from `scripts/coverage-collect.py` output at `/tmp/codereview-coverage.json`)
-- Project tooling profile (from `scripts/discover-project.py` + agent interpretation)
-- Language standards (if loaded)
-- Spec/plan content (if available)
-- Any repo-level review instructions found
+### Step 7: Cleanup
 
-**2i. Git history risk scoring (implemented by `scripts/git-risk.sh` — do not reimplement):**
-
-Run the git history risk script:
-```bash
-echo "$CHANGED_FILES" | bash scripts/git-risk.sh > /tmp/codereview-git-risk.json
-```
-
-The script computes churn frequency and bug-related commit counts for each changed file over the last 6 months, producing a per-file risk tier (high/medium/low). Include the output in the context packet (Step 2h).
-
-If the script is not available, skip git history risk — explorers still work without it.
-
-**2j. Test coverage data (implemented by `scripts/coverage-collect.py` — do not reimplement):**
-
-Run the coverage collection script:
-```bash
-echo "$CHANGED_FILES" | python3 scripts/coverage-collect.py > /tmp/codereview-coverage.json
-```
-
-The script detects languages from file extensions, checks for existing coverage artifacts, and optionally runs tests with `--run-tests`. Output is JSON with per-file coverage data. Include in the context packet (Step 2h).
-
-Note: Coverage shows test execution, not correctness. Review all code thoroughly regardless of coverage.
-
-#### Step 2-L: Tiered Context Gathering (Large-Diff Mode Only)
-
-When `REVIEW_MODE = "chunked"`, replace the monolithic context gathering (Steps 2a–2h) with a two-phase approach that controls context budget.
-
-**Phase A — Lightweight global context (~5k token budget, runs once):**
-
-1. **Import graph** — Use Grep to identify which changed files import/reference other changed files. Record as a dependency map: `file_A → [file_B, file_C]`. This powers the cross-chunk interface summary.
-2. **Dead code check (scoped)** — Only check *newly added* public functions (not modified functions — if they existed before, they presumably have callers). This dramatically reduces Grep calls for large diffs.
-3. **Complexity analysis (hotspots only)** — Run radon/gocyclo but only report functions rated **C or worse** (complexity >= 11). Skip A/B ratings to keep context compact.
-4. **Git history risk scoring** — Run `scripts/git-risk.sh` once globally. Per-file risk scores apply across all chunks (~1-2k tokens).
-5. **Test coverage data** — Run `scripts/coverage-collect.py` once globally. Only include files with < 50% coverage to keep token budget compact. Full coverage table goes to Phase B (per-chunk context) for files in that chunk.
-6. **Repo-level review instructions** — Same as Step 2e (fixed-size, regardless of diff size).
-7. **Language standards** — Same as Step 2f (fixed-size per language).
-8. **Spec/plan** — Same as Step 2g (fixed-size).
-
-Store as `GLOBAL_CONTEXT`.
-
-**Phase B — Chunk-scoped deep context (~10-15k token budget per chunk):**
-
-For each chunk in `CHUNKS`, gather deep context scoped to only that chunk's files:
-
-1. **Callers** of changed functions in the chunk — top 5 callers per function (with code snippets)
-2. **Callees** — top 3 callees per changed function
-3. **Type definitions and interfaces** referenced by the chunk's files
-4. **Related test files** — already paired during clustering, read their structure
-
-**Token enforcement:** The orchestrator estimates token count (~1 token per 4 characters). If chunk context exceeds 15k tokens, truncate progressively:
-1. Reduce callers per function from 5 → 3
-2. Reduce callees per function from 3 → 1
-3. Omit type definitions (explorers can look them up with Read)
-4. Summarize callers as count only: "N callers found (use Grep to investigate)"
-
-Store as `CHUNK_CONTEXT[chunk_id]` — one context packet per chunk.
-
-**Cross-chunk interface summary (built from Phase A import graph):**
-
-For each chunk, generate a cross-chunk interface summary listing how this chunk's files connect to files in other chunks:
-
-```
-## Cross-Chunk Interfaces for Chunk 3
-- src/api/users.py imports src/auth/session.py (Chunk 1) — calls: get_session(), validate_token()
-  - get_session() signature: def get_session(request: Request) -> Session
-  - validate_token() is ALSO MODIFIED in this changeset (Chunk 1)
-- src/api/users.py imports src/models/user.py (Chunk 4) — calls: User.get_by_id()
-  - User.get_by_id() is NOT modified in this changeset
-```
-
-This enables chunk explorers to flag cross-chunk interface risks. Store as `CROSS_CHUNK_SUMMARY[chunk_id]`.
-
-### Step 3: Run Deterministic Scans (implemented by `scripts/run-scans.sh` — do not reimplement)
-
-Run the deterministic scan orchestration script:
-```bash
-echo "$CHANGED_FILES" | bash scripts/run-scans.sh \
-  --base-ref "$BASE_REF" \
-  --project-profile /tmp/codereview-project-interpreted.json \
-  > /tmp/codereview-scans.json
-```
-
-Omit `--project-profile` if project discovery (Step 2a-1) was skipped or failed.
-
-The script handles all deterministic tooling in three tiers:
-- **Tier 1 (baseline, always run):** semgrep, trivy, osv-scanner, gitleaks, shellcheck
-- **Tier 2 (language-detected):** clippy (Rust), ruff (Python), golangci-lint (Go), eslint (JS/TS if config exists), rubocop (Ruby), brakeman (Ruby/Rails security), pmd (Java/Kotlin/Scala)
-- **Tier 3 (project-configured):** commands from `--project-profile` (discovered in Step 2a-1)
-
-The script runs tools in parallel with per-tool timeouts, normalizes all output to the standard finding shape, deduplicates across tiers, and outputs `{ "findings": [...], "tool_status": {...} }`.
-
-If the script is not available or fails, fall back to running tools manually per `references/deterministic-scans.md`.
-
-**See `references/deterministic-scans.md`** for tool documentation, install instructions, and cache setup rationale. The executable logic from that document has been extracted to `scripts/run-scans.sh` — the reference file is now documentation-only.
-
-Output from this step serves two purposes: (1) deterministic findings go directly into the final report, and (2) AI passes receive scan results so they skip restating what tools already caught. If no tools are available, continue — the AI passes still run.
-
-### Step 4: Run AI Review (Explorer Sub-Agents → Review Judge)
-
-The AI review uses an **explorer-judge architecture**: specialized explorer sub-agents investigate specific aspects in parallel, then a single review judge synthesizes their findings into a coherent review. This approach is better than running 4 independent passes because:
-- Each explorer can go deep on its specialty without context window pressure
-- The judge sees all findings together, enabling cross-cutting analysis and deduplication
-- The judge can assess overall quality and produce a coherent verdict
-
-**4a. Launch explorer sub-agents in parallel** (single message, all at once):
+After the review is fully complete (including any PR comments):
 
 ```bash
-# Paths to prompt files (relative to skill directory)
-# When installed, these live alongside SKILL.md in the skill's prompts/ subdirectory.
-# The executing agent should locate them relative to this SKILL.md file.
-GLOBAL_CONTRACT="prompts/reviewer-global-contract.md"
-JUDGE_PROMPT="prompts/reviewer-judge.md"
-CORRECTNESS_PASS="prompts/reviewer-correctness-pass.md"
-SECURITY_PASS="prompts/reviewer-security-pass.md"
-RELIABILITY_PASS="prompts/reviewer-reliability-performance-pass.md"
-TEST_PASS="prompts/reviewer-test-adequacy-pass.md"
-ERROR_HANDLING_PASS="prompts/reviewer-error-handling-pass.md"
-API_CONTRACT_PASS="prompts/reviewer-api-contract-pass.md"
-CONCURRENCY_PASS="prompts/reviewer-concurrency-pass.md"
-SPEC_VERIFICATION_PASS="prompts/reviewer-spec-verification-pass.md"
+rm -rf "$SESSION_DIR"
 ```
 
-Read `prompts/reviewer-global-contract.md` first — it defines the shared rules, chain-of-thought protocol, and JSON output schema.
-
-**Core explorers (always run):**
-
-| # | Explorer | Prompt File | Model | `pass` value |
-|---|----------|------------|-------|-------------|
-| 1 | Correctness | `reviewer-correctness-pass.md` | sonnet (or `pass_models.correctness`) | `correctness` |
-| 2 | Security | `reviewer-security-pass.md` | sonnet (or `pass_models.security`) | `security` |
-| 3 | Reliability/Performance | `reviewer-reliability-performance-pass.md` | sonnet (or `pass_models.reliability`) | `reliability` / `performance` |
-| 4 | Test Adequacy | `reviewer-test-adequacy-pass.md` | sonnet (or `pass_models.test-adequacy`) | `testing` |
-
-**Extended explorers (run if configured in `passes` and not adaptively skipped):**
-
-| # | Explorer | Prompt File | Model | `pass` value | Adaptive skip signal |
-|---|----------|------------|-------|-------------|---------------------|
-| 5 | Error Handling | `reviewer-error-handling-pass.md` | sonnet (or `pass_models.error-handling`) | `reliability` | Skip if diff is test/docs/config only |
-| 6 | API/Contract | `reviewer-api-contract-pass.md` | sonnet (or `pass_models.api-contract`) | `correctness` | Skip if no public API surface changes in diff |
-| 7 | Concurrency | `reviewer-concurrency-pass.md` | sonnet (or `pass_models.concurrency`) | `reliability` | Skip if no concurrency primitives in diff |
-| 8 | Spec Verification | `reviewer-spec-verification-pass.md` | sonnet (or `pass_models.spec-verification`) | `spec_verification` | Skip if no spec loaded |
-
-**Adaptive pass selection:** Before launching extended explorers, check skip signals (see Step 3.5 below). If `force_all_passes: true` in config, skip this check and launch all configured passes.
-
-**Explorer prompt template (same for all explorers):**
-```
-Tool: Task
-Parameters:
-  subagent_type: "general-purpose"
-  model: <pass_models[pass_name] from config, default "sonnet">
-  description: "Review explorer: <pass name>"
-  prompt: |
-    <global contract content>
-    <pass-specific prompt>
-
-    ## Diff to Review
-    <diff content>
-
-    ## Context
-    <context packet from Step 2 — callers, types, complexity scores>
-
-    ## Deterministic Scan Results (already reported — do not restate)
-    <summary of findings from Step 3, if any>
-
-    ## Spec/Plan (if available)
-    <spec content, or "No spec provided">
-
-    ## Spec Scope (if provided)
-    Restrict spec analysis to section matching: "<SPEC_SCOPE value, or omit if not provided>"
-
-    You are an explorer sub-agent. Investigate thoroughly using
-    Grep, Glob, and Read to trace code paths and verify your findings.
-    Return ALL findings as a JSON array per the global contract schema.
-    Do not self-censor low or medium issues. If no issues found, return [].
-```
-
-Launch all applicable explorers in a **single message** (parallel execution). Collect all explorer result sets before proceeding to the judge.
-
-**Step 3.5: Adaptive Pass Selection**
-
-Before launching extended explorers, evaluate skip signals. Core passes (correctness, security, reliability, test-adequacy) are never skipped. Extended passes are skipped when their skip signal triggers:
+## Suppress a Finding
 
 ```bash
-# Error handling: skip if diff is test-only, docs-only, or config-only
-ERROR_HANDLING_SKIP=false
-if echo "$CHANGED_FILES" | grep -qvE '\.(test|spec)\.|_test\.|test_|\.md$|\.ya?ml$|\.json$|\.toml$'; then
-  ERROR_HANDLING_SKIP=false  # has non-test/doc/config files
-else
-  ERROR_HANDLING_SKIP=true
-fi
-
-# API/Contract: skip if no public API surface changes
-API_CONTRACT_SKIP=true
-if echo "$DIFF" | grep -qE 'route|endpoint|handler|@app\.|@api\.|@router\.|export (function|class|interface)|func [A-Z]|pub fn|public .* class|\.proto|\.graphql|openapi|swagger'; then
-  API_CONTRACT_SKIP=false
-fi
-
-# Concurrency: skip if no concurrency primitives
-CONCURRENCY_SKIP=true
-if echo "$DIFF" | grep -qiE 'goroutine|go func|threading|Thread|async def|asyncio|\.lock\(|mutex|chan |channel|atomic|sync\.|Promise\.all|Worker\(|spawn|tokio'; then
-  CONCURRENCY_SKIP=false
-fi
-
-# Spec verification: skip if no spec was loaded
-SPEC_VERIFICATION_SKIP=true
-if [ -n "$SPEC_CONTENT" ]; then
-  SPEC_VERIFICATION_SKIP=false
-fi
+python3 scripts/lifecycle.py suppress \
+  --review <latest review JSON path> \
+  --finding-id <id> \
+  --status rejected --reason "explanation" \
+  --suppressions .codereview-suppressions.json
 ```
 
-Skipped passes get `tool_status` with `status: "skipped"` and a note explaining why (e.g., "No concurrency primitives detected in diff"). If `force_all_passes: true` in config, all configured passes run regardless of skip signals.
+The suppress subcommand goes directly to `lifecycle.py`, not through `orchestrate.py`.
 
-**4b. Review Judge — synthesize and verdict:**
+## What The Script Owns
 
-Read `prompts/reviewer-judge.md` for the full judge protocol. Launch a single review judge that receives all explorer findings plus the context:
-
-```
-Tool: Task
-Parameters:
-  subagent_type: "general-purpose"
-  description: "Review judge: synthesize findings"
-  prompt: |
-    <judge prompt from prompts/reviewer-judge.md>
-
-    ## Explorer Findings
-    <JSON arrays from all explorers>
-
-    ## Context
-    <context packet from Step 2>
-
-    ## Deterministic Scan Results
-    <findings from Step 3>
-
-    ## Spec/Plan (if available)
-    <spec content>
-```
-
-The judge will:
-1. **Adversarially validate** each finding (existence check, contradiction check, severity calibration)
-2. **Group root causes** (merge related findings, eliminate causal chains)
-3. **Cross-synthesize** (catch gaps no single explorer flagged)
-4. **Assess strengths** (2-3 specific observations)
-5. **Check spec compliance** (if spec provided) — merge spec-verification explorer's `requirements` array with other explorers' findings, validate implementation/test claims, produce final `spec_requirements` and derive `spec_gaps`
-6. **Produce verdict** (PASS/WARN/FAIL with reason)
-
-The judge returns a JSON object with `verdict`, `verdict_reason`, `strengths`, `spec_gaps`, `spec_requirements`, and validated `findings` array.
-
-**Note on spec-verification explorer output:** The spec-verification explorer returns a JSON object with two keys: `requirements` (the traceability data) and `findings` (standard findings with `pass: "spec_verification"`). Pass both the `requirements` array and the `findings` array to the judge. The judge merges `requirements` into its `spec_requirements` output and validates the `findings` alongside other explorers' findings.
-
-#### Step 4-L: Chunked AI Review (Large-Diff Mode Only)
-
-When `REVIEW_MODE = "chunked"`, replace the standard Step 4 (4a + 4b) with the following multi-phase pipeline.
-
-**4-L.1. Build execution matrix:**
-
-Not every pass needs to review every chunk. Build a matrix of `(pass, chunk)` pairs to run:
-
-- **Core passes** (correctness, security, reliability, test-adequacy): run on all chunks unless the chunk contains ONLY Tier 3 files AND the pass is security/reliability — in that case, skip.
-- **Extended passes**: apply adaptive skip signals (Step 3.5) **per-chunk** instead of globally. Evaluate each chunk's diff content separately:
-  - Concurrency pass: skip for chunks with no concurrency primitives
-  - API/Contract pass: skip for chunks with no public API surface changes
-  - Error handling pass: skip for chunks that are test/docs/config only
-- **Spec verification**: run as a **single global pass** (not chunked) — see the spec verification section below Step 4-L.4.
-
-**4-L.2. Launch chunked explorers in waves:**
-
-Batch explorer launches into waves of 8-12 parallel Task calls (configurable via `large_diff.max_parallel_explorers`):
-
-| Wave | Contents | Priority |
-|------|----------|----------|
-| Wave 1 | All enabled passes for Tier 1 (critical) chunks | Highest — critical files get reviewed first |
-| Wave 2 | Core passes for Tier 2 (standard) chunks | Normal |
-| Wave 3 | Extended passes for Tier 2 chunks + all passes for Tier 3 chunks | Lowest |
-
-If total Task count would exceed 24, collapse all Tier 3 chunks into a single "low-risk omnibus" explorer per pass. The omnibus explorer receives all Tier 3 files together with instructions to scan quickly.
-
-Wait for each wave to complete before launching the next wave.
-
-**Chunked explorer prompt template:**
-
-```
-Tool: Task
-Parameters:
-  subagent_type: "general-purpose"
-  model: <pass_models[pass_name] from config, default "sonnet">
-  description: "Review explorer: <pass name> — Chunk <N>/<total> (<chunk description>)"
-  prompt: |
-    <global contract content>
-    <pass-specific prompt>
-
-    ## Review Mode: Chunked (Large Changeset)
-    You are reviewing chunk <N> of <total> in a large changeset.
-    This chunk covers: <chunk description — directory names, file count, risk tier>
-    Chunk files: <list of file paths in this chunk>
-
-    ## Chunk Diff
-    <diff for ONLY the files in this chunk — extracted via:
-     git diff $BASE_REF..$HEAD_REF -- <chunk files>>
-
-    ## Chunk Context
-    <CHUNK_CONTEXT[chunk_id] from Step 2-L Phase B>
-
-    ## Cross-Chunk Interface Summary
-    <CROSS_CHUNK_SUMMARY[chunk_id] from Step 2-L>
-
-    ## Changeset Manifest (Full — for reference)
-    <MANIFEST from Step 1.5b — all files, all chunks, risk tiers>
-
-    ## Deterministic Scan Results (this chunk's files only)
-    <scan findings scoped to files in this chunk>
-
-    ## Spec/Plan (if available)
-    <spec content, or "No spec provided">
-
-    You are reviewing ONLY the files in this chunk. However, use the
-    changeset manifest and cross-chunk interface summary to understand
-    how your chunk connects to the broader change. If you discover a
-    finding that depends on behavior in another chunk, flag it with:
-    "CROSS-CHUNK: depends on <other file>:<function>".
-
-    Return ALL findings as a JSON array per the global contract schema.
-    Do not self-censor low or medium issues. If no issues found, return [].
-```
-
-**Token budget per chunked explorer:** Target prompt under 80k tokens, leaving 120k for investigation and output.
-
-| Component | Budget |
-|-----------|--------|
-| Global contract + pass prompt | ~5-7k |
-| Chunk diff (max 2000 lines) | ~8-10k |
-| Chunk context (callers/callees) | ~10-15k |
-| Cross-chunk interface summary | ~2-5k |
-| Changeset manifest | ~3-5k |
-| Deterministic scan results (chunk) | ~1-3k |
-| Spec content | ~0-10k |
-| **Total** | **~29-55k** |
-
-**4-L.3. Cross-chunk synthesizer:**
-
-After ALL explorer waves complete, launch a single cross-chunk synthesis agent. This agent finds patterns that span multiple chunks — issues that no single chunk explorer could catch alone.
-
-```
-Tool: Task
-Parameters:
-  subagent_type: "general-purpose"
-  description: "Cross-chunk synthesis: detect cross-file patterns"
-  prompt: |
-    ## Cross-Chunk Synthesis
-
-    You are analyzing a large changeset that was reviewed in <CHUNK_COUNT>
-    chunks. Your job is to find patterns that span multiple chunks — issues
-    that no single chunk explorer could catch alone.
-
-    ## Changeset Manifest
-    <MANIFEST — all files, chunks, risk tiers>
-
-    ## Import/Call Graph Across Chunks
-    <from Step 2-L Phase A: which functions in chunk X call functions in chunk Y,
-     and whether both sides were modified>
-
-    ## CROSS-CHUNK Flags from Explorers
-    <every finding tagged with "CROSS-CHUNK:", with full evidence>
-
-    ## Explorer Finding Summaries by Chunk
-    <for each chunk: list of finding summaries from explorer output,
-     ~50 tokens per finding — summary + file + line only>
-
-    ## Cross-Chunk Interface Diffs
-    For each function that is called from one chunk and defined in another
-    (identified from the import/call graph), include the actual diff for
-    both the definition and the call site:
-    <extract via: git diff $BASE_REF..$HEAD_REF -- <interface_file>
-     for each file at a chunk boundary, include ~50-100 lines of
-     relevant diff around the function definition and call sites>
-
-    ## Investigation Focus
-    Use Grep, Read, and Glob to investigate these cross-chunk patterns:
-
-    1. **Interface mismatches** — function signature changed in one chunk,
-       callers in another chunk not updated. Check every entry in the
-       import/call graph where both sides are modified.
-    2. **Data flow breaks** — input validation in one chunk, consumption
-       in another. Trace data from entry points to storage/output.
-    3. **Consistency violations** — different error handling, logging, or
-       retry patterns for similar operations across chunks.
-    4. **Shared resource conflicts** — multiple chunks modifying access
-       patterns for the same database table, cache, or external service.
-    5. **Missing cross-chunk test coverage** — new integrations between
-       chunks that lack integration tests.
-
-    Return findings as a JSON array per the global contract schema.
-    Set pass to the most appropriate category.
-    If no cross-chunk issues found, return [].
-```
-
-**4-L.4. Final judge:**
-
-Launch the final judge. In large-diff mode, the final judge receives all raw explorer findings (from all chunks) plus cross-chunk synthesizer findings. It performs the same full adversarial validation as in standard mode.
-
-```
-Tool: Task
-Parameters:
-  subagent_type: "general-purpose"
-  description: "Review judge: synthesize findings (chunked review)"
-  prompt: |
-    <judge prompt from prompts/reviewer-judge.md>
-
-    ## Review Mode: Chunked
-    This review was conducted in <CHUNK_COUNT> chunks. You are receiving
-    raw explorer findings from all chunks. Perform FULL adversarial
-    validation — same rigor as standard mode. The explorers had limited
-    per-chunk context, so findings may need additional verification.
-    Use Grep, Read, and Glob to investigate.
-
-    Focus areas:
-    - Full adversarial validation (existence, contradiction, severity)
-    - Cross-chunk root cause grouping
-    - Cross-explorer synthesis using cross-chunk synthesizer findings
-    - Strengths assessment
-    - Spec compliance (if spec provided)
-    - Verdict
-
-    ## Explorer Findings (All Chunks)
-    <raw findings from all chunk explorers, grouped by chunk>
-
-    ## Cross-Chunk Synthesizer Findings
-    <findings from Step 4-L.3>
-
-    ## Changeset Manifest
-    <MANIFEST — not the full diff>
-
-    ## Deterministic Scan Results
-    <all deterministic findings>
-
-    ## Spec/Plan (if available)
-    <spec content>
-```
-
-The final judge returns the same output format as in standard mode: `verdict`, `verdict_reason`, `strengths`, `spec_gaps`, `spec_requirements`, `findings`.
-
-**Spec verification in large-diff mode:** The spec-verification pass runs as a **single global pass** (not chunked), because requirements span the entire changeset. It receives the changeset manifest + spec content and uses Grep/Read to trace requirements across all files. Launch it in Wave 1 alongside the Tier 1 chunk explorers.
-
-```
-Tool: Task
-Parameters:
-  subagent_type: "general-purpose"
-  model: <pass_models.spec-verification from config, default "sonnet">
-  description: "Review explorer: spec verification (global)"
-  prompt: |
-    <global contract content>
-    <spec-verification pass prompt>
-
-    ## Review Mode: Large Changeset (Global Spec Verification)
-    This is a large changeset with <FILE_COUNT> files across <CHUNK_COUNT>
-    review chunks. You are running as a global pass — not chunked — because
-    requirement traceability spans the entire changeset.
-
-    ## Changeset Manifest
-    <MANIFEST — all files with risk tiers and change stats>
-
-    ## Full Diff
-    The full diff is available at /tmp/codereview-diff.patch. Use Read
-    to examine specific file diffs when verifying behavioral correctness
-    of requirements. The manifest tells you which files to look at; the
-    diff shows you the actual code changes.
-
-    ## Spec/Plan
-    <SPEC_CONTENT>
-
-    ## Spec Scope (if provided)
-    <SPEC_SCOPE>
-
-    Use the manifest to identify which files are likely to implement each
-    requirement. Use Read on /tmp/codereview-diff.patch to examine the
-    actual diff for those files — verify behavioral correctness, not just
-    existence. Also use Grep and Read on the codebase to verify
-    implementation and test coverage. You have access to the full
-    codebase via tools.
-
-    Return the standard spec-verification output: { requirements: [...], findings: [...] }
-```
-
-### Step 5: Merge, Deduplicate, and Classify
-
-Combine deterministic findings (Step 3) with the judge's validated findings (Step 4b), then apply signal controls and classify into action tiers.
-
-**5a. Agent pre-processing (AI judgment required):**
-
-Before running the enrichment script, perform two steps that require judgment:
-
-1. **Deduplicate by root cause** — merge findings that describe the same underlying issue with different wording. Keep the higher-severity version and preserve provenance in `sources`.
-2. **Remove linter restatements** — remove findings about formatting, naming conventions, or import ordering that linters/formatters already handle.
-
-Save the cleaned judge findings to `/tmp/codereview-judge-cleaned.json`.
-
-**5b. Enrich and classify (implemented by `scripts/enrich-findings.py` — do not reimplement):**
-
-Run the enrichment script on the cleaned findings:
-```bash
-python3 scripts/enrich-findings.py \
-  --judge-findings /tmp/codereview-judge-cleaned.json \
-  --scan-findings /tmp/codereview-scans.json \
-  --confidence-floor 0.65 \
-  > /tmp/codereview-enriched.json
-```
-
-The script mechanically performs:
-- Assigns `source` ("deterministic" / "ai") and generates stable `id` per finding
-- Applies confidence floor (drops AI findings below threshold)
-- Assigns `action_tier` (Must Fix / Should Fix / Consider) per rules below
-- Ranks within each tier by `severity_weight × confidence`
-- Computes `tier_summary` counts and `dropped` statistics
-
-If `python3` is not available or the script fails, fall back to performing these steps manually per the rules below.
-
-**5c. Finding lifecycle (implemented by `scripts/lifecycle.py` — do not reimplement):**
-
-First, write the changed files list for deferred suppression resurfacing:
-```bash
-echo "$CHANGED_FILES" > /tmp/codereview-changed-files.txt
-```
-
-Then run the lifecycle script on enriched findings:
-```bash
-python3 scripts/lifecycle.py \
-  --findings /tmp/codereview-enriched.json \
-  --suppressions .codereview-suppressions.json \
-  --changed-files /tmp/codereview-changed-files.txt \
-  --scope "$SCOPE" --base-ref "$BASE_REF" \
-  > /tmp/codereview-lifecycle.json
-```
-
-The script computes fingerprints, tags findings as `new` or `recurring` (by comparing against the most recent previous review), and filters out suppressed findings (rejected/deferred). Output replaces the enriched findings for report generation.
-
-If the script or python3 is not available, skip lifecycle tagging — all findings are treated as new.
-
-**Action tier rules** (reference — implemented by script):
-
-| Priority | Tier | Criteria | Action |
-|----------|------|----------|--------|
-| 1st | **Must Fix** | (`critical` or `high`) AND confidence >= 0.80 | Block merge or fix immediately |
-| 2nd | **Should Fix** | `medium` severity, OR `high` with confidence 0.65-0.79 | Fix in this PR — fast for agents |
-| 3rd | **Consider** | Everything else above the confidence floor | Fix if convenient, or defer |
-
-**Severity weights** (reference — implemented by script):
-
-| Severity | Weight |
-|----------|--------|
-| critical | 4 |
-| high | 3 |
-| medium | 2 |
-| low | 1 |
-
-### Step 6: Format and Present Review
-
-**See `references/report-template.md`** for the full markdown template and JSON envelope format.
-
-Output the review with these sections (in order): verdict header, tool status table, strengths, Must Fix / Should Fix / Consider tiered findings, spec verification (if spec provided), test gaps, next steps, summary.
-
-**Key formatting rules:**
-- Source column: AI findings show as `AI:<pass>` (e.g., `AI:security`). Deterministic findings show the tool name.
-- Tool-status prose: separate `not_installed`, `sandbox_blocked`, and `failed` into distinct sentences — never merge into one mixed sentence.
-- For PR mode: ask user "Would you like me to post these as inline PR comments?" before posting via `gh api`.
-
-**Large-diff mode report additions:**
-
-When `REVIEW_MODE = "chunked"`, add a chunk summary table between the verdict header and the findings sections:
-
-```markdown
-### Review Mode: Chunked
-
-| Chunk | Files | Lines | Risk | Passes Run | Findings |
-|-------|-------|-------|------|-----------|----------|
-| 1: src/auth/* | 12 | 1,800 | Critical | 6/6 | 14 |
-| 2: src/api/orders/* | 10 | 1,500 | Standard | 4/4 | 7 |
-| ... | | | | | |
-| Cross-chunk synthesis | — | — | — | 1 | 3 |
-| **Total** | **87** | **8,247** | — | **38** | **31** |
-```
-
-In the JSON envelope, add these fields:
-```json
-{
-  "review_mode": "chunked",
-  "chunk_count": 8,
-  "chunks": [
-    {
-      "id": 1,
-      "description": "src/auth/*",
-      "files": ["src/auth/login.py", "..."],
-      "file_count": 12,
-      "diff_lines": 1800,
-      "risk_tier": "critical",
-      "passes_run": 6,
-      "findings": 14
-    }
-  ]
-}
-```
-
-For standard mode reviews, set `"review_mode": "standard"` and omit `chunk_count` and `chunks`.
-
-### Step 7: Save Review Artifacts
-
-```bash
-mkdir -p .agents/reviews
-```
-
-**7a. Markdown report** — `.agents/reviews/YYYY-MM-DD-<target>.md` (formatted review + raw findings appendix)
-
-**7b. JSON findings** — `.agents/reviews/YYYY-MM-DD-<target>.json` (must conform to `findings-schema.json`; see `references/report-template.md` for envelope format)
-
-**7c. Validate output** (optional, if `jq` available):
-```bash
-bash scripts/validate_output.sh \
-  --findings .agents/reviews/YYYY-MM-DD-<target>.json \
-  --report .agents/reviews/YYYY-MM-DD-<target>.md
-```
-
----
+- target detection, diff extraction, and config loading
+- launch packet assembly and prompt shaping
+- explorer/judge packet generation
+- report rendering, artifact writing, and lifecycle state
 
 ## Configuration
 
 Optional repo-level config via `.codereview.yaml`. See `docs/CONFIGURATION.md` for the full schema reference.
 
-**Defaults** (no config file needed): 8 passes (4 core + 4 extended), 0.65 confidence floor, manual cadence, fix-all pushback, sonnet model for explorers, adaptive skip enabled. The spec-verification pass only runs when `--spec` is provided.
-
-**Key settings:**
-
-| Setting | Default | Options |
-|---------|---------|---------|
-| `passes` | All 8 | List of pass names to enable |
-| `cadence` | `manual` | `manual`, `pre-commit`, `pre-push`, `wave-end` |
-| `pushback_level` | `fix-all` | `fix-all`, `selective`, `cautious` |
-| `confidence_floor` | `0.65` | `0.0` – `1.0` |
-| `pass_models` | sonnet for all | Override model per pass (e.g., `security: "opus"`) |
-| `force_all_passes` | `false` | Disable adaptive skip for extended passes |
-| `ignore_paths` | none | Glob patterns to exclude |
-| `focus_paths` | none | Glob patterns to prioritize |
-| `custom_instructions` | none | Free-text repo-specific rules |
-
-Cadence is advisory — it tells the agent *when* to invoke the skill, not a git hook. For `wave-end`, invoke with `--base main` after completing a batch of tasks.
-
----
-
 ## Prompt Files
 
-The review prompts live in the `prompts/` directory alongside this SKILL.md:
+| File | Role |
+|------|------|
+| `prompts/reviewer-global-contract.md` | Shared contract prepended to all explorer prompts |
+| `prompts/reviewer-correctness-pass.md` | Correctness explorer (core) |
+| `prompts/reviewer-security-config-pass.md` | Security config explorer (core) |
+| `prompts/reviewer-test-adequacy-pass.md` | Test adequacy explorer (core) |
+| `prompts/reviewer-security-dataflow-pass.md` | Security dataflow explorer (activated) |
+| `prompts/reviewer-reliability-performance-pass.md` | Reliability explorer (activated; also reused for shell-script reviews) |
+| `prompts/reviewer-error-handling-pass.md` | Error handling explorer (activated) |
+| `prompts/reviewer-api-contract-pass.md` | API/contract explorer (activated) |
+| `prompts/reviewer-concurrency-pass.md` | Concurrency explorer (activated) |
+| `prompts/reviewer-spec-verification-pass.md` | Spec verification explorer (activated) |
+| `prompts/reviewer-reliability-performance-pass.md` | Shell script explorer (activated; shared prompt) |
+| `prompts/reviewer-judge.md` | Review judge (adversarial validation) |
 
-| File | Purpose |
-|------|---------|
-| `prompts/reviewer-global-contract.md` | Shared rules, chain-of-thought protocol, and JSON output schema |
-| `prompts/reviewer-judge.md` | Review judge: adversarial validation, deduplication, verdict |
-| `prompts/reviewer-correctness-pass.md` | Functional correctness review (core) |
-| `prompts/reviewer-security-pass.md` | Security risk review (core) |
-| `prompts/reviewer-reliability-performance-pass.md` | Reliability and performance review (core) |
-| `prompts/reviewer-test-adequacy-pass.md` | Test adequacy gap analysis (core) |
-| `prompts/reviewer-error-handling-pass.md` | Error handling quality review (extended) |
-| `prompts/reviewer-api-contract-pass.md` | API/contract breaking changes (extended) |
-| `prompts/reviewer-concurrency-pass.md` | Concurrency issues and race conditions (extended) |
-| `prompts/reviewer-spec-verification-pass.md` | Spec requirement tracing and test category adequacy (extended) |
-
----
-
-## Examples
-
-### Review Local Changes
-```bash
-/codereview
-```
-Auto-detects staged or recent changes. Runs all passes. Outputs findings to terminal.
-
-### Review a Pull Request
-```bash
-/codereview 123
-```
-Fetches PR #123 diff via `gh`. Runs all passes with PR context (title, description). Optionally posts inline comments.
-
-### Review an Entire Branch (Wave-End Review)
-```bash
-/codereview --base main
-```
-Reviews all commits on the current branch since it diverged from `main`. This is the primary mode for wave-end reviews — review everything done on a feature branch before merging.
-
-### Review a Specific Commit Range
-```bash
-/codereview --range HEAD~5..HEAD
-```
-Reviews the last 5 commits. Useful for reviewing a specific wave of work within a longer-running branch.
-
-### Review Against a Spec
-```bash
-/codereview --spec docs/plan.md --base main
-```
-Reviews changes against `main` and checks if the spec requirements are implemented and tested. Produces a per-requirement traceability report with implementation status and test category coverage.
-
-### Review a Specific Section of a Spec
-```bash
-/codereview --spec docs/plan.md --spec-scope "Authentication" --base main
-```
-Same as above, but restricts spec verification to the "Authentication" section of the spec. Use `--spec-scope` with any heading text, milestone label, or keyword to scope verification.
-
----
-
-## Common Mistakes
-
-**Execution mistakes (for the agent running the skill):**
-
-| Mistake | What Goes Wrong | Fix |
-|---------|----------------|-----|
-| Launching explorers without reading prompt files first | Explorers get no global contract or pass-specific instructions, produce unstructured output | Always `Read` the prompt files in Step 4 before constructing explorer prompts |
-| Launching judge before all explorers finish | Judge has incomplete findings, misses cross-cutting issues | Wait for all Task results before launching the judge |
-| Posting PR comments without user confirmation | Unwanted noise on the PR, user didn't consent | Always ask "Would you like me to post these as inline PR comments?" first |
-| Forgetting to include deterministic scan results in explorer prompts | Explorers restate what semgrep/trivy/sonarqube already found, creating duplicates | Pass scan summaries to each explorer with "do not restate" instruction |
-| Skipping context gathering (Step 2) | Explorers can't trace callers/callees, miss integration bugs | Step 2 is critical — don't jump straight to Step 3/4 |
-| Not extracting `CHANGED_FILES` in Step 1 | Steps 2d, 2f, and 3 can't scope to changed files, run on entire repo | Every diff mode must set `CHANGED_FILES` via `--name-only` |
-
-**User-facing mistakes:**
-
-| Mistake | Fix |
-|---------|-----|
-| Running on a huge diff (1000+ files) | Use `--base` with a recent merge-base, or scope to specific paths |
-| No deterministic tools installed | Install `semgrep` and `shellcheck` at minimum for best results |
-| Expecting PR comment posting without `gh` auth | Ensure `gh auth status` works before using PR mode |
-| Using `--spec` with a vague spec | Spec works best with concrete, testable requirements — acceptance criteria format |
-| Using `--spec-scope` without `--spec` | `--spec-scope` requires `--spec`; it's ignored without it |
-
----
-
-## Architecture & Design Rationale
-
-See `references/design.md` for the full architecture diagram, explorer-judge rationale, design decision table, and future v2 plans. Not needed at runtime.
-
----
-
-## Acceptance Criteria
-
-See `references/acceptance-criteria.md` for full functional scenarios, output validation checks, and policy rules. Not needed at runtime.
-
----
-
-## See Also
-
-- `findings-schema.json` — JSON Schema for the findings artifact
-- `scripts/validate_output.sh` — Output validation script
-- `references/design.md` — Architecture diagram, design rationale, and future plans
-- `references/deterministic-scans.md` — Full tool scripts, cache setup, parallel patterns
-- `references/report-template.md` — Full markdown report template and JSON envelope format
-- `references/acceptance-criteria.md` — Functional scenarios and output validation checks
-- `prompts/` — Explorer sub-agent prompt files (global contract + judge + 8 explorer passes)
+If you need to understand the review internals, inspect `scripts/orchestrate.py` instead of expanding this skill.

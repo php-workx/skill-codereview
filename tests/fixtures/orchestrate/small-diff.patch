@@ -1,0 +1,58 @@
+diff --git a/scripts/orchestrate.py b/scripts/orchestrate.py
+index 1111111..2222222 100644
+--- a/scripts/orchestrate.py
++++ b/scripts/orchestrate.py
+@@ -1,6 +1,10 @@
+ from __future__ import annotations
+ 
++import json
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
+@@ -42,6 +46,10 @@ def progress(step: str, message: str) -> None:
+     print(json.dumps({"step": step, "message": message}), file=sys.stderr)
+ 
++def load_json(path: Path) -> dict:
++    return json.loads(path.read_text())
++
++
+ def main() -> int:
+     return 0
+diff --git a/tests/test_orchestrate.py b/tests/test_orchestrate.py
+index 3333333..4444444 100644
+--- a/tests/test_orchestrate.py
++++ b/tests/test_orchestrate.py
+@@ -1,5 +1,9 @@
+ def test_placeholder():
+     assert True
++
++def test_progress_serialization():
++    payload = {"step": "prepare", "message": "ok"}
++    assert payload["step"] == "prepare"
+diff --git a/prompts/reviewer-judge.md b/prompts/reviewer-judge.md
+index 5555555..6666666 100644
+--- a/prompts/reviewer-judge.md
++++ b/prompts/reviewer-judge.md
+@@ -1,3 +1,4 @@
+ # Reviewer Judge
++Deduplication authority stays with the judge.
+ 
+diff --git a/skills/codereview/SKILL.md b/skills/codereview/SKILL.md
+index 7777777..8888888 100644
+--- a/skills/codereview/SKILL.md
++++ b/skills/codereview/SKILL.md
+@@ -1,3 +1,4 @@
+ # Skill
++Use the orchestrator for deterministic review flows.
+ 
+diff --git a/tests/fixtures/orchestrate/codereview.yaml b/tests/fixtures/orchestrate/codereview.yaml
+new file mode 100644
+index 0000000..9999999
+--- /dev/null
++++ b/tests/fixtures/orchestrate/codereview.yaml
+@@ -0,0 +1,5 @@
++cadence: wave-end
++pushback_level: selective
++confidence_floor: 0.65
++ignore_paths:
++  - "vendor/"

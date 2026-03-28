@@ -2,6 +2,12 @@
 
 This document contains background context for the codereview skill. It is not needed at runtime — the executing agent should follow SKILL.md directly.
 
+## Orchestrator Architecture
+
+The Python orchestrator is the producer for the review pipeline. It writes a launch packet to `session_dir/launch.json`, then the later phases consume that file plus `judge-input.json` and `judge.json` as their shared state. The key constraint is that prompt assembly and artifact paths live in the packet, not in ad hoc agent memory.
+
+The launch packet should capture the review scope, diff metadata, wave plan, judge configuration, scan outputs, and timing/config context in a machine-readable form. That keeps the judge and finalize phases deterministic and lets the pipeline evolve without changing the agent-facing contract.
+
 ---
 
 ## Architecture: Explorer-Judge Pattern

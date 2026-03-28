@@ -1,5 +1,7 @@
 # Research data (not part of distributable skill)
 data/
+.tickets/
+.fabrikk
 
 # macOS
 .DS_Store
@@ -24,4 +26,3 @@ download.log
 
 # Evaluation data (benchmark repos, findings, results)
 .eval/
-docs/analysis-detection-root-causes.md

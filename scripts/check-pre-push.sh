@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+just pre-commit
+just test-unit
+bash tests/test-scripts.sh
+bash tests/test-orchestrate-integration.sh

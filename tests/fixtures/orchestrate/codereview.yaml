@@ -1,0 +1,5 @@
+cadence: wave-end
+pushback_level: selective
+confidence_floor: 0.65
+ignore_paths:
+  - "vendor/"
