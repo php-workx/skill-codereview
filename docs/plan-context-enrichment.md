@@ -36,6 +36,21 @@ Improve review quality by enriching the context available to AI explorers. Pre-c
 
 **Optional (deterministic tools):** `radon`, `gocyclo`, `shellcheck`, `semgrep`, `trivy`, `osv-scanner` — all degrade gracefully when missing. When semgrep is not installed, `code_intel.py patterns` provides a lightweight fallback for the most common static analysis checks. `ast-grep` (`npm install -g @ast-grep/cli` or `cargo install ast-grep`) enables structural security pattern matching with bundled rules. Language-specific linters (`ruff`, `golangci-lint`, `clippy`, `biome`) are detected and run when present.
 
+### Capability degradation matrix
+
+When tools are missing, features degrade explicitly. The orchestrator logs which mode is active.
+
+| Missing tool | Capabilities lost | Capabilities retained | Orchestrator behavior |
+|-------------|-------------------|----------------------|----------------------|
+| **python3** | format-diff (LLM-optimized diff), prescan, code_intel (complexity/functions/imports/graph), enrich-findings enrichment | Unified diff passed to explorers, agent-based context gathering, run-scans.sh (bash), git-risk.sh (bash) | Log: "python3 not found — using raw unified diff, skipping prescan and code intelligence." All python-dependent features skipped. Review still runs. |
+| **tree-sitter** | Structural AST analysis for TS/Java/Rust complexity and patterns, P-UNWIRED check, `--expand-context` function boundary detection | Python complexity (radon), Go complexity (gocyclo), regex-based patterns for all languages, basic format-diff (no expansion) | Log: "tree-sitter not installed — using regex-only mode." `code_intel.py` `analyzer` field reports `"regex-only"`. |
+| **tree-sitter grammar** (e.g., missing `tree-sitter-go`) | AST analysis for that specific language | All other languages still use tree-sitter. Missing language falls back to regex. | Log: "tree-sitter-go not installed — Go files use regex-only checks." |
+| **sqlite-vec + model2vec/onnxruntime** | Semantic similarity search (`graph --semantic`) | Structural graph (explicit deps, co-change), cross-file planner (LLM reasoning) | Log: "Semantic search dependencies not installed — structural graph only." |
+| **jq** | `run-scans.sh` (hard dependency) | Everything else — scans skipped, but explorers, judge, prescan, code_intel all still run | Log: "jq not found — deterministic scans skipped." |
+| **code_intel.py fails** (import error, crash) | All code_intel subcommands: complexity, functions, imports, graph, format-diff, patterns, prescan (depends on code_intel) | Raw unified diff, agent-based context gathering, run-scans.sh, git-risk.sh | Log: "code_intel.py failed — using raw diff, skipping prescan and code intelligence." Fall back to raw unified diff, not crash. |
+
+**Key principle:** No missing optional tool causes the review to fail. Each capability degrades to its predecessor behavior (or is skipped), and the review proceeds with whatever context is available. The orchestrator logs what was skipped so the user can install tools for better results.
+
 ## Architecture Context
 
 The current pipeline is driven by `scripts/orchestrate.py` with these phases:
@@ -57,7 +72,89 @@ SKILL.md is a thin wrapper that drives the flow — it delegates deterministic w
 
 **Security explorer split:** The original single security explorer has been split into `security-config` (core, always runs) and `security-dataflow` (activated when dataflow patterns detected). This is already implemented in `orchestrate.py`.
 
+## Token Budget Architecture
+
+**Cross-cutting requirement:** Every feature in this plan adds context to explorer prompts. The current `check_token_budget()` in `orchestrate.py` (line 721) only knows about 4 context sources (`scan_results`, `language_standards`, `git_risk`, `diff`). Before any feature in this plan ships, the budget system must be extended to handle all new sources.
+
+### PromptContext extensions
+
+Add these fields to the `PromptContext` dataclass:
+
+| Field | Source feature | Typical tokens | Worst case |
+|-------|---------------|----------------|------------|
+| `prescan_signals` | F1 | 300-800 | 2,000 |
+| `domain_checklists` | F2 | 0-500 | 1,500 |
+| `cross_file_context` | F12 | 1,000-3,000 | 5,000 |
+| `review_md_directives` | F13 | 0-400 | 900 |
+| `path_instructions` | F15 | 0-200 | 600 |
+| `functions_summary` | F0c | 300-1,000 | 2,500 |
+| `graph_summary` | F0c | 500-2,000 | 4,000 |
+
+All new fields are **summarized text**, not raw JSON. The orchestrator converts JSON outputs from scripts into compact text sections before injecting into `PromptContext`. This avoids JSON structural overhead (~1.5-2x inflation over text).
+
+### Budget allocation (70k token budget per explorer)
+
+| Priority | Component | Budget (tokens) | Truncation strategy |
+|----------|-----------|-----------------|---------------------|
+| P0 (fixed) | Global contract + pass prompt | 6,000 | Never truncated |
+| P1 (core) | Formatted diff | 35,000 | Truncate to changed hunks only. Hard floor: 5,000 tokens |
+| P2 (core) | Changed files + complexity + git risk | 2,500 | Summarize to counts/tiers |
+| P3 (high value) | Cross-file planner results | 5,000 | Drop low-risk queries first. Floor: top 3 high-risk results |
+| P4 (high value) | Prescan signals | 1,500 | Critical/high only. Floor: top 5 signals |
+| P5 (high value) | Domain checklists | 1,500 | Drop least-relevant checklist first |
+| P6 (medium value) | REVIEW.md directives | 800 | Truncate to "Always check" only, drop "Style" |
+| P7 (medium value) | Path instructions | 500 | Drop instructions for low-risk files first |
+| P8 (medium value) | Functions/graph summaries | 3,000 | Summarize to top-10 nodes. Drop graph entirely if needed |
+| P9 (medium value) | Scan results | 1,500 | Summarize to counts |
+| P10 (variable) | Language standards | 1,200 | Drop entirely |
+| P11 (variable) | Callers | 800 | Summarize to top 5 |
+| P12 (variable) | Spec | 10,000 | Truncate to scoped sections. Drop if critically tight |
+| Reserve | Headroom | ~700 | — |
+
+### Updated truncation cascade
+
+Replace the current 4-step cascade in `check_token_budget()` with a priority-ordered sequence that sheds lowest-value context first:
+
+```python
+truncations = [
+    ("language_standards", lambda _: ""),                          # saves ~1,200
+    ("scan_results", summarize_scans_counts_only),                 # saves ~1,000
+    ("git_risk", summarize_git_risk_tiers_only),                   # saves ~400
+    ("graph_summary", lambda _: ""),                               # saves ~2,000-3,000
+    ("functions_summary", lambda _: ""),                            # saves ~1,000
+    ("path_instructions", lambda _: ""),                           # saves ~500
+    ("review_md_directives", truncate_review_md_always_check_only),# saves ~400
+    ("domain_checklists", drop_least_relevant_checklist),          # saves ~500/checklist
+    ("cross_file_context", truncate_cross_file_top3_high_risk),    # saves ~2,000-3,000
+    ("prescan_signals", truncate_prescan_critical_only),           # saves ~1,000
+    ("spec", truncate_spec_to_5k),                                 # saves ~5,000-7,000
+    ("diff", truncate_to_changed_hunks_only),                      # saves variable, often 10,000+
+]
+```
+
+Each feature's implementation **must** add its truncation function to this cascade. The cascade is tested with a synthetic worst-case prompt that exceeds 70k tokens.
+
+### `truncate_to_changed_hunks_only` update
+
+The current implementation (line 352) parses unified diff syntax (`@@`, `+`, `-` prefixes). When `format-diff` is active, the diff uses `__new hunk__`/`__old hunk__` markers and numbered lines. The truncation function must detect the format and handle both:
+
+- **Unified diff:** Current behavior (filter to `@@`, `+`, `-` lines, cap at 60 lines)
+- **Formatted diff:** Filter to `## File:` headers, `__new hunk__` blocks with `+` lines only, cap at 60 lines
+
+### Implementation requirement
+
+Each feature in this plan must include in its "Files to modify" section:
+1. The new `PromptContext` field name
+2. The truncation function name and behavior
+3. The `render()` section header and position
+
 ## Execution Order
+
+**Wave 0** (prerequisite — before any feature ships):
+- Extend `PromptContext` with new fields
+- Implement the updated truncation cascade
+- Update `truncate_to_changed_hunks_only` to handle formatted diff syntax
+- Test with synthetic worst-case prompt exceeding 70k tokens
 
 **Wave 1** (parallel, no deps):
 - F2 (Domain Checklists) — new markdown files + orchestrate.py integration
@@ -134,6 +231,13 @@ CodeRabbit maintains a persistent graph (rebuilt per review). We build it at rev
 **Caching (optional):** The graph can be cached in `.codereview-cache/graph-<repo-hash>.json` (structural) and `.codereview-cache/semantic-<repo-hash>.db` (semantic index) for faster subsequent reviews. When cached, only the delta (new/modified files) needs re-parsing and re-embedding. First review builds from scratch; subsequent reviews update incrementally.
 
 **Relationship to Feature 12 (cross-file planner):** The structural graph says "file B calls function X from file A." The semantic layer says "function `check_auth_token` is similar in purpose to `validate_session`." The planner (Feature 12) says "file A changed the hash algorithm — search for the corresponding verify function." Together, structural + semantic + planner cover three layers of cross-file relationships: explicit dependencies, implicit similarity, and domain-specific patterns.
+
+**Why three layers, not two:** A reviewer asked whether the semantic layer is redundant with the F12 planner (both find non-obvious relationships). The layers are complementary, not redundant:
+- The **structural graph** is deterministic and fast — it finds every explicit dependency without LLM cost. This covers ~70% of cross-file bugs (caller breaks, import breaks).
+- The **F12 planner** uses LLM reasoning to find domain-specific relationships the graph cannot see (symmetric operations, config dependencies). It covers ~20% more.
+- The **semantic layer** finds code related by purpose without any explicit relationship — no imports, no calls, no naming convention. Example: `hash_password()` in `auth/` and `verify_hash()` in `crypto/` with completely different naming and no import path. The planner might miss this if the diff doesn't mention hashing. The semantic layer catches it via embedding similarity.
+
+The semantic layer is **opt-in** (`--semantic` flag), requires additional dependencies, and adds zero overhead when not enabled. The graph always works without it. The schema accommodates semantic edges from the start so enabling it later requires no schema migration.
 
 ### Semantic layer (`--semantic` flag)
 
@@ -446,6 +550,35 @@ Otherwise:
 
 This avoids making the Python dependency mandatory while giving a significantly better experience when it's present.
 
+### How code_intel.py outputs enter the explorer prompt
+
+Raw JSON from `code_intel.py` subcommands is **not injected directly** into the explorer prompt. The orchestrator converts JSON outputs into compact text summaries before adding them to `PromptContext`. This avoids JSON structural overhead (~1.5-2x token inflation over equivalent text).
+
+**Functions summary** (`functions_summary` field in `PromptContext`):
+```
+### Function Definitions (from code_intel)
+| File | Function | Params | Returns | Lines | Exported |
+|------|----------|--------|---------|-------|----------|
+| src/auth/login.py | validate_session | request, token | Session|None | 42-87 | yes |
+| src/auth/login.py | refresh_token | token | str | 89-105 | yes |
+```
+
+**Graph summary** (`graph_summary` field in `PromptContext`):
+```
+### Dependency Graph (1-hop from changed symbols)
+Changed symbols: validate_session (src/auth/login.py:42), refresh_token (src/auth/login.py:89)
+
+Files that depend on changes:
+  src/api/views.py:78 — calls validate_session()
+  src/middleware/auth.py:23 — imports validate_session
+  src/api/views.py — co-changes with src/auth/login.py (8 times in 6 months)
+
+Related by purpose (semantic similarity > 0.8):
+  src/middleware/jwt.py::check_auth_token — similar to validate_session (0.87)
+```
+
+The text format is ~40-60% smaller than equivalent JSON and more natural for LLM consumption. The orchestrator generates these summaries in `prepare()` after running `code_intel.py`.
+
 ### The `format-diff` subcommand — LLM-optimized diff transformation
 
 **No leading AI code review tool feeds raw unified diffs to LLMs.** Both CodeRabbit and PR-Agent/Qodo independently arrived at the same approach: split diffs into "new hunk / old hunk" before/after blocks with line numbers on the new code only. Academic research (Diff-XYZ benchmark, ContextCRBench) confirms that diff format significantly impacts LLM comprehension.
@@ -544,16 +677,38 @@ def format_diff(unified_diff: str, expand_context: bool = False) -> str:
     return "\n".join(output)
 ```
 
-**`orchestrate.py` integration:**
+**Token inflation estimates:**
 
-In the prepare phase (before context packet assembly), after loading the diff:
+The before/after block format is larger than unified diff due to context line duplication and structural labels:
+
+| Scenario | Inflation vs. unified diff |
+|----------|---------------------------|
+| Mostly additions (new code) | ~1.15x |
+| Typical mixed changes | ~1.40x |
+| Heavy refactoring (many edits) | ~1.60x |
+| With `--expand-context` | ~1.80-2.00x |
+
+The diff is the single largest context component (often 50%+ of the explorer prompt). A 1.4x inflation on a 20k-token diff adds 8k tokens. With `--expand-context`, a 20k diff can balloon to 36-40k tokens.
+
+**`--expand-context` is off by default and budget-aware.** The orchestrator controls expansion:
 
 ```
 If python3 and scripts/code_intel.py are available:
-  FORMATTED_DIFF=$(git diff $BASE_REF | python3 scripts/code_intel.py format-diff --expand-context)
+  FORMATTED_DIFF=$(git diff $BASE_REF | python3 scripts/code_intel.py format-diff)
+  formatted_tokens = len(FORMATTED_DIFF) // 4
+  if formatted_tokens < prompt_budget * 0.50 and tree-sitter is available:
+    # Expansion fits within half the budget — safe to expand
+    FORMATTED_DIFF=$(git diff $BASE_REF | python3 scripts/code_intel.py format-diff --expand-context)
+  else:
+    # Diff already large — expansion would crowd out other context
+    progress("info", message="Skipping --expand-context — diff exceeds 50% of budget")
 Otherwise:
-  FORMATTED_DIFF=$(git diff $BASE_REF)
+  FORMATTED_DIFF=$(git diff $BASE_REF)  # raw unified diff
 ```
+
+The 50% threshold ensures expansion only fires when there is ample room for other context sources. On large diffs, basic formatting (without expansion) still provides the before/after block separation and hunk headers — the most impactful improvements.
+
+**`orchestrate.py` integration:**
 
 The formatted diff replaces the raw diff everywhere it's used:
 - **Context packet:** Explorers receive the formatted diff instead of raw unified diff
@@ -562,7 +717,9 @@ The formatted diff replaces the raw diff everywhere it's used:
 
 The raw diff is still available for deterministic tools (run-scans.sh, prescan.py) that expect standard unified diff format.
 
-**No optional dependencies.** This subcommand works with just Python 3 — no tree-sitter needed for the basic transformation. Tree-sitter only enhances it via `--expand-context` (function boundary detection). Without tree-sitter, hunk headers show line numbers only (no function names), and `--expand-context` uses keyword-based heuristics.
+**No optional dependencies for the base transformation.** This subcommand works with just Python 3 — no tree-sitter needed for the basic before/after block separation. Tree-sitter only enhances it via `--expand-context` (function boundary detection) and hunk header function names. Without tree-sitter, hunk headers show line numbers only (no function names), and `--expand-context` uses keyword-based heuristics.
+
+**Fallback when code_intel.py is unavailable:** If `code_intel.py` fails to import or crashes, the orchestrator uses the raw unified diff. The base format-diff transformation has zero optional dependencies, but it still requires python3. Without python3, raw unified diff is used.
 
 **Evidence this works:**
 - CodeRabbit and PR-Agent both use this format in production (independently developed, convergent design)
@@ -847,9 +1004,39 @@ Two tiers, not three. "Minimal" covers structural analysis (the foundation every
 - **go not available**: Skip golangci-lint and gocyclo. Note: "golangci-lint requires Go — install Go to enable Go linting."
 - **pip install fails (permission denied on system Python)**: Retry with `--user` flag. If that fails too, suggest: "Consider creating a virtual environment: `python3 -m venv .venv && source .venv/bin/activate`"
 - **npm install -g fails (permission denied)**: Suggest: "Try `npm install -g --prefix ~/.local @ast-grep/cli`" or "Use npx instead (slower but no install needed)."
-- **Partial install success**: Report what succeeded and what failed. Don't block the review — proceed with what's available.
+- **Partial install success**: Report what succeeded, what failed, and **which capabilities are affected**. The post-install report must map failed installs to degraded features (e.g., "ast-grep failed → AST security pattern matching unavailable, regex fallback active"). Don't block the review — proceed with what's available.
 - **Offline environment**: pip/npm/go install will fail. User should pre-install dependencies or use `--skip-setup` flag.
-- **CI environment**: Setup should be done in CI setup step, not during review. The marker file (`.codereview-cache/setup-complete`) can be pre-created to skip the interactive prompt. Or: `code_intel.py setup --install --tier full --non-interactive` (no prompt, just install).
+
+### CI / non-interactive environments (first-class support)
+
+CI is a primary execution environment for code review at scale. The setup flow must work headlessly without agent-driven prompts.
+
+**`--non-interactive` mode:**
+```bash
+python3 scripts/code_intel.py setup --install --tier full --non-interactive
+```
+In non-interactive mode:
+- No user prompt — install immediately
+- Exit code 0 if all requested deps installed, 1 if any failed
+- JSON output summarizing what installed, what failed, and which capabilities are affected
+- Suitable for CI setup steps: `pip install ... && python3 scripts/code_intel.py setup --install --tier full --non-interactive`
+
+**Marker file for CI:**
+The marker file `.codereview-cache/setup-complete` can be pre-created in CI to skip the interactive setup prompt entirely. It can also be committed to the repo (add to `.gitignore` template) so all CI runs skip setup after the first.
+
+**CI integration example:**
+```yaml
+# GitHub Actions
+- name: Install codereview dependencies
+  run: python3 scripts/code_intel.py setup --install --tier full --non-interactive
+
+# Or pre-create marker to skip setup entirely (deps installed via Dockerfile)
+- name: Skip codereview setup
+  run: mkdir -p .codereview-cache && touch .codereview-cache/setup-complete
+```
+
+**Codex sandbox / restricted environments:**
+When running in sandboxed environments (Codex, restricted containers), `setup --install` may fail due to network or permission restrictions. The `--non-interactive` flag ensures no hanging prompt. The review proceeds with whatever tools are pre-installed in the environment.
 
 ### Testing
 
@@ -1269,6 +1456,25 @@ Unit tests should cover:
 - **Large file lists (>200 files)**: Cap at 200 files (sorted by risk tier if available from triage). Log "Prescan capped at 200 files" in stderr.
 - **File too large (>10,000 lines)**: Skip tree-sitter parsing (memory/time risk). Fall back to regex for that file. Log warning.
 - **Binary file or encoding error**: Skip the file. Log to stderr.
+- **Wall-clock timeout (15 seconds)**: If prescan exceeds 15 seconds total, emit partial results for completed files and terminate. Log "Prescan timed out after 15s — partial results (N of M files)." The orchestrator uses `_bounded_timeout(deadline)` to enforce this.
+- **Per-file timeout (500ms)**: If a single file's checks exceed 500ms (e.g., regex backtracking on pathological input), skip that file and log warning. This prevents one bad file from consuming the entire budget.
+
+### Execution order dependency
+
+Prescan imports `code_intel.py` and uses `CodeIntel.parse()` for tree-sitter analysis. P-UNWIRED additionally uses `code_intel.py imports` and `code_intel.py functions` data to check if definitions have importers.
+
+**Ordering:** Prescan runs **after** `code_intel.py` data is available. In `orchestrate.py prepare`, the sequence is:
+1. `code_intel.py complexity` (already replaces complexity.sh)
+2. `code_intel.py functions` + `code_intel.py imports` (new context data)
+3. `prescan.py` (consumes code_intel data for P-UNWIRED and P-DEAD)
+
+If `code_intel.py` is not available (python3 missing, script error), P-UNWIRED is skipped (it requires the import graph). All other checkers still run with regex fallback.
+
+### PromptContext integration
+
+- **Field:** `prescan_signals`
+- **Truncation function:** `truncate_prescan_critical_only` — drops medium/low signals, keeps critical and high only
+- **Render section:** `### Prescan Signals` under `## Context`
 
 ### Files to create
 
@@ -1277,9 +1483,9 @@ Unit tests should cover:
 
 ### Files to modify
 
-- `scripts/orchestrate.py` — Integrate prescan into `prepare()` phase, include output in context packet assembly
+- `scripts/orchestrate.py` — Integrate prescan into `prepare()` phase, include output in context packet assembly. Add `prescan_signals` field to `PromptContext`. Add `truncate_prescan_critical_only` to truncation cascade.
 - `skills/codereview/SKILL.md` — Add mention of prescan signals in context packet description
-- `skills/codereview/references/acceptance-criteria.md` — Add prescan scenarios: tree-sitter mode, regex fallback, per-language checks, no python3, empty files
+- `skills/codereview/references/acceptance-criteria.md` — Add prescan scenarios: tree-sitter mode, regex fallback, per-language checks, no python3, empty files, timeout
 - `skills/codereview/references/design.md` — Add rationale entry (why Python not bash, why tree-sitter optional, why prescan is context not findings)
 
 ### Acceptance criteria
@@ -1291,6 +1497,9 @@ Unit tests should cover:
 - Each pattern checker works for Python, Go, TypeScript, Java, and Rust (where applicable)
 - File filtering correctly excludes generated code and test files (for P-SEC)
 - Graceful degradation: missing tree-sitter, missing grammars, large files, binary files
+- Wall-clock timeout (15s) emits partial results
+- Per-file timeout (500ms) skips slow files
+- P-UNWIRED is skipped when code_intel.py data is unavailable
 
 ### Effort: Medium
 
@@ -1390,9 +1599,15 @@ No changes to explorer prompt files. Checklists are injected as context, not as 
 - `skills/codereview/references/checklist-llm-trust.md` — LLM trust boundary checklist (~12 items)
 - `skills/codereview/references/checklist-concurrency.md` — Concurrency safety checklist (~15 items)
 
+### PromptContext integration
+
+- **Field:** `domain_checklists`
+- **Truncation function:** `drop_least_relevant_checklist` — drops checklists by trigger pattern match count (fewest matches dropped first)
+- **Render section:** `### Domain-Specific Checklists` under `## Context`
+
 ### Files to modify
 
-- `scripts/orchestrate.py` — Add domain checklist detection and loading to `prepare()` phase, include in context packet assembly and large-diff global context.
+- `scripts/orchestrate.py` — Add domain checklist detection and loading to `prepare()` phase, include in context packet assembly and large-diff global context. Add `domain_checklists` field to `PromptContext`. Add `drop_least_relevant_checklist` to truncation cascade.
 - `skills/codereview/references/design.md` — Add rationale entry
 - `skills/codereview/references/acceptance-criteria.md` — Add scenarios: SQL detected, LLM detected, concurrency detected, multiple match, none match
 
@@ -1531,16 +1746,63 @@ When the diff imports a local module and uses it in a new way:
 - **Diff is docs/config only**: Skip.
 - **code_intel.py available**: Use `functions` subcommand output to provide the planner with structured function signatures instead of raw diff text. This produces better search patterns.
 
+### Model tier and cost
+
+The planner LLM call uses a **Haiku/Flash-tier model** (cheapest available). Its input is a diff summary (~2-5k tokens), not the full diff. Its output is ~10 queries in JSON (~1k tokens). At Haiku pricing, this is ~$0.001-0.005 per call — negligible.
+
+Configurable via `.codereview.yaml`:
+```yaml
+cross_file_planner:
+  model: "haiku"       # haiku (default) | sonnet | auto
+  timeout: 10          # seconds
+  enabled: true        # false to disable entirely
+```
+
+### Mechanical enforcement
+
+The orchestrator **must not trust the LLM** to self-limit query count or token budget. After receiving the planner's JSON response, the orchestrator mechanically enforces:
+
+1. Parse JSON — if invalid, skip cross-file context entirely (log warning)
+2. Take first 10 queries only (discard extras)
+3. Sort by `risk_level` (high first)
+4. Execute queries via Grep, cap each query at 5 results
+5. After collecting all results, count total tokens. If >5k, drop low-risk query results until under budget
+
+### Per-explorer context routing
+
+Cross-file context is **not broadcast identically to all explorers**. Each explorer receives only the results relevant to its domain:
+
+| Explorer | Cross-file categories received | Estimated tokens |
+|----------|-------------------------------|-----------------|
+| Correctness | All 5 categories (full context) | up to 5,000 |
+| Security-config, Security-dataflow | Symmetric + consumers (auth/crypto focus) | up to 2,500 |
+| Test-adequacy | Test↔implementation only | up to 1,000 |
+| Reliability, Error-handling | Consumers + configuration | up to 2,000 |
+| Other extended experts | Consumers only | up to 1,500 |
+
+This reduces total cross-file input from ~35k tokens (5k × 7 explorers) to ~15k tokens across all explorers.
+
 ### Edge cases
 
-- **Planner returns >10 queries**: Truncate to 10, prioritize by risk_level.
+- **Planner returns >10 queries**: Mechanically truncated to 10 by orchestrator (see enforcement above).
 - **Query returns 0 results**: Normal — not all cross-file relationships exist. Log and move on.
 - **Query returns >20 results**: Too broad — take top 5 by file relevance (prefer same directory, then same package).
-- **Total context exceeds 5k tokens**: Truncate, keeping highest-risk results.
+- **Total context exceeds 5k tokens**: Mechanically truncated by orchestrator (see enforcement above).
+- **LLM timeout (10 seconds)**: Skip cross-file context entirely. Log: "Cross-file planner timed out — skipping." Proceed with review.
+- **LLM returns malformed JSON**: Skip cross-file context entirely. Log: "Cross-file planner returned invalid JSON — skipping." Proceed with review.
+- **LLM returns garbage/hallucinated symbols**: Queries execute via Grep and return 0 results. No harm — wasted ~2 seconds, no false context injected.
+- **LLM API error (rate limit, auth, network)**: Skip cross-file context entirely. Log error. Proceed with review.
 
 ### Future extension: Context Sufficiency Feedback Loop
 
 This feature is designed as a single-pass planner. Verification Pipeline Feature 6 extends it with a **sufficiency feedback loop**: after collecting context, evaluate whether it's sufficient and generate additional queries if gaps remain. See `docs/plan-verification-pipeline.md` Feature 6.
+
+### PromptContext integration
+
+- **Field:** `cross_file_context`
+- **Truncation function:** `truncate_cross_file_top3_high_risk` — keeps only the top 3 high-risk query results
+- **Render section:** `### Cross-File Context` under `## Context`
+- **Per-explorer routing:** Orchestrator filters results by category before injecting into each explorer's `PromptContext`
 
 ### Files to create
 
@@ -1548,22 +1810,25 @@ This feature is designed as a single-pass planner. Verification Pipeline Feature
 
 ### Files to modify
 
-- `scripts/orchestrate.py` — Add cross-file context planning step to `prepare()`, execute queries, include results in context packet and large-diff global context.
+- `scripts/orchestrate.py` — Add cross-file context planning step to `prepare()`, execute queries, include results in context packet and large-diff global context. Add `cross_file_context` field to `PromptContext`. Add `truncate_cross_file_top3_high_risk` to truncation cascade. Implement per-explorer routing.
 - `skills/codereview/references/design.md` — Add rationale entry
-- `skills/codereview/references/acceptance-criteria.md` — Add scenarios: symmetric operation detected, no cross-file relationships, large-diff mode, planner returns 0 results
+- `skills/codereview/references/acceptance-criteria.md` — Add scenarios: symmetric operation detected, no cross-file relationships, large-diff mode, planner returns 0 results, timeout, malformed JSON
 
 ### Acceptance criteria
 
 - Planner generates search queries for all 5 categories when applicable
 - Symmetric counterpart detection works (e.g., changed `encode` finds `decode`)
 - Queries use exact symbol names from the diff
-- Results are truncated to 5k token budget
+- Results are mechanically truncated to 5k token budget by the orchestrator
 - Cross-file context section appears in context packet with rationale for each result
 - Planner is skipped for test-only and docs-only diffs
 - When code_intel.py is available, planner receives structured function signatures
 - Large-diff mode runs planner once globally
+- LLM timeout (10s) skips cross-file context without blocking the review
+- Malformed JSON response skips cross-file context without error
+- Per-explorer routing delivers domain-relevant results only
 
-### Effort: Medium (new prompt + orchestrate.py integration + context packet formatting)
+### Effort: Medium (new prompt + orchestrate.py integration + context packet formatting + per-explorer routing)
 
 ---
 
@@ -1654,9 +1919,15 @@ For `custom_instructions` / `Always check` / `Style`: all are additive. No prece
 - **Large `REVIEW.md` (>100 items)**: Cap at 30 items per section. Log warning: "REVIEW.md has >30 items in 'Always check' — truncating. Consider splitting into domain checklists."
 - **`REVIEW.md` in subdirectory**: Not supported. Only repo root. Subdirectory-specific rules can go in domain checklists (Feature 2).
 
+### PromptContext integration
+
+- **Field:** `review_md_directives` (replaces current `review_instructions` for structured REVIEW.md content; raw `custom_instructions` remains in `review_instructions`)
+- **Truncation function:** `truncate_review_md_always_check_only` — drops "Style" section, keeps "Always check" only
+- **Render section:** `### Repo-Level Review Directives` under `## Context`
+
 ### Files to modify
 
-- `scripts/orchestrate.py` — Add REVIEW.md reading to `prepare()` phase, extract sections, add to context packet, add Skip patterns to target resolution.
+- `scripts/orchestrate.py` — Add REVIEW.md structured reading to `prepare()` phase, extract sections, add to context packet, add Skip patterns to target resolution. Add `review_md_directives` field to `PromptContext`. Add `truncate_review_md_always_check_only` to truncation cascade.
 - `skills/codereview/references/design.md` — Add rationale entry (why REVIEW.md alongside .codereview.yaml)
 - `skills/codereview/references/acceptance-criteria.md` — Add scenarios: REVIEW.md present, absent, partially populated, combined with config
 
@@ -1728,9 +1999,15 @@ Multiple patterns can match the same file — all matching instructions are incl
 - **Glob pattern syntax**: Use `fnmatch`-style globbing (consistent with `ignore_paths`).
 - **Very long instructions**: No hard cap, but document recommendation of 1-3 sentences per path pattern.
 
+### PromptContext integration
+
+- **Field:** `path_instructions`
+- **Truncation function:** `lambda _: ""` — drop entirely (path instructions are supplementary; low-risk files' instructions are dropped first if a smarter truncation is needed)
+- **Render section:** `### Path-Specific Instructions` under `## Context`
+
 ### Files to modify
 
-- `scripts/orchestrate.py` — Add path instruction matching to `prepare()` phase context packet assembly. Load `path_instructions` from config, match against changed file paths, include in context.
+- `scripts/orchestrate.py` — Add path instruction matching to `prepare()` phase context packet assembly. Load `path_instructions` from config, match against changed file paths, include in context. Add `path_instructions` field to `PromptContext`. Add to truncation cascade.
 - `docs/CONFIGURATION.md` — Add `path_instructions` to config reference
 - `skills/codereview/references/design.md` — Add rationale entry
 
