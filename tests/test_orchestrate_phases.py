@@ -44,9 +44,7 @@ class PostExplorersPhaseTests(unittest.TestCase):
             session_dir.mkdir()
             (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
 
-            judge_prompt_file = (
-                REPO_ROOT / "skills" / "codereview" / "prompts" / "reviewer-judge.md"
-            )
+            judge_prompt_file = REPO_ROOT / "skills" / "codereview" / "prompts"
             launch_packet = {
                 "session_dir": str(session_dir),
                 "waves": [
@@ -189,9 +187,7 @@ class PostExplorersPhaseTests(unittest.TestCase):
             session_dir.mkdir()
             (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
 
-            judge_prompt_file = (
-                REPO_ROOT / "skills" / "codereview" / "prompts" / "reviewer-judge.md"
-            )
+            judge_prompt_file = REPO_ROOT / "skills" / "codereview" / "prompts"
             launch_packet = {
                 "session_dir": str(session_dir),
                 "waves": [
@@ -271,9 +267,7 @@ class PostExplorersPhaseTests(unittest.TestCase):
             session_dir.mkdir()
             (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
 
-            judge_prompt_file = (
-                REPO_ROOT / "skills" / "codereview" / "prompts" / "reviewer-judge.md"
-            )
+            judge_prompt_file = REPO_ROOT / "skills" / "codereview" / "prompts"
 
             # Create 51 findings with distinct confidence values (0.50 .. 1.00 step 0.01)
             findings_51 = [
