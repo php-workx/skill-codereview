@@ -169,6 +169,55 @@ class EvalMartianTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Judge batch failed"):
                     eval_martian.cmd_prompt_test(args)
 
+    def test_cmd_judge_raises_when_review_artifact_missing(self) -> None:
+        pr = eval_martian.BenchmarkPR(
+            pr_id="repo-1",
+            repo_key="keycloak",
+            language="java",
+            pr_title="Test PR",
+            url="https://example.com/pr",
+            original_url="https://example.com/pr/1",
+            pr_number=1,
+            golden_comments=[],
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            eval_dir = Path(tmpdir)
+            (eval_dir / "reviews").mkdir()
+            with (
+                mock.patch.object(eval_martian, "EVAL_DIR", eval_dir),
+                mock.patch.object(eval_martian, "load_prs", return_value=[pr]),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Missing review artifact"):
+                    eval_martian.cmd_judge(
+                        type(
+                            "Args",
+                            (),
+                            {"repo": None, "judge_model": "sonnet", "workers": 1},
+                        )()
+                    )
+
+    def test_prompt_test_single_raises_on_nonzero_claude_exit(self) -> None:
+        pr = eval_martian.BenchmarkPR(
+            pr_id="repo-1",
+            repo_key="keycloak",
+            language="java",
+            pr_title="Test PR",
+            url="https://example.com/pr",
+            original_url="https://example.com/pr/1",
+            pr_number=1,
+            golden_comments=[],
+            commit_sha="deadbeef",
+        )
+        diff = subprocess.CompletedProcess(["git"], 0, "diff text", "")
+        claude_fail = subprocess.CompletedProcess(["claude"], 1, "", "broken auth")
+
+        with mock.patch.object(eval_martian, "git", return_value=diff):
+            with mock.patch.object(
+                eval_martian.subprocess, "run", return_value=claude_fail
+            ):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    eval_martian.prompt_test_single(pr, Path("."), "prompt", "sonnet")
+
 
 if __name__ == "__main__":
     unittest.main()

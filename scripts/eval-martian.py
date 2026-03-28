@@ -1068,7 +1068,9 @@ def cmd_judge(args: argparse.Namespace) -> bool:
     for pr in prs:
         findings_file = reviews_dir / f"{pr.pr_id}.json"
         if not findings_file.exists():
-            continue
+            raise RuntimeError(
+                f"Missing review artifact for {pr.pr_id}; rerun `review` before `judge`."
+            )
 
         with open(findings_file) as f:
             findings_data = json.load(f)
@@ -1118,16 +1120,7 @@ def cmd_judge(args: argparse.Namespace) -> bool:
                         f"  [{completed}/{len(work)}] {pr.pr_id}: TP={tp} FP={fp} FN={fn}  P={result.precision:.0%} R={result.recall:.0%} F1={result.f1:.0%}"
                     )
             except Exception as e:
-                with _print_lock:
-                    print(f"  [{completed}/{len(work)}] {pr.pr_id}: Error: {e}")
-                all_results.append(
-                    PRResult(
-                        pr_id=pr.pr_id,
-                        repo_key=pr.repo_key,
-                        language=pr.language,
-                        false_negatives=list(pr.golden_comments),
-                    )
-                )
+                raise RuntimeError(f"Judging failed for {pr.pr_id}: {e}") from e
 
     if not all_results:
         print("No review findings to judge. Run 'review' first.")
@@ -2292,6 +2285,13 @@ def prompt_test_single(
             text=True,
             timeout=300,
         )
+        if r.returncode != 0:
+            stderr = (r.stderr or "").strip()
+            stdout = (r.stdout or "").strip()
+            detail = stderr or stdout or "claude exited non-zero"
+            raise subprocess.CalledProcessError(
+                r.returncode, r.args, output=r.stdout, stderr=detail
+            )
         text = r.stdout.strip()
         try:
             envelope = json.loads(text)
@@ -2346,13 +2346,13 @@ def prompt_test_single(
     except subprocess.TimeoutExpired:
         with _print_lock:
             print(f"      TIMEOUT ({pr.pr_id})")
-        return []
+        raise
     except FileNotFoundError:
-        return []
+        raise
     except Exception as exc:
         with _print_lock:
             print(f"      ERROR ({pr.pr_id}): {exc}")
-        return []
+        raise
 
 
 def cmd_prompt_test(args: argparse.Namespace) -> bool:
@@ -2467,7 +2467,7 @@ def cmd_prompt_test(args: argparse.Namespace) -> bool:
                 except Exception as e:
                     with _print_lock:
                         print(f"  [{completed}] {pr.pr_id}: ERROR {e}")
-                    all_findings[pr.pr_id] = []
+                    raise RuntimeError(f"Prompt test failed for {pr.pr_id}: {e}") from e
 
         # Save findings
         with open(result_file, "w") as f:
@@ -2589,7 +2589,20 @@ def cmd_prompt_test(args: argparse.Namespace) -> bool:
     print(
         f"  ** {prompt_name} (one-shot) **{precision * 100:>8.1f}{recall * 100:>6.1f}{f1 * 100:>6.1f}"
     )
-    print(f"  Our full pipeline{10.1:>14.1f}{39.1:>6.1f}{16.0:>6.1f}")
+    latest_pipeline = EVAL_DIR / "results" / "latest.json"
+    if latest_pipeline.exists():
+        try:
+            with open(latest_pipeline) as f:
+                baseline = json.load(f).get("aggregate", {})
+            if baseline:
+                print(
+                    "  Our full pipeline"
+                    f"{baseline.get('precision', 0) * 100:>14.1f}"
+                    f"{baseline.get('recall', 0) * 100:>6.1f}"
+                    f"{baseline.get('f1', 0) * 100:>6.1f}"
+                )
+        except (json.JSONDecodeError, OSError, TypeError):
+            pass
     for name, p, r, f in LEADERBOARD[:10]:
         print(f"  {name:<30s}{p:>6.1f}{r:>6.1f}{f:>6.1f}")
 
