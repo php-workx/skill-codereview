@@ -47,19 +47,21 @@ rm -rf "$DEST_CLAUDE" "$DEST_CODEX"
 mv "$DEST_CLAUDE_TMP" "$DEST_CLAUDE"
 mv "$DEST_CODEX_TMP" "$DEST_CODEX"
 
-# Copy orchestrate.py (lives at repo root scripts/, not inside the skill dir)
-SRC_ORCHESTRATE="$REPO_ROOT/scripts/orchestrate.py"
-if [[ -f "$SRC_ORCHESTRATE" ]]; then
-	for dest in "$DEST_CLAUDE" "$DEST_CODEX"; do
-		cp "$SRC_ORCHESTRATE" "$dest/scripts/orchestrate.py" || {
-			echo "error: failed to copy orchestrate.py to $dest/scripts/" >&2
-			exit 1
-		}
-		chmod +x "$dest/scripts/orchestrate.py"
-	done
-else
-	echo "warning: orchestrate.py not found at $SRC_ORCHESTRATE — skill will not work correctly" >&2
-fi
+# Copy repo-root scripts (live at repo root scripts/, not inside the skill dir)
+for script_name in orchestrate.py code_intel.py prescan.py; do
+	SRC_SCRIPT="$REPO_ROOT/scripts/$script_name"
+	if [[ -f "$SRC_SCRIPT" ]]; then
+		for dest in "$DEST_CLAUDE" "$DEST_CODEX"; do
+			cp "$SRC_SCRIPT" "$dest/scripts/$script_name" || {
+				echo "error: failed to copy $script_name to $dest/scripts/" >&2
+				exit 1
+			}
+			chmod +x "$dest/scripts/$script_name"
+		done
+	else
+		echo "warning: $script_name not found at $SRC_SCRIPT" >&2
+	fi
+done
 
 # Make all scripts executable
 for dest in "$DEST_CLAUDE" "$DEST_CODEX"; do
