@@ -288,7 +288,7 @@ assert_json_field "tool_status has entries" "$SCANS_REAL" "len(d['tool_status'])
 
 # 5d. Each tool status value is from allowed enum
 assert_json_field "tool_status values are valid enum" "$SCANS_REAL" \
-	"all(v['status'] in ('ran','skipped','failed','timeout','partial','not_installed','sandbox_blocked') for v in d['tool_status'].values())"
+	"all(v['status'] in ('ran','skipped','failed','timeout','partial','not_installed','sandbox_blocked','removed') for v in d['tool_status'].values())"
 
 # 5e. Findings (if any) have required fields
 assert_json_field "all findings have file field" "$SCANS_REAL" \
@@ -343,17 +343,11 @@ assert_json_field "ruff F821 maps to high severity" "$RUFF_NORM" \
 	"any(f['evidence']=='F821' and f['severity']=='high' for f in d)"
 rm -f "$TEST_TMPDIR/test-ruff-input.json"
 
-# 5k. OSV is gated to dependency manifest changes
-if grep -q "has_dependency_manifest_changes" "$SCRIPTS/run-scans.sh"; then
-	pass "run-scans.sh has dependency manifest gating helper for OSV"
+# 5k. osv-scanner has been removed in favor of trivy
+if grep -Fq 'record_status "osv_scanner" "removed"' "$SCRIPTS/run-scans.sh"; then
+	pass "run-scans.sh marks osv-scanner as removed"
 else
-	fail "run-scans.sh has dependency manifest gating helper for OSV" "helper not found"
-fi
-
-if grep -Fq "base=\"\${file##*/}\"" "$SCRIPTS/run-scans.sh"; then
-	pass "run-scans.sh manifest detection uses basename for nested paths"
-else
-	fail "run-scans.sh manifest detection uses basename for nested paths" "basename extraction not found"
+	fail "run-scans.sh marks osv-scanner as removed" "removed status not found"
 fi
 
 if grep -Fq "git -C \"\$AST_GREP_RULES\" fetch --quiet origin" "$SCRIPTS/run-scans.sh"; then

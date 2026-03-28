@@ -128,7 +128,7 @@ Output:
     ...
   ]
 }
-```text
+```
 
 ### Stage 2: Deterministic Triage
 
@@ -250,7 +250,7 @@ Output your verdicts as a JSON array:
   { "finding_index": 1, "verdict": "false_positive", "reason": "Input is validated by middleware at api/middleware.py:23 before reaching this handler" },
   { "finding_index": 2, "verdict": "needs_investigation", "reason": "Call chain too deep to trace — login() → session_manager() → cache.get() → unclear if cache is thread-safe" }
 ]
-```text
+```
 
 ### Activation threshold
 
@@ -453,7 +453,7 @@ Added to the top of the markdown report, before the detailed findings:
 - `tests/test_auth.py:34` — Test mocks the database, cannot catch schema drift
 
 **Spec:** 8/10 requirements implemented, 1 partial, 1 not started
-```text
+```
 
 ### Implementation
 
@@ -495,7 +495,7 @@ For each high/critical finding with confidence < 0.85:
     │     If uncertain: keep as-is, note "unverified by spot-check"
     │
     └── If spot-check disabled OR no alternate model: skip (current behavior)
-```text
+```
 
 ### Activation
 
@@ -583,7 +583,7 @@ Add to `prompts/reviewer-verifier.md` after the verdict assignment:
    - The judge will strip the broken fix from the final output
 
    If the fix is valid or no fix is suggested: `fix_valid: true` (default)
-```text
+```
 
 ### Judge handling
 
@@ -639,7 +639,7 @@ Step 2m.5: Context Sufficiency Check (NEW)
         ├── Execute additional queries via Grep
         ├── Merge new results with existing context
         └── Proceed to Step 2h (no further iteration — max 2 rounds total)
-```text
+```
 
 ### Sufficiency criteria
 
@@ -699,7 +699,7 @@ Max 5 additional queries. Use word-boundary ripgrep patterns only.
 cross_file:
   sufficiency_check: true   # enable/disable sufficiency feedback loop
   max_rounds: 2             # max collection rounds (1 = no sufficiency check)
-```text
+```
 
 ### Files to create
 
@@ -745,7 +745,7 @@ Step 2n: Documentation Context (NEW)
     │   └── Format results as context snippets
     │
     └── Include in context packet (Step 2h)
-```text
+```
 
 ### Why opt-in
 
@@ -817,7 +817,7 @@ Addition to the judge prompt (Feature 1's Pass 2: Synthesis). After severity cal
   "score": 8,
   "score_reason": "Verified: map write without nil check on error path, confirmed via Read"
 }
-```text
+```
 
 ### Interaction with action tiers
 
@@ -838,7 +838,7 @@ Configurable via `.codereview.yaml`:
 scoring:
   min_score: 0         # drop findings below this score (0 = keep all)
   show_scores: true    # include score in report output
-```text
+```
 
 ### Files to modify
 
@@ -897,7 +897,7 @@ New script: `scripts/detect-plan-context.sh`
    - --ticket <id>        (tk ticket)
    - --bead <id>          (bd bead)
    - --plan <file>[#N]    (plan file, optionally feature number)
-```text
+```
 
 **Output format:**
 ```json
@@ -992,7 +992,7 @@ Extends the existing `spec_requirements` array in findings-schema.json:
     ]
   }
 }
-```text
+```
 
 ### Interaction with existing pipeline
 
@@ -1080,7 +1080,7 @@ repair_json() {
   # Strategy 2-6: progressive fixes on raw content
   # ... (each strategy tries jq validation after the fix)
 }
-```text
+```
 
 ### Interaction with pipeline
 
@@ -1109,7 +1109,7 @@ Motivated by CodeRabbit gap analysis: findings #1, #5, #6, #14, #15, #24, #26, #
 ```
 Always run:  correctness, security, reliability, test-adequacy  (4 core)
 Skip logic:  error-handling, api-contract, concurrency, spec-verification  (4 extended, skip signals)
-```text
+```
 
 The extended passes have simple skip signals (e.g., concurrency skips if no concurrency primitives in diff). But the core passes always run, and no new experts can join based on diff content.
 
@@ -1125,7 +1125,7 @@ diff content:   API & Contract expert        ← route/endpoint/handler defs, sc
                 Spec Verification expert     ← --spec flag provided
                 [future] Database expert     ← migration files, schema changes, SQL
                 [future] Infrastructure expert ← Kubernetes manifests, Terraform, CI/CD configs
-```text
+```
 
 **Key changes from current:**
 1. **Reliability moves from core to activated** — it's most valuable when the diff touches resource management, external calls, or hot paths. On a diff that's pure business logic, the correctness pass already covers logic bugs.
@@ -1341,7 +1341,7 @@ Do NOT report:
 Return ALL findings. Use `pass: "reliability"` for shell correctness findings,
 `pass: "security"` for injection findings.
 Use the JSON schema from the global contract.
-```text
+```
 
 ### Expert interaction model
 
@@ -1378,7 +1378,7 @@ Activated experts (run if activation signal detected):
 Log: "Expert panel: correctness, security, test-adequacy, shell-script, error-handling (5 experts)"
 
 If force_all_passes: true in config, activate all experts regardless of signals.
-```text
+```
 
 ### Configuration
 
