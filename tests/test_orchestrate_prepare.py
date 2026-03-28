@@ -31,6 +31,15 @@ REPO_ROOT = TESTS_DIR.parent
 
 
 class OrchestratePrepareTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Clear GIT_* env vars that leak from pre-push hooks into test subprocesses
+        self._saved_git_env = {
+            k: os.environ.pop(k) for k in list(os.environ) if k.startswith("GIT_")
+        }
+
+    def tearDown(self) -> None:
+        os.environ.update(self._saved_git_env)
+
     def test_extract_diff_base_mode_returns_changed_files_and_diff_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = self._init_repo(Path(tmpdir))
