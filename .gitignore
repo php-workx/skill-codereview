@@ -1,6 +1,7 @@
 # Research data (not part of distributable skill)
 data/
 .tickets/
+.fabrikk
 
 # macOS
 .DS_Store

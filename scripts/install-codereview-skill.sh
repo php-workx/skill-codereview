@@ -8,14 +8,14 @@ SRC_SKILL="$REPO_ROOT/skills/codereview"
 SRC_PROMPT="$REPO_ROOT/prompts/codereview.md"
 
 if [[ ! -d "$SRC_SKILL" ]]; then
-  echo "error: missing source skill directory at $SRC_SKILL" >&2
-  exit 1
+	echo "error: missing source skill directory at $SRC_SKILL" >&2
+	exit 1
 fi
 
 if [[ -d "$HOME/.claude/skills" ]]; then
-  DEST_CLAUDE_BASE="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
+	DEST_CLAUDE_BASE="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
 else
-  DEST_CLAUDE_BASE="${CLAUDE_SKILLS_DIR:-$HOME/.agents/skills}"
+	DEST_CLAUDE_BASE="${CLAUDE_SKILLS_DIR:-$HOME/.agents/skills}"
 fi
 DEST_CODEX_BASE="${CODEX_SKILLS_DIR:-$HOME/.codex/skills}"
 DEST_CODEX_PROMPTS_BASE="${CODEX_PROMPTS_DIR:-$HOME/.codex/prompts}"
@@ -33,38 +33,52 @@ DEST_CODEX_TMP="${DEST_CODEX}.installing"
 rm -rf "$DEST_CLAUDE_TMP" "$DEST_CODEX_TMP"
 
 cp -R "$SRC_SKILL" "$DEST_CLAUDE_TMP" || {
-  echo "error: failed to copy skill to Claude destination" >&2
-  rm -rf "$DEST_CLAUDE_TMP"
-  exit 1
+	echo "error: failed to copy skill to Claude destination" >&2
+	rm -rf "$DEST_CLAUDE_TMP"
+	exit 1
 }
 cp -R "$SRC_SKILL" "$DEST_CODEX_TMP" || {
-  echo "error: failed to copy skill to Codex destination" >&2
-  rm -rf "$DEST_CLAUDE_TMP" "$DEST_CODEX_TMP"
-  exit 1
+	echo "error: failed to copy skill to Codex destination" >&2
+	rm -rf "$DEST_CLAUDE_TMP" "$DEST_CODEX_TMP"
+	exit 1
 }
 
 rm -rf "$DEST_CLAUDE" "$DEST_CODEX"
 mv "$DEST_CLAUDE_TMP" "$DEST_CLAUDE"
 mv "$DEST_CODEX_TMP" "$DEST_CODEX"
 
+# Copy orchestrate.py (lives at repo root scripts/, not inside the skill dir)
+SRC_ORCHESTRATE="$REPO_ROOT/scripts/orchestrate.py"
+if [[ -f "$SRC_ORCHESTRATE" ]]; then
+	for dest in "$DEST_CLAUDE" "$DEST_CODEX"; do
+		cp "$SRC_ORCHESTRATE" "$dest/scripts/orchestrate.py" || {
+			echo "error: failed to copy orchestrate.py to $dest/scripts/" >&2
+			exit 1
+		}
+		chmod +x "$dest/scripts/orchestrate.py"
+	done
+else
+	echo "warning: orchestrate.py not found at $SRC_ORCHESTRATE — skill will not work correctly" >&2
+fi
+
 # Make all scripts executable
 for dest in "$DEST_CLAUDE" "$DEST_CODEX"; do
-  # Use compgen to check for matching files before chmod (avoids glob expansion errors)
-  for pat in "$dest/scripts/"*.sh "$dest/scripts/"*.py; do
-    if compgen -G "$pat" >/dev/null 2>&1; then
-      chmod +x $pat || {
-        echo "error: failed to chmod +x $pat" >&2
-        exit 1
-      }
-    fi
-  done
+	# Use compgen to check for matching files before chmod (avoids glob expansion errors)
+	for pat in "$dest/scripts/"*.sh "$dest/scripts/"*.py; do
+		if compgen -G "$pat" >/dev/null 2>&1; then
+			chmod +x "$pat" || {
+				echo "error: failed to chmod +x $pat" >&2
+				exit 1
+			}
+		fi
+	done
 done
 
 if [[ -f "$SRC_PROMPT" ]]; then
-  cp "$SRC_PROMPT" "$DEST_CODEX_PROMPTS_BASE/codereview.md" || {
-    echo "error: failed to copy Codex prompt from $SRC_PROMPT" >&2
-    exit 1
-  }
+	cp "$SRC_PROMPT" "$DEST_CODEX_PROMPTS_BASE/codereview.md" || {
+		echo "error: failed to copy Codex prompt from $SRC_PROMPT" >&2
+		exit 1
+	}
 fi
 
 cat <<EOF
