@@ -29,10 +29,10 @@ Use this skill to run a local review end to end. Do not reimplement the pipeline
 
 ## Execution
 
-**Script location:** All scripts live in this skill's `scripts/` directory. Since bash blocks run in the user's current working directory (not the skill directory), always use the full path. Set this variable at the start of every bash block:
+**Script location:** All scripts live in this skill's `scripts/` directory. Since bash blocks run in the user's current working directory (not the skill directory), you must use the full absolute path. The skill framework injects `Base directory for this skill: <path>` at the top of the skill context — extract that path and append `/scripts` to get the scripts directory. Set this variable at the start of every bash block, replacing `<SKILL_BASE>` with the actual base directory path from the injected header:
 
 ```
-SKILL_SCRIPTS="$HOME/.claude/skills/codereview/scripts"
+SKILL_SCRIPTS="<SKILL_BASE>/scripts"
 ```
 
 ### Error handling (applies to all steps)
@@ -46,7 +46,7 @@ If `.codereview-cache/setup-complete` does NOT exist:
 1. Check dependencies:
 
 ```bash
-SKILL_SCRIPTS="$HOME/.claude/skills/codereview/scripts"
+SKILL_SCRIPTS="<SKILL_BASE>/scripts"
 python3 "$SKILL_SCRIPTS/code_intel.py" setup --check --json
 ```
 
@@ -63,7 +63,7 @@ python3 "$SKILL_SCRIPTS/code_intel.py" setup --check --json
    If user says yes:
 
 ```bash
-SKILL_SCRIPTS="$HOME/.claude/skills/codereview/scripts"
+SKILL_SCRIPTS="<SKILL_BASE>/scripts"
 python3 "$SKILL_SCRIPTS/code_intel.py" setup --install --tier full
 ```
 
@@ -82,7 +82,7 @@ To re-run setup: `/codereview --setup` (deletes marker and re-runs Step 0)
 Create a session directory and run the orchestrator:
 
 ```bash
-SKILL_SCRIPTS="$HOME/.claude/skills/codereview/scripts"
+SKILL_SCRIPTS="<SKILL_BASE>/scripts"
 SESSION_DIR=$(mktemp -d /tmp/codereview-XXXXXXXX)
 python3 "$SKILL_SCRIPTS/orchestrate.py" prepare --session-dir "$SESSION_DIR" [flags from user]
 ```
@@ -165,7 +165,7 @@ rm -rf "$SESSION_DIR"
 ## Suppress a Finding
 
 ```bash
-SKILL_SCRIPTS="$HOME/.claude/skills/codereview/scripts"
+SKILL_SCRIPTS="<SKILL_BASE>/scripts"
 python3 "$SKILL_SCRIPTS/lifecycle.py" suppress \
   --review <latest review JSON path> \
   --finding-id <id> \
