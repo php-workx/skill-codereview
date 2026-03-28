@@ -45,14 +45,15 @@ python3 scripts/code_intel.py setup --check --json
 
 2. Parse the JSON output.
 3. If `summary.missing_by_tier.full > 0`:
-   Show the user the human-readable check output.
-   Ask: "I recommend installing the full dependency set for the best review quality.
-         This includes semantic code search, AST security rules, and language-specific
-         linters. One-time install, ~250MB.
+   Show the user the human-readable check output, then use `AskUserQuestion` to prompt:
 
-         Install? (yes / skip)"
+   "I recommend installing the full dependency set for the best review quality. This includes semantic code search, AST security rules, and language-specific linters. One-time install, ~250MB. Install?"
 
-   If yes:
+   With options: `["yes", "skip"]`
+
+   Do NOT proceed until the user responds. Do NOT auto-select.
+
+   If user says yes:
 
 ```bash
 python3 scripts/code_intel.py setup --install --tier full
