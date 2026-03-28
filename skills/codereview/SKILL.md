@@ -37,6 +37,8 @@ After each script phase, check the `status` field in the output JSON. If `"error
 
 If `.codereview-cache/setup-complete` does NOT exist:
 
+All script paths below are relative to this skill's base directory (the same directory containing this SKILL.md file).
+
 1. Run: `python3 scripts/code_intel.py setup --check --json`
 2. Parse the JSON output.
 3. If `summary.missing_by_tier.full > 0`:
@@ -119,7 +121,7 @@ Launch a single sub-agent:
 
 The judge needs Read, Grep, and Glob tools for adversarial verification — use a general-purpose sub-agent, not a limited one.
 
-After the judge completes, extract JSON from its response and write it to `judge_output_file`.
+After the judge completes, write its full response to `judge_output_file` (the path from judge input JSON). The finalize step uses `extract_json_from_text()` which handles JSON embedded in markdown, fenced code blocks, and text with extra data after the JSON. Do NOT attempt to parse or extract JSON yourself — just write the raw response.
 
 ### Step 5: Finalize
 
