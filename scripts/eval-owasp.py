@@ -306,9 +306,17 @@ def cmd_setup(args: argparse.Namespace) -> bool:
 # ─── Scan (deterministic) ────────────────────────────────────────────────────
 
 
+def _iter_langs(lang: str) -> list[str]:
+    return list(REPOS) if lang == "all" else [lang]
+
+
 def cmd_scan(args: argparse.Namespace) -> bool:
     """Run semgrep on OWASP test cases."""
     lang = getattr(args, "lang", "python") or "python"
+    if lang == "all":
+        return all(
+            cmd_scan(argparse.Namespace(**vars(args), lang=item)) for item in REPOS
+        )
     config = REPOS[lang]
     repo_dir = OWASP_DIR / f"Benchmark{lang.capitalize()}"
     testcode_dir = repo_dir / config["testcode_dir"]
@@ -320,7 +328,11 @@ def cmd_scan(args: argparse.Namespace) -> bool:
         return False
 
     # Check semgrep is installed
-    r = subprocess.run(["semgrep", "--version"], capture_output=True, text=True)
+    try:
+        r = subprocess.run(["semgrep", "--version"], capture_output=True, text=True)
+    except FileNotFoundError:
+        print("semgrep not installed. Run: pip install semgrep")
+        return False
     if r.returncode != 0:
         print("semgrep not installed. Run: pip install semgrep")
         return False
@@ -338,6 +350,7 @@ def cmd_scan(args: argparse.Namespace) -> bool:
 
     if r.returncode not in (0, 1):  # semgrep returns 1 when findings exist
         print(f"  semgrep error: {r.stderr[:200]}")
+        return False
 
     # Parse semgrep JSON output
     try:
@@ -511,6 +524,10 @@ def review_batch(files: list[TestCase], cwe_list: str, lang: str) -> list[dict]:
 def cmd_review(args: argparse.Namespace) -> bool:
     """Run AI security review on OWASP test cases."""
     lang = getattr(args, "lang", "python") or "python"
+    if lang == "all":
+        return all(
+            cmd_review(argparse.Namespace(**vars(args), lang=item)) for item in REPOS
+        )
     config = REPOS[lang]
     repo_dir = OWASP_DIR / f"Benchmark{lang.capitalize()}"
     results_dir = OWASP_DIR / "results"
@@ -546,7 +563,21 @@ def cmd_review(args: argparse.Namespace) -> bool:
     completed = 0
 
     def _review_batch(batch: list[TestCase]) -> list[dict]:
-        return review_batch(batch, cwe_list, lang)
+        results = review_batch(batch, cwe_list, lang)
+        expected = {test.name for test in batch}
+        returned = {
+            match.group(1)
+            for item in results
+            if isinstance(item, dict)
+            for match in [re.search(r"(BenchmarkTest\d+)", str(item.get("file", "")))]
+            if match
+        }
+        if returned != expected:
+            raise ValueError(
+                "batch result mismatch: "
+                f"missing={sorted(expected - returned)} extra={sorted(returned - expected)}"
+            )
+        return results
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_review_batch, batch): batch for batch in batches}
@@ -618,6 +649,10 @@ def cmd_review(args: argparse.Namespace) -> bool:
 def cmd_score(args: argparse.Namespace) -> bool:
     """Compute Youden Index per CWE category."""
     lang = getattr(args, "lang", "python") or "python"
+    if lang == "all":
+        return all(
+            cmd_score(argparse.Namespace(**vars(args), lang=item)) for item in REPOS
+        )
     config = REPOS[lang]
     repo_dir = OWASP_DIR / f"Benchmark{lang.capitalize()}"
     results_dir = OWASP_DIR / "results"
@@ -814,6 +849,10 @@ def cmd_score(args: argparse.Namespace) -> bool:
 def cmd_report(args: argparse.Namespace) -> bool:
     """Display OWASP scorecard."""
     lang = getattr(args, "lang", "python") or "python"
+    if lang == "all":
+        return all(
+            cmd_report(argparse.Namespace(**vars(args), lang=item)) for item in REPOS
+        )
     results_dir = OWASP_DIR / "results"
     score_file = results_dir / f"score-{lang}-latest.json"
 

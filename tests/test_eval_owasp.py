@@ -126,6 +126,77 @@ class EvalOwaspTests(unittest.TestCase):
 
         self.assertFalse(ok)
 
+    def test_cmd_review_rejects_partial_batch_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            owasp_dir = root / "owasp"
+            repo_dir = owasp_dir / "BenchmarkPython"
+            (repo_dir / "testcode").mkdir(parents=True)
+            (repo_dir / "expectedresults-0.1.csv").write_text(
+                "BenchmarkTest00001,sqli,true,89\nBenchmarkTest00002,sqli,true,89\n",
+                encoding="utf-8",
+            )
+            for name in ("BenchmarkTest00001", "BenchmarkTest00002"):
+                (repo_dir / "testcode" / f"{name}.py").write_text(
+                    "print('x')\n", encoding="utf-8"
+                )
+
+            with (
+                mock.patch.object(self.mod, "OWASP_DIR", owasp_dir),
+                mock.patch.object(
+                    self.mod,
+                    "review_batch",
+                    return_value=[
+                        {"file": "BenchmarkTest00001.py", "vulnerable": True, "cwe": 89}
+                    ],
+                ),
+            ):
+                ok = self.mod.cmd_review(
+                    Namespace(lang="python", workers=1, limit=None)
+                )
+
+        self.assertFalse(ok)
+
+    def test_cmd_scan_returns_false_on_semgrep_fatal_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            owasp_dir = root / "owasp"
+            repo_dir = owasp_dir / "BenchmarkPython" / "testcode"
+            repo_dir.mkdir(parents=True)
+            (repo_dir / "BenchmarkTest00001.py").write_text(
+                "print('x')\n", encoding="utf-8"
+            )
+
+            version_ok = subprocess.CompletedProcess(["semgrep"], 0, "1.0.0\n", "")
+            fatal = subprocess.CompletedProcess(["semgrep"], 2, "", "fatal")
+
+            with (
+                mock.patch.object(self.mod, "OWASP_DIR", owasp_dir),
+                mock.patch.object(
+                    self.mod.subprocess, "run", side_effect=[version_ok, fatal]
+                ),
+            ):
+                ok = self.mod.cmd_scan(Namespace(lang="python"))
+
+        self.assertFalse(ok)
+
+    def test_cmd_scan_returns_false_when_semgrep_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            owasp_dir = root / "owasp"
+            repo_dir = owasp_dir / "BenchmarkPython" / "testcode"
+            repo_dir.mkdir(parents=True)
+
+            with (
+                mock.patch.object(self.mod, "OWASP_DIR", owasp_dir),
+                mock.patch.object(
+                    self.mod.subprocess, "run", side_effect=FileNotFoundError()
+                ),
+            ):
+                ok = self.mod.cmd_scan(Namespace(lang="python"))
+
+        self.assertFalse(ok)
+
     def test_cmd_score_does_not_map_owasp_metrics_to_precision_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
