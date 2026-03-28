@@ -179,8 +179,8 @@ Validation criteria for the codereview skill. Not needed at runtime — use for 
 | Scenario | Expected Behavior |
 |----------|-------------------|
 | Confidence below floor (< 0.65) | Finding is removed from `findings[]` array. Count reflected in enrichment summary. |
-| Evidence downgrade | Finding with `severity: "high"` or `"critical"` but no `failure_mode` populated has confidence reduced by 0.15. If confidence drops below 0.65, finding is removed. |
-| Tier assignment | Each finding receives `action_tier`: Must Fix (critical/high), Should Fix (medium), Consider (low). Classification is deterministic based on severity. |
+| Evidence downgrade | Finding with `severity: "high"` or `"critical"` but no `failure_mode` populated is downgraded to `severity: "medium"`. |
+| Tier assignment | Each finding receives `action_tier`: `must_fix` (critical/high), `should_fix` (medium), `consider` (low). Classification is deterministic based on severity. |
 | `llm_prompt` generation | Script produces a summary prompt field for downstream LLM consumption based on enriched findings. |
 | Empty findings input | Valid JSON output with `"findings": []`. No crash, no enrichment errors. |
 

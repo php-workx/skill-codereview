@@ -1022,7 +1022,7 @@ In non-interactive mode:
 - Suitable for CI setup steps: `pip install ... && python3 scripts/code_intel.py setup --install --tier full --non-interactive`
 
 **Marker file for CI:**
-The marker file `.codereview-cache/setup-complete` can be pre-created in CI to skip the interactive setup prompt entirely. It can also be committed to the repo (add to `.gitignore` template) so all CI runs skip setup after the first.
+Add `.codereview-cache/` to `.gitignore`. The marker file reflects machine state and should not be committed.
 
 **CI integration example:**
 ```yaml

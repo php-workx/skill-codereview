@@ -221,7 +221,7 @@ When semgrep is not installed, `scripts/code_intel.py patterns` provides a regex
 | `unreachable-code` | low | Yes | Code after `return`/`raise`/`throw` statements |
 | `resource-leak` | medium | Yes | `open()`/`connect()` without matching `close()` |
 
-Without tree-sitter, only the first 3 patterns (regex-matchable) are checked. The remaining 3 require AST analysis and are silently skipped.
+These 3 patterns are currently skipped (tree-sitter parsing not yet implemented). Only sql-injection, command-injection, and empty-error-handler are active.
 
 ### Output format
 
