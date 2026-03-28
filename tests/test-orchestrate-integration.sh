@@ -166,6 +166,7 @@ def round_trip() -> None:
 
     with (
         mock.patch.object(orch, "detect_repo_root", return_value=repo),
+        mock.patch.object(orch, "SKILL_DIR", repo / "skills" / "codereview"),
         mock.patch.object(orch, "extract_diff", return_value=diff_result),
         mock.patch.object(orch, "run_subprocess_json", side_effect=run_subprocess_json),
     ):
@@ -282,6 +283,7 @@ def missing_prompt_failure() -> None:
     with (
         mock.patch.object(orch, "detect_repo_root", return_value=repo),
         mock.patch.object(orch, "extract_diff", return_value=diff_result),
+        mock.patch.object(orch, "SKILL_DIR", repo / "skills" / "codereview"),
     ):
         try:
             orch.prepare(
