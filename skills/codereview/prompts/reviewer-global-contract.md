@@ -131,6 +131,8 @@ Your investigation MUST stay within the scope of the diff and its direct depende
 
 If you discover a bug in unrelated code while tracing a call path, do NOT report it as a standalone finding. Your job is to review THIS diff, not audit the entire repository.
 
+**Adjacent context audit:** When you Read a file to investigate a changed line, also scan the surrounding block or data structure for consistency issues. For example: if the diff adds entries to an array (a list of file paths, a set of enum values, a config table), verify ALL existing entries in that array are still correct — not just the ones added by the diff. Stale entries adjacent to new additions are high-value findings because they share the same maintenance surface.
+
 ---
 
 ## Pre-Existing vs Introduced Bugs

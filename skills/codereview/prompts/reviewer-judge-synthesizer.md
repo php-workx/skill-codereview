@@ -131,7 +131,10 @@ Return a JSON object:
       "failure_mode": "What breaks and when (required for high/critical)",
       "fix": "Smallest safe remediation",
       "tests_to_add": ["Test scenario descriptions"],
-      "test_category_needed": ["unit", "integration", "e2e"]
+      "test_category_needed": ["unit", "integration", "e2e"],
+      "evidence_source": "Read/Grep tool call reference or assumption note",
+      "pre_existing": false,
+      "pre_existing_newly_reachable": false
     }
   ]
 }
