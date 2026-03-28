@@ -62,6 +62,20 @@ class EvalOwaspTests(unittest.TestCase):
         self.assertEqual(ctx.exception.returncode, 1)
         self.assertIn("claude failed", ctx.exception.stderr)
 
+    def test_review_batch_raises_on_timeout(self) -> None:
+        test_case = self.mod.TestCase(
+            name="BenchmarkTest00001",
+            file_path="missing.py",
+            category="sqli",
+            is_vulnerable=True,
+            cwe=89,
+        )
+        timeout = subprocess.TimeoutExpired(cmd=["claude"], timeout=30)
+
+        with mock.patch.object(self.mod.subprocess, "run", side_effect=timeout):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.mod.review_batch([test_case], "CWE-89", "python")
+
     def test_cmd_score_reports_missing_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -83,6 +97,34 @@ class EvalOwaspTests(unittest.TestCase):
         self.assertIn(
             "No results to score. Run 'scan' or 'review' first.", stdout.getvalue()
         )
+
+    def test_cmd_review_returns_false_when_any_batch_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            owasp_dir = root / "owasp"
+            repo_dir = owasp_dir / "BenchmarkPython"
+            (repo_dir / "testcode").mkdir(parents=True)
+            (repo_dir / "expectedresults-0.1.csv").write_text(
+                "BenchmarkTest00001,sqli,true,89\n",
+                encoding="utf-8",
+            )
+            (repo_dir / "testcode" / "BenchmarkTest00001.py").write_text(
+                "print('x')\n", encoding="utf-8"
+            )
+
+            with (
+                mock.patch.object(self.mod, "OWASP_DIR", owasp_dir),
+                mock.patch.object(
+                    self.mod,
+                    "review_batch",
+                    side_effect=subprocess.TimeoutExpired(cmd=["claude"], timeout=30),
+                ),
+            ):
+                ok = self.mod.cmd_review(
+                    Namespace(lang="python", workers=1, limit=None)
+                )
+
+        self.assertFalse(ok)
 
     def test_cmd_score_does_not_map_owasp_metrics_to_precision_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -135,6 +177,55 @@ class EvalOwaspTests(unittest.TestCase):
         self.assertIsNone(captured["metrics"].get("recall"))
         self.assertIsNone(captured["metrics"].get("f1"))
         self.assertIn("benchmark_metrics", captured["metrics"])
+
+    def test_cmd_score_merges_ai_reviewed_tests_without_dead_union_expression(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            owasp_dir = root / "owasp"
+            repo_dir = owasp_dir / "BenchmarkPython"
+            results_dir = owasp_dir / "results"
+            results_dir.mkdir(parents=True)
+            (repo_dir / "testcode").mkdir(parents=True)
+            (repo_dir / "expectedresults-0.1.csv").write_text(
+                "BenchmarkTest00001,sqli,true,89\nBenchmarkTest00002,sqli,false,89\n",
+                encoding="utf-8",
+            )
+            (results_dir / "scan-python-latest.json").write_text(
+                json.dumps(
+                    {
+                        "findings_by_test": {
+                            "BenchmarkTest00001": [89],
+                            "BenchmarkTest00002": [89],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (results_dir / "review-python-latest.json").write_text(
+                json.dumps({"findings_by_test": {"BenchmarkTest00001": [89]}}),
+                encoding="utf-8",
+            )
+            (results_dir / "review-python-20260328-000000.json").write_text(
+                json.dumps(
+                    {
+                        "raw_results": {
+                            "BenchmarkTest00001": {"vulnerable": True},
+                            "BenchmarkTest00002": {"vulnerable": False},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(self.mod, "OWASP_DIR", owasp_dir),
+                mock.patch.object(self.mod, "EVAL_DIR", root),
+            ):
+                ok = self.mod.cmd_score(Namespace(lang="python"))
+
+        self.assertTrue(ok)
 
 
 if __name__ == "__main__":

@@ -505,7 +505,7 @@ def review_batch(files: list[TestCase], cwe_list: str, lang: str) -> list[dict]:
                 break
         return best
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        return []
+        raise
 
 
 def cmd_review(args: argparse.Namespace) -> bool:
@@ -550,6 +550,7 @@ def cmd_review(args: argparse.Namespace) -> bool:
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_review_batch, batch): batch for batch in batches}
+        failed_batches = 0
         for future in concurrent.futures.as_completed(futures):
             futures[future]
             completed += 1
@@ -568,8 +569,12 @@ def cmd_review(args: argparse.Namespace) -> bool:
                         f"  [{completed}/{len(batches)}] batch done ({len(results)} results)"
                     )
             except Exception as e:
+                failed_batches += 1
                 with _print_lock:
                     print(f"  [{completed}/{len(batches)}] error: {e}")
+        if failed_batches:
+            print(f"\n  {failed_batches} batch(es) failed; review results not saved")
+            return False
 
     # Convert to findings_by_test format (same as scan)
     findings_by_test: dict[str, list[int]] = {}
@@ -662,7 +667,6 @@ def cmd_score(args: argparse.Namespace) -> bool:
         ai_reviewed = set(raw_results.keys()) | set(ai_findings.keys())
 
     # Merge: AI verdict takes precedence for reviewed files
-    set(scan_findings.keys()) | set(ai_findings.keys())
     for name in tests_by_name:
         if name in ai_reviewed:
             # AI reviewed this file — trust AI verdict only

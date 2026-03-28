@@ -25,6 +25,17 @@ class EvalMartianTests(unittest.TestCase):
             with mock.patch.object(eval_martian.Path, "home", return_value=fake_home):
                 self.assertIsNone(eval_martian._find_session_file("session-123"))
 
+    def test_find_session_file_returns_none_when_claude_projects_path_is_file(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_home = Path(tmpdir)
+            projects_path = fake_home / ".claude" / "projects"
+            projects_path.parent.mkdir(parents=True)
+            projects_path.write_text("not a directory", encoding="utf-8")
+            with mock.patch.object(eval_martian.Path, "home", return_value=fake_home):
+                self.assertIsNone(eval_martian._find_session_file("session-123"))
+
     def test_run_single_review_returns_false_on_nonzero_claude_exit(self) -> None:
         pr = eval_martian.BenchmarkPR(
             pr_id="keycloak-deadbeef",
@@ -107,6 +118,56 @@ class EvalMartianTests(unittest.TestCase):
         self.assertEqual(results[0]["tp"], 1)
         self.assertEqual(results[0]["fp"], 1)
         self.assertEqual(results[0]["fn"], 1)
+
+    def test_prompt_test_raises_when_judge_batch_fails(self) -> None:
+        pr = eval_martian.BenchmarkPR(
+            pr_id="repo-1",
+            repo_key="keycloak",
+            language="java",
+            pr_title="Test PR",
+            url="https://example.com/pr",
+            original_url="https://example.com/pr/1",
+            pr_number=1,
+            golden_comments=[
+                eval_martian.GoldenComment(comment="golden A", severity="high")
+            ],
+        )
+        with (
+            mock.patch.object(eval_martian, "load_prs", return_value=[pr, pr]),
+            mock.patch.object(
+                eval_martian,
+                "prompt_test_single",
+                return_value=[{"summary": "candidate"}],
+            ),
+            mock.patch.object(
+                eval_martian,
+                "judge_batch",
+                side_effect=RuntimeError("judge batch failed"),
+            ),
+            tempfile.TemporaryDirectory() as tmpdir,
+        ):
+            with mock.patch.object(eval_martian, "EVAL_DIR", Path(tmpdir)):
+                args = type(
+                    "Args",
+                    (),
+                    {
+                        "prompt_file": str(
+                            MODULE_PATH.parent.parent
+                            / "skills"
+                            / "codereview"
+                            / "prompts"
+                            / "reviewer-correctness-pass.md"
+                        ),
+                        "model": "sonnet",
+                        "limit": 1,
+                        "workers": 1,
+                        "resume": False,
+                        "repo": None,
+                        "judge_model": "sonnet",
+                    },
+                )()
+                with self.assertRaisesRegex(RuntimeError, "Judge batch failed"):
+                    eval_martian.cmd_prompt_test(args)
 
 
 if __name__ == "__main__":

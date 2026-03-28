@@ -98,7 +98,7 @@ REPOS = {
 # Review prompt — invokes the actual /codereview skill.
 # The skill directory is symlinked into each benchmark repo during prepare.
 REVIEW_PROMPT = """\
-/codereview --range {base_ref}..{head_ref}
+/codereview --range {base_ref}..{head_ref}{passes_arg}
 
 After the review is complete, extract ALL findings from the review output and save them
 as a JSON array to: {findings_path}
@@ -548,8 +548,10 @@ def run_single_review(
     repo_dir: Path,
     reviews_dir: Path,
     model: str,
+    passes: list[str] | None = None,
 ) -> bool:
     """Run a code review on a single PR via claude -p."""
+    passes_arg = f" --passes {','.join(passes)}" if passes else ""
     default_branch = REPOS[pr.repo_key]["default_branch"]
 
     # Determine base_ref and head_ref based on PR type
@@ -572,15 +574,21 @@ def run_single_review(
             print(f"    [{pr.pr_id}] No diff between {base_ref}..{head_ref}")
         return False
 
-    # PR-specific temp file to avoid conflicts when reviewing same repo in parallel
-    findings_path = repo_dir / f".eval-findings-{pr.pr_id}.json"
+    # PR-specific temp file — use RELATIVE path so Claude writes it in repo cwd
+    findings_filename = f".eval-findings-{pr.pr_id}.json"
+    findings_path = repo_dir / findings_filename
     if findings_path.exists():
         findings_path.unlink()
+    # Also clean up any doubled-path files from previous runs
+    doubled = repo_dir / str(findings_path)
+    if doubled.exists():
+        doubled.unlink()
 
     prompt = REVIEW_PROMPT.format(
         base_ref=base_ref,
         head_ref=head_ref,
-        findings_path=str(findings_path),
+        findings_path=findings_filename,  # relative, not absolute
+        passes_arg=passes_arg,
     )
 
     with _print_lock:
@@ -792,9 +800,16 @@ def cmd_review(args: argparse.Namespace) -> bool:
     failed = 0
     completed = 0
 
+    passes_str = getattr(args, "passes", None)
+    passes = (
+        [p.strip() for p in passes_str.split(",") if p.strip()] if passes_str else None
+    )
+    if passes:
+        print(f"  Expert filter: {', '.join(passes)}\n")
+
     def _review_worker(item: tuple[BenchmarkPR, Path]) -> bool:
         pr, repo_dir = item
-        return run_single_review(pr, repo_dir, reviews_dir, model)
+        return run_single_review(pr, repo_dir, reviews_dir, model, passes=passes)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_review_worker, item): item[0] for item in work}
@@ -1975,7 +1990,7 @@ def _get_diff_stats(repo_dir: Path, base_ref: str, head_ref: str) -> dict:
 def _find_session_file(session_id: str) -> Optional[Path]:
     """Find the session JSONL file for a given session ID."""
     claude_dir = Path.home() / ".claude" / "projects"
-    if not claude_dir.exists():
+    if not claude_dir.is_dir():
         return None
     for project_dir in claude_dir.iterdir():
         if not project_dir.is_dir():
@@ -2504,7 +2519,7 @@ def cmd_prompt_test(args: argparse.Namespace) -> bool:
                             )
                         )
                 except Exception as e:
-                    print(f"  Judge batch failed: {e}")
+                    raise RuntimeError(f"Judge batch failed: {e}") from e
 
         for result in _aggregate_prompt_test_verdicts(
             prs_by_id, all_findings, all_verdicts
@@ -2706,6 +2721,12 @@ examples:
         type=str,
         default=None,
         help="Prompt file for prompt-test command (default: correctness prompt)",
+    )
+    parser.add_argument(
+        "--passes",
+        type=str,
+        default=None,
+        help="Comma-separated expert passes for review (e.g. 'correctness' or 'correctness,reliability')",
     )
 
     args = parser.parse_args()

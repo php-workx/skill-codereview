@@ -7,6 +7,16 @@ from scripts.eval_store import EvalStore
 
 
 class EvalStoreTests(unittest.TestCase):
+    def test_store_supports_context_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "eval.db"
+            with EvalStore(db_path) as store:
+                store.ensure_benchmark("bench", "Bench")
+                conn = store.conn
+
+            with self.assertRaises(Exception):
+                conn.execute("SELECT 1")
+
     def test_update_run_metrics_persists_benchmark_metrics_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = EvalStore(Path(tmpdir) / "eval.db")
@@ -78,6 +88,76 @@ class EvalStoreTests(unittest.TestCase):
             store.close()
 
         self.assertEqual(verdicts, 1)
+
+    def test_query_wrong_and_disputed_findings_support_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EvalStore(Path(tmpdir) / "eval.db")
+            store.ensure_benchmark("bench", "Bench")
+            bp_id = store.ensure_benchmark_pr(
+                "bench",
+                {
+                    "pr_id": "pr-1",
+                    "repo_key": "repo",
+                    "language": "python",
+                    "pr_title": "PR 1",
+                    "pr_number": 1,
+                    "commit_sha": "",
+                },
+            )
+            run_id = store.create_run("bench", None)
+            finding_ids = store.save_findings(
+                run_id,
+                bp_id,
+                [
+                    {
+                        "summary": f"finding {idx}",
+                        "severity": "high",
+                        "file": "a.py",
+                        "line": idx,
+                        "pass": "correctness",
+                    }
+                    for idx in range(1, 4)
+                ],
+            )
+            store.save_classification(
+                finding_ids[0],
+                run_id,
+                {
+                    "category": "wrong",
+                    "agreement": "agreed",
+                    "claude": {"reasoning": "wrong"},
+                    "codex": {"reasoning": "wrong"},
+                },
+            )
+            store.save_classification(
+                finding_ids[1],
+                run_id,
+                {
+                    "category": "wrong",
+                    "agreement": "disputed",
+                    "claude": {"reasoning": "one"},
+                    "codex": {"reasoning": "two"},
+                },
+            )
+            store.save_classification(
+                finding_ids[2],
+                run_id,
+                {
+                    "category": "valid_concern",
+                    "agreement": "disputed",
+                    "claude": {"reasoning": "one"},
+                    "codex": {"reasoning": "two"},
+                },
+            )
+
+            self.assertEqual(len(store.query_wrong_findings(run_id, limit=1)), 1)
+            self.assertEqual(len(store.query_disputed_findings(run_id, limit=1)), 1)
+            with self.assertRaises(ValueError):
+                store.query_wrong_findings(run_id, limit=0)
+            with self.assertRaises(ValueError):
+                store.query_disputed_findings(run_id, limit=0)
+
+            store.close()
 
 
 if __name__ == "__main__":

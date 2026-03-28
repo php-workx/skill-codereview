@@ -229,14 +229,37 @@ class EvalStore:
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
 
+    def __enter__(self) -> "EvalStore":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.close()
+        return False
+
     def _init_schema(self):
         self.conn.executescript(SCHEMA)
         columns = {
             row["name"]
             for row in self.conn.execute("PRAGMA table_info(runs)").fetchall()
         }
+        current_version_row = self.conn.execute(
+            "SELECT value FROM schema_meta WHERE key = ?",
+            ("version",),
+        ).fetchone()
+        if current_version_row:
+            current_version = int(current_version_row["value"])
+        elif "benchmark_metrics_json" in columns:
+            current_version = SCHEMA_VERSION
+        else:
+            current_version = 1
+        migrations: dict[int, list[str]] = {}
         if "benchmark_metrics_json" not in columns:
-            self.conn.execute("ALTER TABLE runs ADD COLUMN benchmark_metrics_json TEXT")
+            migrations[2] = ["ALTER TABLE runs ADD COLUMN benchmark_metrics_json TEXT"]
+        for version in sorted(migrations):
+            if version <= current_version:
+                continue
+            for statement in migrations[version]:
+                self.conn.execute(statement)
         self.conn.execute(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
             ("version", str(SCHEMA_VERSION)),
@@ -813,7 +836,7 @@ class EvalStore:
         ]
 
     def query_by_severity(self, run_id: str | None = None) -> list[dict]:
-        """Findings by severity × classification category."""
+        """Findings by severity x classification category."""
         if not run_id:
             run_id = self._latest_run_id()
         if not run_id:
@@ -955,16 +978,17 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_disputed_findings(self, run_id: str | None = None) -> list[dict]:
+    def query_disputed_findings(
+        self, run_id: str | None = None, limit: int | None = None
+    ) -> list[dict]:
         """Findings where Claude and Codex disagreed — needs human review."""
         if not run_id:
             run_id = self._latest_run_id()
         if not run_id:
             return []
-        return [
-            dict(r)
-            for r in self.conn.execute(
-                """SELECT f.summary, f.severity, f.file, f.line,
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be positive")
+        query = """SELECT f.summary, f.severity, f.file, f.line,
                       bp.repo_key, bp.language,
                       c.claude_category, c.claude_confidence, c.claude_reasoning,
                       c.codex_category, c.codex_confidence, c.codex_reasoning
@@ -972,29 +996,46 @@ class EvalStore:
                JOIN findings f ON c.finding_id = f.id
                JOIN benchmark_prs bp ON f.benchmark_pr_id = bp.id
                WHERE c.run_id = ? AND c.agreement = 'disputed'
-               ORDER BY f.severity DESC""",
-                (run_id,),
+               ORDER BY f.severity DESC"""
+        params: list[str | int] = [run_id]
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        return [
+            dict(r)
+            for r in self.conn.execute(
+                query,
+                params,
             ).fetchall()
         ]
 
-    def query_wrong_findings(self, run_id: str | None = None) -> list[dict]:
+    def query_wrong_findings(
+        self, run_id: str | None = None, limit: int | None = None
+    ) -> list[dict]:
         """Findings classified as wrong — false positive patterns to fix."""
         if not run_id:
             run_id = self._latest_run_id()
         if not run_id:
             return []
-        return [
-            dict(r)
-            for r in self.conn.execute(
-                """SELECT f.summary, f.severity, f.file, f.pass_name,
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be positive")
+        query = """SELECT f.summary, f.severity, f.file, f.pass_name,
                       bp.repo_key, bp.language,
                       c.claude_reasoning, c.codex_reasoning
                FROM classifications c
                JOIN findings f ON c.finding_id = f.id
                JOIN benchmark_prs bp ON f.benchmark_pr_id = bp.id
                WHERE c.run_id = ? AND c.category = 'wrong'
-               ORDER BY bp.language, f.pass_name""",
-                (run_id,),
+               ORDER BY bp.language, f.pass_name"""
+        params: list[str | int] = [run_id]
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        return [
+            dict(r)
+            for r in self.conn.execute(
+                query,
+                params,
             ).fetchall()
         ]
 
