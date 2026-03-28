@@ -29,6 +29,12 @@ Use this skill to run a local review end to end. Do not reimplement the pipeline
 
 ## Execution
 
+**Script location:** All scripts live in this skill's `scripts/` directory. Since bash blocks run in the user's current working directory (not the skill directory), always use the full path. Set this variable at the start of every bash block:
+
+```
+SKILL_SCRIPTS="$HOME/.claude/skills/codereview/scripts"
+```
+
 ### Error handling (applies to all steps)
 
 After each script phase, check the `status` field in the output JSON. If `"error"`: report the message to the user and stop. After each agent step, if the agent fails or returns no output, report the failure and offer to retry or skip.
@@ -40,7 +46,8 @@ If `.codereview-cache/setup-complete` does NOT exist:
 1. Check dependencies:
 
 ```bash
-python3 scripts/code_intel.py setup --check --json
+SKILL_SCRIPTS="$HOME/.claude/skills/codereview/scripts"
+python3 "$SKILL_SCRIPTS/code_intel.py" setup --check --json
 ```
 
 2. Parse the JSON output.
@@ -56,7 +63,8 @@ python3 scripts/code_intel.py setup --check --json
    If user says yes:
 
 ```bash
-python3 scripts/code_intel.py setup --install --tier full
+SKILL_SCRIPTS="$HOME/.claude/skills/codereview/scripts"
+python3 "$SKILL_SCRIPTS/code_intel.py" setup --install --tier full
 ```
 
    If skip: Note in report footer: "Some optional tools are missing.
@@ -74,8 +82,9 @@ To re-run setup: `/codereview --setup` (deletes marker and re-runs Step 0)
 Create a session directory and run the orchestrator:
 
 ```bash
+SKILL_SCRIPTS="$HOME/.claude/skills/codereview/scripts"
 SESSION_DIR=$(mktemp -d /tmp/codereview-XXXXXXXX)
-python3 scripts/orchestrate.py prepare --session-dir "$SESSION_DIR" [flags from user]
+python3 "$SKILL_SCRIPTS/orchestrate.py" prepare --session-dir "$SESSION_DIR" [flags from user]
 ```
 
 Read `$SESSION_DIR/launch.json`. Check the `status` field:
@@ -115,7 +124,7 @@ Relay progress: `[AI] Launching N explorers in parallel...`, `[AI] M/N complete.
 ### Step 3: Post-Explorer Processing
 
 ```bash
-python3 scripts/orchestrate.py post-explorers --session-dir "$SESSION_DIR"
+python3 "$SKILL_SCRIPTS/orchestrate.py" post-explorers --session-dir "$SESSION_DIR"
 ```
 
 Read `$SESSION_DIR/judge-input.json`. Check for errors.
@@ -134,7 +143,7 @@ After the judge completes, write its full response to `judge_output_file` (the p
 ### Step 5: Finalize
 
 ```bash
-python3 scripts/orchestrate.py finalize --session-dir "$SESSION_DIR"
+python3 "$SKILL_SCRIPTS/orchestrate.py" finalize --session-dir "$SESSION_DIR"
 ```
 
 Read `$SESSION_DIR/finalize.json`. Present the report to the user:
@@ -156,7 +165,8 @@ rm -rf "$SESSION_DIR"
 ## Suppress a Finding
 
 ```bash
-python3 scripts/lifecycle.py suppress \
+SKILL_SCRIPTS="$HOME/.claude/skills/codereview/scripts"
+python3 "$SKILL_SCRIPTS/lifecycle.py" suppress \
   --review <latest review JSON path> \
   --finding-id <id> \
   --status rejected --reason "explanation" \
