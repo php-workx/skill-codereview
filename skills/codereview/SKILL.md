@@ -37,9 +37,12 @@ After each script phase, check the `status` field in the output JSON. If `"error
 
 If `.codereview-cache/setup-complete` does NOT exist:
 
-All script paths below are relative to this skill's base directory (the same directory containing this SKILL.md file).
+1. Check dependencies:
 
-1. Run: `python3 scripts/code_intel.py setup --check --json`
+```bash
+python3 scripts/code_intel.py setup --check --json
+```
+
 2. Parse the JSON output.
 3. If `summary.missing_by_tier.full > 0`:
    Show the user the human-readable check output.
@@ -49,8 +52,12 @@ All script paths below are relative to this skill's base directory (the same dir
 
          Install? (yes / skip)"
 
-   If yes: Run `python3 scripts/code_intel.py setup --install --tier full`
-           Show install results.
+   If yes:
+
+```bash
+python3 scripts/code_intel.py setup --install --tier full
+```
+
    If skip: Note in report footer: "Some optional tools are missing.
             Run `code_intel.py setup --check` for details."
 
