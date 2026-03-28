@@ -1,3 +1,4 @@
+import sqlite3
 import json
 import tempfile
 import unittest
@@ -14,8 +15,23 @@ class EvalStoreTests(unittest.TestCase):
                 store.ensure_benchmark("bench", "Bench")
                 conn = store.conn
 
-            with self.assertRaises(Exception):
+            with self.assertRaises(sqlite3.ProgrammingError):
                 conn.execute("SELECT 1")
+
+    def test_query_progress_and_latest_run_cover_non_martian_benchmarks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = EvalStore(Path(tmpdir) / "eval.db")
+            store.ensure_benchmark("owasp-python", "OWASP Python")
+            run_id = store.create_run("owasp-python", None)
+            store.update_run_metrics(
+                run_id, {"precision": 0.4, "recall": 0.5, "f1": 0.444}
+            )
+
+            progress = store.query_progress()
+
+            self.assertEqual(progress[0]["id"], run_id)
+            self.assertEqual(store._latest_run_id(), run_id)
+            store.close()
 
     def test_update_run_metrics_persists_benchmark_metrics_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

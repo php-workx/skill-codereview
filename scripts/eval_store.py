@@ -774,18 +774,21 @@ class EvalStore:
     # ─── Analytics queries ───────────────────────────────────────────────
 
     def query_progress(
-        self, benchmark_id: str = "martian-offline", limit: int = 10
+        self, benchmark_id: str | None = None, limit: int = 10
     ) -> list[dict]:
         """F1/precision/recall over recent runs."""
-        rows = self.conn.execute(
-            """SELECT id, timestamp, precision, recall, f1,
+        query = """SELECT id, timestamp, precision, recall, f1,
                       adjusted_precision, inclusive_precision,
                       prs_evaluated, total_findings, total_wall_s, total_cost_usd,
                       skill_git_hash
-               FROM runs WHERE benchmark_id = ?
-               ORDER BY timestamp DESC LIMIT ?""",
-            (benchmark_id, limit),
-        ).fetchall()
+               FROM runs"""
+        params: list[str | int] = []
+        if benchmark_id is not None:
+            query += " WHERE benchmark_id = ?"
+            params.append(benchmark_id)
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
     def query_by_language(self, run_id: str | None = None) -> list[dict]:
@@ -909,22 +912,20 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_speed_trend(self, benchmark_id: str = "martian-offline") -> list[dict]:
+    def query_speed_trend(self, benchmark_id: str | None = None) -> list[dict]:
         """Review speed over time."""
-        return [
-            dict(r)
-            for r in self.conn.execute(
-                """SELECT r.id, r.timestamp, r.skill_git_hash,
+        query = """SELECT r.id, r.timestamp, r.skill_git_hash,
                       r.total_wall_s, r.total_cost_usd, r.avg_turns,
                       r.prs_evaluated,
                       ROUND(r.total_wall_s / NULLIF(r.prs_evaluated, 0), 0) AS avg_wall_per_pr,
                       ROUND(r.total_cost_usd / NULLIF(r.prs_evaluated, 0), 2) AS avg_cost_per_pr
-               FROM runs r
-               WHERE r.benchmark_id = ?
-               ORDER BY r.timestamp DESC LIMIT 20""",
-                (benchmark_id,),
-            ).fetchall()
-        ]
+               FROM runs r"""
+        params: list[str] = []
+        if benchmark_id is not None:
+            query += " WHERE r.benchmark_id = ?"
+            params.append(benchmark_id)
+        query += " ORDER BY r.timestamp DESC LIMIT 20"
+        return [dict(r) for r in self.conn.execute(query, params).fetchall()]
 
     def query_timing_detail(self, run_id: str | None = None) -> list[dict]:
         """Per-PR timing breakdown for a run."""
@@ -1115,12 +1116,9 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def query_stability(self, benchmark_id: str = "martian-offline") -> list[dict]:
+    def query_stability(self, benchmark_id: str | None = None) -> list[dict]:
         """Cross-run finding stability — same PR, different runs: how many findings overlap?"""
-        return [
-            dict(r)
-            for r in self.conn.execute(
-                """SELECT f1.benchmark_pr_id,
+        query = """SELECT f1.benchmark_pr_id,
                       r1.id AS run_a, r2.id AS run_b,
                       COUNT(DISTINCT f1.id) AS findings_a,
                       COUNT(DISTINCT f2.id) AS findings_b,
@@ -1130,15 +1128,19 @@ class EvalStore:
                                 AND f1.summary = f2.summary
                                 AND f1.run_id != f2.run_id
                JOIN runs r1 ON f1.run_id = r1.id
-               JOIN runs r2 ON f2.run_id = r2.id
-               WHERE r1.benchmark_id = ? AND r2.benchmark_id = ?
-                 AND r1.timestamp < r2.timestamp
+               JOIN runs r2 ON f2.run_id = r2.id"""
+        params: list[str] = []
+        if benchmark_id is not None:
+            query += """ WHERE r1.benchmark_id = ? AND r2.benchmark_id = ?
+                 AND r1.timestamp < r2.timestamp"""
+            params.extend([benchmark_id, benchmark_id])
+        else:
+            query += " WHERE r1.timestamp < r2.timestamp"
+        query += """
                GROUP BY f1.benchmark_pr_id, r1.id, r2.id
                ORDER BY exact_overlap DESC
-               LIMIT 20""",
-                (benchmark_id, benchmark_id),
-            ).fetchall()
-        ]
+               LIMIT 20"""
+        return [dict(r) for r in self.conn.execute(query, params).fetchall()]
 
     def query_golden_by_type(self, run_id: str | None = None) -> list[dict]:
         """What types of golden comments do we catch vs miss?"""
@@ -1165,11 +1167,16 @@ class EvalStore:
             ).fetchall()
         ]
 
-    def _latest_run_id(self, benchmark_id: str = "martian-offline") -> str | None:
-        row = self.conn.execute(
-            "SELECT id FROM runs WHERE benchmark_id = ? ORDER BY timestamp DESC LIMIT 1",
-            (benchmark_id,),
-        ).fetchone()
+    def _latest_run_id(self, benchmark_id: str | None = None) -> str | None:
+        if benchmark_id is None:
+            row = self.conn.execute(
+                "SELECT id FROM runs ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT id FROM runs WHERE benchmark_id = ? ORDER BY timestamp DESC LIMIT 1",
+                (benchmark_id,),
+            ).fetchone()
         return row["id"] if row else None
 
     # ─── Raw SQL for ad-hoc queries ──────────────────────────────────────
