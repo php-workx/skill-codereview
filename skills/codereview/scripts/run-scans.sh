@@ -157,34 +157,7 @@ filter_to_changed_files() {
 	fi
 }
 
-has_dependency_manifest_changes() {
-	local file=""
-	local base=""
-	for file in "${FILES[@]}"; do
-		base="${file##*/}"
-		case "$base" in
-		package.json | package-lock.json | npm-shrinkwrap.json | yarn.lock | pnpm-lock.yaml | bun.lockb | bun.lock | deno.lock | deno.json | deno.jsonc)
-			return 0
-			;;
-		requirements.txt | requirements-*.txt | constraints.txt | constraints-*.txt | Pipfile | Pipfile.lock | poetry.lock | pyproject.toml | uv.lock)
-			return 0
-			;;
-		go.mod | go.sum)
-			return 0
-			;;
-		Cargo.toml | Cargo.lock)
-			return 0
-			;;
-		Gemfile | Gemfile.lock | *.gemspec)
-			return 0
-			;;
-		pom.xml | build.gradle | build.gradle.kts | settings.gradle | settings.gradle.kts | gradle.lockfile | *.csproj | packages.lock.json | composer.json | composer.lock)
-			return 0
-			;;
-		esac
-	done
-	return 1
-}
+# has_dependency_manifest_changes: removed with osv-scanner (trivy handles dep scanning)
 
 # get_version: attempt to get version string for a tool
 get_version() {
@@ -368,33 +341,7 @@ normalize_trivy() {
   ' 2>/dev/null || echo '[]'
 }
 
-normalize_osv() {
-	jq '
-    [(.results // [])[] |
-      (.packages // [])[] |
-      (.package.name // "unknown") as $pkg |
-      (.source.path // "unknown") as $src |
-      (.vulnerabilities // [])[] |
-      {
-        file: (if $src != "unknown" then $src else $pkg end),
-        line: 0,
-        summary: (.summary // .id // "Unknown vulnerability"),
-        severity: (
-          if (.database_specific.severity // "" | test("CRITICAL"; "i")) then "critical"
-          elif (.database_specific.severity // "" | test("HIGH"; "i")) then "high"
-          elif (.database_specific.severity // "" | test("LOW"; "i")) then "low"
-          else "medium"
-          end
-        ),
-        confidence: 1.0,
-        evidence: (.id // ""),
-        pass: "security",
-        source: "deterministic",
-        tool: "osv-scanner"
-      }
-    ]
-  ' 2>/dev/null || echo '[]'
-}
+# normalize_osv: removed with osv-scanner
 
 normalize_gitleaks() {
 	jq '
@@ -880,21 +827,9 @@ else
 	record_status "trivy" "not_installed" "null" 0 "brew install trivy"
 fi
 
-# --- osv-scanner ---
-if has_dependency_manifest_changes; then
-	if command -v osv-scanner >/dev/null 2>&1; then
-		(
-			run_tool osv_scanner 120 osv-scanner scan -r . --format json
-		) &
-		TIER1_PIDS="$TIER1_PIDS $!"
-	else
-		log "osv-scanner: not installed"
-		record_status "osv_scanner" "not_installed" "null" 0 "go install github.com/google/osv-scanner/cmd/osv-scanner@latest"
-	fi
-else
-	log "osv-scanner: skipped (no dependency manifests changed)"
-	record_status "osv_scanner" "skipped" "null" 0 "no dependency manifests changed"
-fi
+# osv-scanner: REMOVED — trivy covers dependency scanning and is scoped to changed files.
+# osv-scanner scanned the full repo (-r .) which was slow on large repos.
+record_status "osv_scanner" "removed" "null" 0 "replaced by trivy"
 
 # --- gitleaks ---
 if command -v gitleaks >/dev/null 2>&1; then
@@ -932,104 +867,31 @@ else
 	record_status "shellcheck" "skipped" "null" 0 "no .sh files in diff"
 fi
 
-# Wait for all Tier 1 tools
-for pid in $TIER1_PIDS; do
-	wait "$pid" 2>/dev/null || true
+# --- actionlint (GitHub Actions) ---
+GHA_FILES=()
+for af in "${FILES[@]}"; do
+	case "$af" in
+	.github/workflows/*.yml | .github/workflows/*.yaml) GHA_FILES+=("$af") ;;
+	esac
 done
-log "=== Tier 1 complete ==="
-
-# Record status and normalize Tier 1 results
-for tool_key in semgrep ast_grep trivy osv_scanner gitleaks shellcheck; do
-	if [ -f "$SCRATCH/${tool_key}.status" ]; then
-		status="$(cat "$SCRATCH/${tool_key}.status")"
-		# Get version
-		case "$tool_key" in
-		osv_scanner) version="$(get_version osv-scanner)" ;;
-		ast_grep) version="$(get_version sg)" ;;
-		*) version="$(get_version "$tool_key")" ;;
-		esac
-
-		# Normalize output
-		case "$tool_key" in
-		semgrep)
-			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
-				normalize_semgrep <"$SCRATCH/semgrep.out" >"$SCRATCH/findings/semgrep.json"
-				check_normalized "$SCRATCH/findings/semgrep.json" "semgrep"
-			fi
-			;;
-		ast_grep)
-			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
-				normalize_ast_grep <"$SCRATCH/ast_grep.out" >"$SCRATCH/findings/ast_grep.json"
-				check_normalized "$SCRATCH/findings/ast_grep.json" "ast-grep"
-			fi
-			;;
-		trivy)
-			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
-				normalize_trivy <"$SCRATCH/trivy.out" >"$SCRATCH/findings/trivy.json"
-				check_normalized "$SCRATCH/findings/trivy.json" "trivy"
-			fi
-			;;
-		osv_scanner)
-			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
-				normalize_osv <"$SCRATCH/osv_scanner.out" >"$SCRATCH/findings/osv_scanner.json"
-				filter_to_changed_files "$SCRATCH/findings/osv_scanner.json"
-				check_normalized "$SCRATCH/findings/osv_scanner.json" "osv-scanner"
-			fi
-			;;
-		gitleaks)
-			# gitleaks writes its report to --report-path, not stdout
-			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
-				if [ -f "$SCRATCH/gitleaks_report.json" ] && [ -s "$SCRATCH/gitleaks_report.json" ]; then
-					normalize_gitleaks <"$SCRATCH/gitleaks_report.json" >"$SCRATCH/findings/gitleaks.json"
-				else
-					echo '[]' >"$SCRATCH/findings/gitleaks.json"
-				fi
-			fi
-			;;
-		shellcheck)
-			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
-				# SC tool exits non-zero when it finds issues — that is normal "ran"
-				if [ -s "$SCRATCH/shellcheck.out" ]; then
-					normalize_shellcheck <"$SCRATCH/shellcheck.out" >"$SCRATCH/findings/shellcheck.json"
-				else
-					echo '[]' >"$SCRATCH/findings/shellcheck.json"
-				fi
-			fi
-			;;
-		esac
-
-		# Count findings (ensure numeric, default 0)
-		local_count=0
-		if [ -f "$SCRATCH/findings/${tool_key}.json" ]; then
-			local_count="$(jq 'length // 0' "$SCRATCH/findings/${tool_key}.json" 2>/dev/null || echo 0)"
-			# Guard against empty/non-numeric result
-			case "$local_count" in
-			'' | *[!0-9]*) local_count=0 ;;
-			esac
-		fi
-
-		# For tools that exit non-zero when findings exist (shellcheck, gitleaks), treat as "ran"
-		if [ "$status" = "failed" ]; then
-			case "$tool_key" in
-			shellcheck | gitleaks | osv_scanner | semgrep | ast_grep)
-				if [ "$local_count" -gt 0 ] 2>/dev/null; then
-					status="ran"
-				fi
-				;;
-			esac
-		fi
-
-		record_status "$tool_key" "$status" "$version" "$local_count"
-		log "${tool_key}: ${local_count} findings (status=${status})"
+if [ ${#GHA_FILES[@]} -gt 0 ]; then
+	if command -v actionlint >/dev/null 2>&1; then
+		(
+			run_tool actionlint 30 actionlint -format '{{json .}}' "${GHA_FILES[@]}"
+		) &
+		TIER1_PIDS="$TIER1_PIDS $!"
+	else
+		log "actionlint: not installed (${#GHA_FILES[@]} workflow files in diff)"
+		record_status "actionlint" "not_installed" "null" 0 "brew install actionlint"
 	fi
-done
+else
+	record_status "actionlint" "skipped" "null" 0 "no GitHub Actions workflow files in diff"
+fi
 
 # ---------------------------------------------------------------------------
-# TIER 2: Language-detected tools (run if language detected, in parallel)
+# Language-detected tools (run in parallel with security scanners above)
 # ---------------------------------------------------------------------------
-log "=== Tier 2: Language-detected tools ==="
-
-TIER2_PIDS=""
+log "=== Language-detected tools (parallel with security scanners) ==="
 
 # --- clippy (Rust) ---
 if $HAS_RUST; then
@@ -1037,7 +899,7 @@ if $HAS_RUST; then
 		(
 			run_tool clippy 120 cargo clippy --message-format=json --quiet -- -W clippy::all
 		) &
-		TIER2_PIDS="$TIER2_PIDS $!"
+		TIER1_PIDS="$TIER1_PIDS $!"
 	else
 		log "clippy: cargo not installed (Rust files detected)"
 		record_status "clippy" "not_installed" "null" 0 "install Rust toolchain"
@@ -1057,7 +919,7 @@ if $HAS_PYTHON; then
 				run_tool ruff 60 ruff check --select=E,F,W --output-format=json -- "${FILES[@]}"
 			fi
 		) &
-		TIER2_PIDS="$TIER2_PIDS $!"
+		TIER1_PIDS="$TIER1_PIDS $!"
 	else
 		log "ruff: not installed (Python files detected)"
 		record_status "ruff" "not_installed" "null" 0 "pip install ruff"
@@ -1076,7 +938,7 @@ if $HAS_GO; then
 				run_tool golangci_lint 120 golangci-lint run --enable=govet,errcheck,staticcheck --out-format=json ./...
 			fi
 		) &
-		TIER2_PIDS="$TIER2_PIDS $!"
+		TIER1_PIDS="$TIER1_PIDS $!"
 	else
 		log "golangci-lint: not installed (Go files detected)"
 		record_status "golangci_lint" "not_installed" "null" 0 "brew install golangci-lint"
@@ -1109,7 +971,7 @@ if $HAS_JS; then
 				(
 					run_tool eslint 60 eslint --format=json -- "${JS_FILES[@]}"
 				) &
-				TIER2_PIDS="$TIER2_PIDS $!"
+				TIER1_PIDS="$TIER1_PIDS $!"
 			else
 				record_status "eslint" "skipped" "null" 0 "no JS/TS files after filtering"
 			fi
@@ -1134,7 +996,7 @@ if $HAS_RUBY; then
 		done
 		if [ ${#RUBY_FILES[@]} -gt 0 ]; then
 			(run_tool rubocop 120 rubocop --format=json -- "${RUBY_FILES[@]}") &
-			TIER2_PIDS="$TIER2_PIDS $!"
+			TIER1_PIDS="$TIER1_PIDS $!"
 		else
 			record_status "rubocop" "skipped" "null" 0 "no Ruby files after filtering"
 		fi
@@ -1145,7 +1007,7 @@ if $HAS_RUBY; then
 	# brakeman (Rails security — only if Gemfile contains gem 'rails')
 	if command -v brakeman >/dev/null 2>&1 && [ -f "Gemfile" ] && grep -qE "gem ['\"]rails['\"]" Gemfile 2>/dev/null; then
 		(run_tool brakeman 180 brakeman --format json --no-pager --quiet) &
-		TIER2_PIDS="$TIER2_PIDS $!"
+		TIER1_PIDS="$TIER1_PIDS $!"
 	else
 		record_status "brakeman" "skipped" "null" 0 "no Rails project or brakeman not installed"
 	fi
@@ -1165,7 +1027,7 @@ if $HAS_JAVA; then
 				run_tool pmd 120 pmd -d . -f json -R rulesets/java/quickstart.xml
 			fi
 		) &
-		TIER2_PIDS="$TIER2_PIDS $!"
+		TIER1_PIDS="$TIER1_PIDS $!"
 	else
 		log "pmd: not installed (Java files detected)"
 		record_status "pmd" "not_installed" "null" 0 "https://pmd.github.io/"
@@ -1174,22 +1036,70 @@ else
 	record_status "pmd" "skipped" "null" 0 "no .java/.kt/.scala files in diff"
 fi
 
-# Wait for all Tier 2 tools
-for pid in $TIER2_PIDS; do
+# Wait for ALL tools (security + language — single parallel wave)
+for pid in $TIER1_PIDS; do
 	wait "$pid" 2>/dev/null || true
 done
-log "=== Tier 2 complete ==="
+log "=== All scan tools complete ==="
 
-# Record status and normalize Tier 2 results
-for tool_key in clippy ruff golangci_lint eslint rubocop brakeman pmd; do
+# Record status and normalize ALL tool results (security + language)
+for tool_key in semgrep ast_grep trivy gitleaks shellcheck actionlint clippy ruff golangci_lint eslint rubocop brakeman pmd; do
 	if [ -f "$SCRATCH/${tool_key}.status" ]; then
 		status="$(cat "$SCRATCH/${tool_key}.status")"
 		case "$tool_key" in
 		golangci_lint) version="$(get_version golangci-lint)" ;;
+		ast_grep) version="$(get_version sg)" ;;
 		*) version="$(get_version "$tool_key")" ;;
 		esac
 
 		case "$tool_key" in
+		semgrep)
+			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
+				normalize_semgrep <"$SCRATCH/semgrep.out" >"$SCRATCH/findings/semgrep.json"
+				check_normalized "$SCRATCH/findings/semgrep.json" "semgrep"
+			fi
+			;;
+		ast_grep)
+			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
+				normalize_ast_grep <"$SCRATCH/ast_grep.out" >"$SCRATCH/findings/ast_grep.json"
+				check_normalized "$SCRATCH/findings/ast_grep.json" "ast-grep"
+			fi
+			;;
+		trivy)
+			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
+				normalize_trivy <"$SCRATCH/trivy.out" >"$SCRATCH/findings/trivy.json"
+				check_normalized "$SCRATCH/findings/trivy.json" "trivy"
+			fi
+			;;
+		gitleaks)
+			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
+				if [ -f "$SCRATCH/gitleaks_report.json" ] && [ -s "$SCRATCH/gitleaks_report.json" ]; then
+					normalize_gitleaks <"$SCRATCH/gitleaks_report.json" >"$SCRATCH/findings/gitleaks.json"
+				else
+					echo '[]' >"$SCRATCH/findings/gitleaks.json"
+				fi
+			fi
+			;;
+		shellcheck)
+			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
+				if [ -s "$SCRATCH/shellcheck.out" ]; then
+					normalize_shellcheck <"$SCRATCH/shellcheck.out" >"$SCRATCH/findings/shellcheck.json"
+				else
+					echo '[]' >"$SCRATCH/findings/shellcheck.json"
+				fi
+			fi
+			;;
+		actionlint)
+			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
+				if [ -s "$SCRATCH/actionlint.out" ]; then
+					# actionlint -format json outputs one JSON object per line
+					jq -s '[.[] | {file: .filepath, line: .line, tool: "actionlint", severity: "medium", rule_id: .kind, message: .message}]' \
+						<"$SCRATCH/actionlint.out" >"$SCRATCH/findings/actionlint.json" 2>/dev/null || echo '[]' >"$SCRATCH/findings/actionlint.json"
+				else
+					echo '[]' >"$SCRATCH/findings/actionlint.json"
+				fi
+			fi
+			;;
 		clippy)
 			if [ "$status" = "ran" ] || [ "$status" = "failed" ]; then
 				if [ -s "$SCRATCH/clippy.out" ]; then
@@ -1269,7 +1179,7 @@ for tool_key in clippy ruff golangci_lint eslint rubocop brakeman pmd; do
 		fi
 		if [ "$status" = "failed" ]; then
 			case "$tool_key" in
-			ruff | eslint | golangci_lint | clippy | rubocop | brakeman | pmd)
+			semgrep | ast_grep | shellcheck | gitleaks | actionlint | ruff | eslint | golangci_lint | clippy | rubocop | brakeman | pmd)
 				if [ "$local_count" -gt 0 ] 2>/dev/null; then
 					status="ran"
 				fi
@@ -1307,24 +1217,9 @@ else
 	record_status "pre_commit" "skipped" "null" 0 "no .pre-commit-config.yaml"
 fi
 
-# --- sonarqube ---
-SONAR_SCRIPT="${HOME}/.claude/skills/sonarqube/scripts/sonarqube.py"
-if [ ! -f "$SONAR_SCRIPT" ]; then
-	SONAR_SCRIPT="${HOME}/.codex/skills/sonarqube/scripts/sonarqube.py"
-fi
-SONAR_OUT_DIR="$SCRATCH/sonar-out"
-mkdir -p "$SONAR_OUT_DIR" 2>/dev/null || true
-
-if [ -f "$SONAR_SCRIPT" ] && command -v python3 >/dev/null 2>&1; then
-	(
-		run_tool sonarqube 180 python3 "$SONAR_SCRIPT" scan --mode local --severity medium --scope new \
-			--base-ref "$BASE_REF" --list-only --output-dir "$SONAR_OUT_DIR"
-	) &
-	TIER3_PIDS="$TIER3_PIDS $!"
-else
-	log "sonarqube: skipped (skill not installed)"
-	record_status "sonarqube" "skipped" "null" 0 "sonarqube skill not installed"
-fi
+# sonarqube: REMOVED — full repo scan requiring external server setup.
+# Use /sonarqube skill directly if SonarQube integration is needed.
+record_status "sonarqube" "removed" "null" 0 "use /sonarqube skill directly"
 
 # --- Project commands from --project-profile ---
 if [ -n "$PROJECT_PROFILE" ] && [ -f "$PROJECT_PROFILE" ]; then

@@ -851,5 +851,85 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(_count_changed_lines_for_file(diff, "bar.py"), 1)
 
 
+class SuggestMissingTestsTests(unittest.TestCase):
+    def _make_diff_result(self):
+        return DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base="abc123",
+            changed_files=["src/app.py"],
+            diff_text="@@\n+print('ok')\n",
+        )
+
+    def test_suggest_missing_tests_off_appends_suppression(self):
+        ctx = assemble_explorer_prompt(
+            expert_name="test-adequacy",
+            diff_result=self._make_diff_result(),
+            global_contract="contract",
+            complexity="{}",
+            git_risk="{}",
+            scan_results="{}",
+            callers="",
+            language_standards="",
+            review_instructions="",
+            spec="",
+            config={"suggest_missing_tests": False},
+        )
+        rendered = ctx.render()
+        self.assertIn("Do NOT suggest adding new tests", rendered)
+        self.assertIn("Stale tests", rendered)
+
+    def test_suggest_missing_tests_on_no_suppression(self):
+        ctx = assemble_explorer_prompt(
+            expert_name="test-adequacy",
+            diff_result=self._make_diff_result(),
+            global_contract="contract",
+            complexity="{}",
+            git_risk="{}",
+            scan_results="{}",
+            callers="",
+            language_standards="",
+            review_instructions="",
+            spec="",
+            config={"suggest_missing_tests": True},
+        )
+        rendered = ctx.render()
+        self.assertNotIn("Do NOT suggest adding new tests", rendered)
+
+    def test_suggest_missing_tests_default_is_off(self):
+        ctx = assemble_explorer_prompt(
+            expert_name="test-adequacy",
+            diff_result=self._make_diff_result(),
+            global_contract="contract",
+            complexity="{}",
+            git_risk="{}",
+            scan_results="{}",
+            callers="",
+            language_standards="",
+            review_instructions="",
+            spec="",
+            config={},
+        )
+        rendered = ctx.render()
+        self.assertIn("Do NOT suggest adding new tests", rendered)
+
+    def test_non_test_adequacy_expert_unaffected(self):
+        ctx = assemble_explorer_prompt(
+            expert_name="correctness",
+            diff_result=self._make_diff_result(),
+            global_contract="contract",
+            complexity="{}",
+            git_risk="{}",
+            scan_results="{}",
+            callers="",
+            language_standards="",
+            review_instructions="",
+            spec="",
+            config={"suggest_missing_tests": False},
+        )
+        rendered = ctx.render()
+        self.assertNotIn("Do NOT suggest adding new tests", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

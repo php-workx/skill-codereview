@@ -63,6 +63,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             ".cpp",
         ],
     },
+    "suggest_missing_tests": False,
 }
 
 CORE_EXPERTS = ["correctness", "security-config", "test-adequacy"]
@@ -100,6 +101,7 @@ CONFIG_ALLOWLIST = {
     "judge_model",
     "pass_models",
     "triage",
+    "suggest_missing_tests",
 }
 TEMP_SESSION_PREFIX = "codereview-"
 SMART_QUOTE_MAP = str.maketrans(
@@ -518,6 +520,8 @@ def _apply_cli_config_overrides(
     passes_str = getattr(args, "passes", None)
     if passes_str:
         merged["passes"] = [p.strip() for p in passes_str.split(",") if p.strip()]
+    if getattr(args, "suggest_missing_tests", False):
+        merged["suggest_missing_tests"] = True
     return merged
 
 
@@ -634,6 +638,28 @@ def _prompt_path_for_expert(expert_name: str) -> Path:
     return detect_repo_root() / "skills" / "codereview" / "prompts" / filename
 
 
+_SUPPRESS_MISSING_TESTS = """\
+
+---
+
+## IMPORTANT: Scope Restriction
+
+Do NOT suggest adding new tests for untested code. Only report issues with EXISTING tests:
+- Stale tests (assertions no longer match current behavior)
+- Broken tests (wrong arguments, wrong mocks, wrong expected values)
+- Tests that pass but verify nothing (empty assertions, mocked everything)
+- Error paths in existing tests that are never exercised
+
+Do NOT report:
+- "No test file exists for this source file"
+- "This new function/branch/feature has no test"
+- "Consider adding a test for X"
+- Missing test coverage for new code
+
+Focus exclusively on the quality and correctness of tests that already exist.
+"""
+
+
 def assemble_explorer_prompt(
     *,
     expert_name: str,
@@ -646,9 +672,19 @@ def assemble_explorer_prompt(
     language_standards: str,
     review_instructions: str,
     spec: str,
+    config: dict[str, Any] | None = None,
 ) -> PromptContext:
     """Assemble a prompt context for an explorer."""
     pass_prompt = _prompt_path_for_expert(expert_name).read_text(encoding="utf-8")
+
+    # Suppress "missing test" suggestions when config flag is off
+    if (
+        expert_name == "test-adequacy"
+        and config is not None
+        and not config.get("suggest_missing_tests", False)
+    ):
+        pass_prompt += _SUPPRESS_MISSING_TESTS
+
     return PromptContext(
         global_contract=global_contract,
         pass_prompt=pass_prompt,
@@ -1555,6 +1591,7 @@ def prepare(args: argparse.Namespace) -> int:
                         language_standards=language_standards,
                         review_instructions=review_instructions,
                         spec=scoped_spec_content or "No spec provided",
+                        config=config,
                     )
                     rendered_prompt = check_token_budget(
                         prompt_context,
@@ -1592,6 +1629,7 @@ def prepare(args: argparse.Namespace) -> int:
                     language_standards=language_standards,
                     review_instructions=review_instructions,
                     spec=scoped_spec_content or "No spec provided",
+                    config=config,
                 )
                 rendered_prompt = check_token_budget(
                     prompt_context,
@@ -2272,6 +2310,11 @@ def build_parser() -> argparse.ArgumentParser:
                 "--passes",
                 type=str,
                 help="Comma-separated list of expert passes to run (e.g. correctness,security-config)",
+            )
+            command_parser.add_argument(
+                "--suggest-missing-tests",
+                action="store_true",
+                help="Enable 'you should add a test for X' suggestions (default: off)",
             )
             command_parser.add_argument("--confidence-floor", type=float)
             command_parser.add_argument("--no-config", action="store_true")
