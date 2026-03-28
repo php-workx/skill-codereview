@@ -193,13 +193,32 @@ class OrchestratePrepareTests(unittest.TestCase):
                 timeout: float | None = None,
                 input_text: str | None = None,
             ) -> dict[str, object]:
-                name = next(
+                script_name = next(
                     Path(part).name for part in command if part.endswith((".py", ".sh"))
                 )
+                # Disambiguate code_intel.py subcommands
+                if script_name == "code_intel.py":
+                    sub = command[-1] if len(command) > 2 else "complexity"
+                    script_name = f"code_intel.py:{sub}"
                 mapping: dict[str, dict[str, object]] = {
                     "discover-project.py": {"language": "python"},
-                    "complexity.sh": {
-                        "hotspots": [{"file": "tracked.txt", "score": "C"}]
+                    "code_intel.py:complexity": {
+                        "hotspots": [{"file": "tracked.txt", "score": "C"}],
+                        "analyzer": "regex-only",
+                        "tool_status": {},
+                    },
+                    "code_intel.py:functions": {
+                        "functions": [
+                            {
+                                "file": "tracked.txt",
+                                "name": "main",
+                                "params": [],
+                                "returns": "",
+                                "line_start": 1,
+                                "line_end": 5,
+                                "exported": True,
+                            }
+                        ]
                     },
                     "git-risk.sh": {"tiers": [{"file": "tracked.txt", "tier": "high"}]},
                     "run-scans.sh": {"findings": [{"tool": "semgrep"}]},
@@ -207,7 +226,7 @@ class OrchestratePrepareTests(unittest.TestCase):
                         "coverage": [{"file": "tracked.txt", "lines": 75}]
                     },
                 }
-                return mapping[name]
+                return mapping[script_name]
 
             with (
                 mock.patch(
@@ -263,10 +282,14 @@ class OrchestratePrepareTests(unittest.TestCase):
                 timeout: float | None = None,
                 input_text: str | None = None,
             ) -> dict[str, object]:
-                name = next(
+                script_name = next(
                     Path(part).name for part in command if part.endswith((".py", ".sh"))
                 )
-                invocations[name] = {
+                # Disambiguate code_intel.py subcommands
+                if script_name == "code_intel.py":
+                    sub = command[-1] if len(command) > 2 else "complexity"
+                    script_name = f"code_intel.py:{sub}"
+                invocations[script_name] = {
                     "command": command,
                     "cwd": cwd,
                     "timeout": timeout,
@@ -274,12 +297,17 @@ class OrchestratePrepareTests(unittest.TestCase):
                 }
                 mapping: dict[str, dict[str, object]] = {
                     "discover-project.py": {"language": "python"},
-                    "complexity.sh": {"hotspots": []},
+                    "code_intel.py:complexity": {
+                        "hotspots": [],
+                        "analyzer": "regex-only",
+                        "tool_status": {},
+                    },
+                    "code_intel.py:functions": {"functions": []},
                     "git-risk.sh": {"tiers": []},
                     "run-scans.sh": {"findings": [], "tool_status": {}},
                     "coverage-collect.py": {"coverage": []},
                 }
-                return mapping[name]
+                return mapping[script_name]
 
             with (
                 mock.patch(
@@ -296,7 +324,7 @@ class OrchestratePrepareTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             self.assertEqual(
-                invocations["complexity.sh"]["input_text"], "tracked.txt\n"
+                invocations["code_intel.py:complexity"]["input_text"], "tracked.txt\n"
             )
             self.assertEqual(invocations["git-risk.sh"]["input_text"], "tracked.txt\n")
             self.assertEqual(

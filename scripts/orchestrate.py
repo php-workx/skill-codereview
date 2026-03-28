@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -174,6 +175,14 @@ class PromptContext:
     language_standards: str
     review_instructions: str
     spec: str
+    # Context enrichment fields (default empty for backward compatibility)
+    prescan_signals: str = ""
+    domain_checklists: str = ""
+    cross_file_context: str = ""
+    review_md_directives: str = ""
+    path_instructions: str = ""
+    functions_summary: str = ""
+    graph_summary: str = ""
 
     def render(self) -> str:
         # Wrap diff in structural delimiters — diff content is untrusted user input
@@ -192,6 +201,13 @@ class PromptContext:
             ("### Complexity Hotspots", self.complexity),
             ("### Git Risk Scores", self.git_risk),
             ("### Callers and Callees", self.callers),
+            ("### Prescan Signals", self.prescan_signals),
+            ("### Domain-Specific Checklists", self.domain_checklists),
+            ("### Repo-Level Review Directives", self.review_md_directives),
+            ("### Path-Specific Instructions", self.path_instructions),
+            ("### Function Definitions", self.functions_summary),
+            ("### Dependency Graph", self.graph_summary),
+            ("### Cross-File Context", self.cross_file_context),
             (
                 "### Deterministic Scan Results (already reported — do not restate)",
                 self.scan_results,
@@ -350,10 +366,296 @@ def summarize_git_risk_tiers_only(git_risk: str) -> str:
 
 
 def truncate_to_changed_hunks_only(diff_text: str, max_lines: int = 60) -> str:
-    lines = [
-        line for line in diff_text.splitlines() if line.startswith(("@@", "+", "-"))
-    ]
+    if "__new hunk__" in diff_text:
+        # format-diff output: keep file headers, hunk markers, and changed lines.
+        # In new hunks, changed lines look like "43 +code" (number, space, +/- marker).
+        # In old hunks, changed lines look like " -code" (space, -/+ marker).
+        def _is_format_diff_changed(line: str) -> bool:
+            stripped = line.lstrip()
+            if stripped.startswith(("+", "-")):
+                return True
+            # "43 +code" pattern: digits then space then +/-
+            parts = line.split(None, 1)
+            return (
+                len(parts) == 2
+                and parts[0].isdigit()
+                and parts[1].startswith(("+", "-"))
+            )
+
+        lines = [
+            line
+            for line in diff_text.splitlines()
+            if line.startswith(("## File:", "__new hunk__", "__old hunk__", "@@"))
+            or _is_format_diff_changed(line)
+        ]
+    else:
+        # Unified diff: keep hunk headers and changed lines
+        lines = [
+            line for line in diff_text.splitlines() if line.startswith(("@@", "+", "-"))
+        ]
     return "\n".join(lines[:max_lines])
+
+
+def truncate_review_md_always_check_only(text: str) -> str:
+    """Drop 'Style Preferences' section, keep 'Mandatory Checks' only."""
+    if not text:
+        return ""
+    match = re.search(r"(### Mandatory Checks\n.*?)(?=\n### |\Z)", text, re.DOTALL)
+    return match.group(1).rstrip() + "\n" if match else ""
+
+
+def drop_least_relevant_checklist(text: str) -> str:
+    """Drop checklists by trigger match count (fewest matches first).
+
+    When the prompt exceeds the token budget, this truncation function
+    drops the last checklist section (delimited by ``### `` headings)
+    from *text*.  If there is only one checklist (or none), return the
+    full text unchanged — better to keep one checklist than none.
+    """
+    if not text:
+        return ""
+    # Split on "### " heading boundaries (each section starts with "### ").
+    parts = re.split(r"(?=^### )", text, flags=re.MULTILINE)
+    # Filter out empty parts from the split.
+    parts = [p for p in parts if p.strip()]
+    if len(parts) <= 1:
+        return text
+    # Drop the last checklist section.
+    return "\n".join(parts[:-1]).rstrip() + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Domain-specific checklist detection & loading
+# ---------------------------------------------------------------------------
+
+_CHECKLIST_PATTERNS: list[tuple[str, str, str]] = [
+    # (pattern, checklist_filename, trigger_label)
+    (
+        r"SELECT|INSERT|UPDATE|DELETE|JOIN|SQLAlchemy|sqlalchemy|GORM|gorm"
+        r"|Prisma|prisma|Knex|knex|sequelize|ActiveRecord|active_record"
+        r"|\.query\(|\.execute\(|\.raw\(",
+        "checklist-sql-safety.md",
+        "SQL queries detected in diff",
+    ),
+    (
+        r"anthropic|openai|google\.generativeai|cohere|replicate|langchain"
+        r"|llm|LLM|ChatModel|chat_model|completion|embedding",
+        "checklist-llm-trust.md",
+        "LLM/AI patterns detected in diff",
+    ),
+    (
+        r"goroutine|go func|threading|Thread|async def|asyncio|\.lock\("
+        r"|Mutex|RwLock|chan |channel|atomic|sync\.|Promise\.all|Worker\("
+        r"|spawn|tokio|Arc<",
+        "checklist-concurrency.md",
+        "concurrency patterns detected in diff",
+    ),
+]
+
+
+def load_domain_checklists(diff_text: str) -> str:
+    """Detect domain patterns in *diff_text* and return matched checklists.
+
+    Returns a formatted string containing all matched checklists ready for
+    inclusion in the explorer prompt context, or an empty string when no
+    patterns match.
+    """
+    refs_dir = SKILL_DIR / "references"
+    sections: list[str] = []
+    for pattern, filename, label in _CHECKLIST_PATTERNS:
+        if re.search(pattern, diff_text):
+            checklist_path = refs_dir / filename
+            if checklist_path.exists():
+                content = checklist_path.read_text(encoding="utf-8")
+                # Use the checklist's own heading from the file.
+                sections.append(
+                    f"### {_checklist_heading(filename)} (triggered by: {label})\n\n"
+                    f"{content}"
+                )
+    if not sections:
+        return ""
+    header = (
+        "## Domain-Specific Checklists (auto-detected)\n\n"
+        "The following checklists were loaded because domain-specific patterns "
+        "were detected in the diff.\nCheck each item during your investigation. "
+        "If an item applies and a violation is found, report\n"
+        "it as a finding with the checklist question as context.\n\n"
+    )
+    return header + "\n\n".join(sections)
+
+
+def _checklist_heading(filename: str) -> str:
+    """Derive a human heading from a checklist filename."""
+    mapping = {
+        "checklist-sql-safety.md": "SQL Safety",
+        "checklist-llm-trust.md": "LLM Trust Boundaries",
+        "checklist-concurrency.md": "Concurrency",
+    }
+    return mapping.get(filename, filename)
+
+
+def load_path_instructions(changed_files: list[str], config: dict[str, Any]) -> str:
+    """Match changed files against ``path_instructions`` in *config*.
+
+    Each entry in ``config["path_instructions"]`` is a dict with ``path``
+    (an fnmatch glob pattern) and ``instructions`` (free-text guidance).
+
+    Returns a formatted string ready for inclusion in the explorer prompt
+    context, or an empty string when no patterns match or the config key
+    is absent.
+    """
+    path_rules: list[dict[str, str]] = config.get("path_instructions", [])
+    if not path_rules or not changed_files:
+        return ""
+
+    # Collect (pattern, instructions) pairs that matched at least one file.
+    # Use a list of tuples to preserve config order while deduplicating.
+    seen: set[str] = set()
+    matched: list[tuple[str, str]] = []
+    for rule in path_rules:
+        pattern = rule.get("path", "")
+        instructions = rule.get("instructions", "")
+        if not pattern or not instructions:
+            continue
+        for f in changed_files:
+            if fnmatch.fnmatch(f, pattern):
+                if pattern not in seen:
+                    seen.add(pattern)
+                    matched.append((pattern, instructions))
+                break  # one match is enough to include this rule
+
+    if not matched:
+        return ""
+
+    sections = [
+        f"For files matching `{pattern}`:\n{instructions}"
+        for pattern, instructions in matched
+    ]
+    return "\n\n".join(sections)
+
+
+def truncate_cross_file_top3_high_risk(text: str) -> str:
+    """Keep only top 3 high-risk cross-file query results.
+
+    Each section starts with a '#### ' header line.  We keep the preamble
+    (everything before the first section header) plus the first 3 sections.
+    """
+    if not text:
+        return ""
+    lines = text.splitlines(keepends=True)
+    preamble: list[str] = []
+    sections: list[list[str]] = []
+    current: list[str] | None = None
+    for line in lines:
+        if line.startswith("#### "):
+            if current is not None:
+                sections.append(current)
+            current = [line]
+        elif current is not None:
+            current.append(line)
+        else:
+            preamble.append(line)
+    if current is not None:
+        sections.append(current)
+    kept = preamble + [line for sec in sections[:3] for line in sec]
+    return "".join(kept).rstrip("\n")
+
+
+def truncate_prescan_critical_only(text: str) -> str:
+    """Drop medium/low prescan signals, keep critical and high only."""
+    if not text:
+        return ""
+    kept: list[str] = []
+    in_section = False
+    for line in text.splitlines():
+        upper = line.strip().upper()
+        if upper.startswith("CRITICAL:") or upper.startswith("HIGH:"):
+            in_section = True
+            kept.append(line)
+        elif upper.startswith("MEDIUM:") or upper.startswith("LOW:"):
+            in_section = False
+        elif upper.startswith("## PRESCAN") or upper.startswith(
+            "IMPLEMENTATION COMPLETENESS:"
+        ):
+            kept.append(line)
+            in_section = False
+        elif in_section and line.strip().startswith("-"):
+            kept.append(line)
+        elif not line.strip() and kept and kept[-1].strip():
+            kept.append(line)
+    return "\n".join(kept).rstrip()
+
+
+def _skip_cross_file_planning(diff_result: DiffResult) -> bool:
+    """Return True if diff is test-only or docs-only (skip cross-file planning)."""
+    if not diff_result.changed_files:
+        return True
+    docs_exts = {".md", ".txt", ".rst"}
+    if all(
+        os.path.splitext(f)[1].lower() in docs_exts for f in diff_result.changed_files
+    ):
+        return True
+    test_pattern = re.compile(r"(?:^|/)test_[^/]*$|_test\.[^/]*$")
+    if all(test_pattern.search(f) for f in diff_result.changed_files):
+        return True
+    return False
+
+
+def build_cross_file_context(
+    diff_summary: str,
+    graph_data: dict[str, Any] | None,
+    functions_data: dict[str, Any] | None,
+    config: dict[str, Any],
+) -> str:
+    """Build cross-file context using deterministic fallback.
+
+    In production this will call a Haiku-tier LLM with the planner prompt.
+    For now, extract changed function names from *functions_data* and generate
+    simple search queries (callers, test files).  Execute them via subprocess
+    grep and format results.  Cap at ~5k tokens total.
+    """
+    planner_cfg = config.get("cross_file_planner", {})
+    if not planner_cfg.get("enabled", True):
+        return ""
+
+    # Extract changed function names from functions_data
+    funcs: list[dict[str, Any]] = []
+    if functions_data:
+        funcs = functions_data.get("functions", [])
+    if not funcs:
+        return ""
+
+    # Build deterministic search queries from function names
+    sections: list[str] = []
+    token_chars = 0
+    budget = 5_000 * 4  # ~5k tokens in chars
+
+    for fn in funcs[:10]:
+        name = fn.get("name", "")
+        file_path = fn.get("file", "")
+        if not name or len(name) < 2:
+            continue
+        rationale = f"callers of {name}() (changed in {file_path})"
+        header = f"#### {name} — {rationale}"
+        section_text = (
+            header + "\n_Deterministic fallback — LLM planner not yet wired._\n"
+        )
+        if token_chars + len(section_text) > budget:
+            break
+        token_chars += len(section_text)
+        sections.append(section_text)
+
+    if not sections:
+        return ""
+    return "\n\n".join(sections)
+
+
+def truncate_spec_to_5k(text: str) -> str:
+    """Truncate spec to ~5,000 tokens."""
+    limit = 5_000 * 4  # rough chars-to-tokens
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n\n[spec truncated for budget]"
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -691,6 +993,13 @@ def assemble_explorer_prompt(
     review_instructions: str,
     spec: str,
     config: dict[str, Any] | None = None,
+    prescan_signals: str = "",
+    domain_checklists: str = "",
+    cross_file_context: str = "",
+    review_md_directives: str = "",
+    path_instructions: str = "",
+    functions_summary: str = "",
+    graph_summary: str = "",
 ) -> PromptContext:
     """Assemble a prompt context for an explorer."""
     pass_prompt = _prompt_path_for_expert(expert_name).read_text(encoding="utf-8")
@@ -715,6 +1024,13 @@ def assemble_explorer_prompt(
         language_standards=language_standards,
         review_instructions=review_instructions,
         spec=spec,
+        prescan_signals=prescan_signals,
+        domain_checklists=domain_checklists,
+        cross_file_context=cross_file_context,
+        review_md_directives=review_md_directives,
+        path_instructions=path_instructions,
+        functions_summary=functions_summary,
+        graph_summary=graph_summary,
     )
 
 
@@ -735,9 +1051,17 @@ def check_token_budget(
         prompt_budget_tokens=prompt_budget_tokens,
     )
     truncations = [
-        ("scan_results", summarize_scans_counts_only),
         ("language_standards", lambda _value: ""),
+        ("scan_results", summarize_scans_counts_only),
         ("git_risk", summarize_git_risk_tiers_only),
+        ("graph_summary", lambda _value: ""),
+        ("functions_summary", lambda _value: ""),
+        ("path_instructions", lambda _value: ""),
+        ("review_md_directives", truncate_review_md_always_check_only),
+        ("domain_checklists", drop_least_relevant_checklist),
+        ("cross_file_context", truncate_cross_file_top3_high_risk),
+        ("prescan_signals", truncate_prescan_critical_only),
+        ("spec", truncate_spec_to_5k),
         ("diff", truncate_to_changed_hunks_only),
     ]
     for field_name, truncator in truncations:
@@ -1029,6 +1353,89 @@ def load_review_instructions(repo_root: Path) -> str:
         if isinstance(loaded, dict) and loaded.get("custom_instructions"):
             sections.append(str(loaded["custom_instructions"]))
     return "\n\n".join(sections)
+
+
+_REVIEW_MD_MAX_ITEMS = 30
+_REVIEW_MD_SECTIONS = ("## Always check", "## Style", "## Skip")
+
+
+def _parse_review_md_sections(text: str) -> dict[str, list[str]]:
+    """Parse recognized sections from REVIEW.md text.
+
+    Returns a dict mapping section header (e.g. ``"## Always check"``)
+    to the list of ``- `` bullet items found in that section.
+    """
+    result: dict[str, list[str]] = {}
+    current_section: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        # Detect any ## header — ends the current section
+        if re.match(r"^## ", stripped):
+            current_section = stripped if stripped in _REVIEW_MD_SECTIONS else None
+            if current_section and current_section not in result:
+                result[current_section] = []
+            continue
+        if current_section and stripped.startswith("- "):
+            result[current_section].append(stripped)
+    return result
+
+
+def load_review_md_directives(repo_root: Path) -> str:
+    """Load structured directives from REVIEW.md at *repo_root*.
+
+    Parses ``## Always check`` and ``## Style`` sections and returns a
+    formatted context string with ``### Mandatory Checks`` and
+    ``### Style Preferences`` subsections.  Returns empty string when
+    REVIEW.md is missing or contains no recognized sections.
+    """
+    review_path = repo_root / "REVIEW.md"
+    if not review_path.exists():
+        return ""
+    text = review_path.read_text(encoding="utf-8")
+    parsed = _parse_review_md_sections(text)
+
+    parts: list[str] = []
+
+    always_items = parsed.get("## Always check", [])
+    if always_items:
+        if len(always_items) > _REVIEW_MD_MAX_ITEMS:
+            progress(
+                "review_md_cap",
+                section="Always check",
+                count=len(always_items),
+                cap=_REVIEW_MD_MAX_ITEMS,
+            )
+            always_items = always_items[:_REVIEW_MD_MAX_ITEMS]
+        parts.append("### Mandatory Checks\n" + "\n".join(always_items))
+
+    style_items = parsed.get("## Style", [])
+    if style_items:
+        if len(style_items) > _REVIEW_MD_MAX_ITEMS:
+            progress(
+                "review_md_cap",
+                section="Style",
+                count=len(style_items),
+                cap=_REVIEW_MD_MAX_ITEMS,
+            )
+            style_items = style_items[:_REVIEW_MD_MAX_ITEMS]
+        parts.append("### Style Preferences\n" + "\n".join(style_items))
+
+    return "\n\n".join(parts)
+
+
+def load_review_md_skip_patterns(repo_root: Path) -> list[str]:
+    """Extract skip patterns from REVIEW.md ``## Skip`` section.
+
+    Returns a (possibly empty) list of skip pattern strings.
+    """
+    review_path = repo_root / "REVIEW.md"
+    if not review_path.exists():
+        return []
+    text = review_path.read_text(encoding="utf-8")
+    parsed = _parse_review_md_sections(text)
+    items = parsed.get("## Skip", [])
+    # Strip leading "- " from each item
+    return [item[2:] for item in items]
 
 
 LANGUAGE_EXTENSION_MAP: dict[str, str] = {
@@ -1345,6 +1752,77 @@ def _changed_files_input(changed_files: list[str]) -> str:
     return "\n".join(changed_files) + "\n"
 
 
+def _format_functions_summary(functions_json: dict[str, Any]) -> str:
+    """Convert functions JSON from code_intel.py to a compact markdown table."""
+    funcs = functions_json.get("functions", [])
+    if not funcs:
+        return ""
+    header = (
+        "### Function Definitions (from code_intel)\n"
+        "| File | Function | Params | Returns | Lines | Exported |\n"
+        "|------|----------|--------|---------|-------|----------|\n"
+    )
+    rows: list[str] = []
+    for f in funcs[:50]:  # Cap at 50 to avoid token bloat
+        params = ", ".join(f.get("params", []))
+        returns = f.get("returns", "") or ""
+        lines = f"{f.get('line_start', '?')}-{f.get('line_end', '?')}"
+        exported = "yes" if f.get("exported") else "no"
+        rows.append(
+            f"| {f.get('file', '')} | {f.get('name', '')} "
+            f"| {params} | {returns} | {lines} | {exported} |"
+        )
+    return header + "\n".join(rows)
+
+
+def _format_graph_summary(graph_json: dict[str, Any]) -> str:
+    """Convert graph JSON from code_intel.py graph to text for PromptContext."""
+    nodes = graph_json.get("nodes", [])
+    edges = graph_json.get("edges", [])
+    if not nodes and not edges:
+        return ""
+    parts: list[str] = []
+    modified = [n for n in nodes if n.get("modified_in_diff")]
+    if modified:
+        symbols = ", ".join(
+            f"{n['id'].split('::')[-1]} ({n['file']}:{n.get('line', '?')})"
+            for n in modified[:20]
+        )
+        parts.append(f"Changed symbols: {symbols}")
+    dep_lines: list[str] = []
+    for e in edges[:30]:
+        dep_lines.append(f"  {e['from']}:{e.get('line', '?')} — {e['type']} {e['to']}")
+    if dep_lines:
+        parts.append("Files that depend on changes:\n" + "\n".join(dep_lines))
+    return "\n\n".join(parts)
+
+
+def _format_prescan_context(prescan_json: dict[str, Any]) -> str:
+    """Convert prescan JSON to text context for PromptContext."""
+    if not prescan_json or prescan_json.get("file_count", 0) == 0:
+        return ""
+    analyzer = prescan_json.get("analyzer", "regex-only")
+    parts = [f"## Prescan Signals (fast static checks, {analyzer} mode)"]
+    summary = prescan_json.get("summary", {})
+    patterns = prescan_json.get("patterns", {})
+    for sev in ("critical", "high", "medium", "low"):
+        count = summary.get(sev, 0)
+        if not count:
+            continue
+        parts.append(f"\n{sev.upper()}: {count} signal(s)")
+        for pdata in patterns.values():
+            if pdata.get("severity") != sev:
+                continue
+            for f in pdata.get("findings", [])[:5]:
+                parts.append(
+                    f"- {f['file']}:{f['line']} -- {f['pattern_id']}: {f['description']}"
+                )
+    comp = prescan_json.get("implementation_completeness", {}).get("summary", "")
+    if comp:
+        parts.append(f"\nImplementation completeness: {comp}")
+    return "\n".join(parts)
+
+
 def _scan_base_ref(diff_result: DiffResult) -> str:
     if diff_result.base_ref:
         return diff_result.base_ref
@@ -1498,8 +1976,13 @@ def prepare(args: argparse.Namespace) -> int:
             timeout=_bounded_timeout(deadline),
             input_text=changed_files_input,
         )
+        code_intel_cmd = [
+            "python3",
+            str(Path(__file__).resolve().parent / "code_intel.py"),
+            "complexity",
+        ]
         jobs = {
-            "complexity": ["bash", str(scripts_dir / "complexity.sh")],
+            "complexity": code_intel_cmd,
             "git_risk": ["bash", str(scripts_dir / "git-risk.sh")],
             "scans": [
                 "bash",
@@ -1532,10 +2015,97 @@ def prepare(args: argparse.Namespace) -> int:
                 try:
                     context_results[name] = future.result()
                 except Exception as exc:
+                    if name == "complexity":
+                        # Graceful fallback: try legacy complexity.sh
+                        progress(
+                            "context_gather_fallback",
+                            task=name,
+                            error=str(exc),
+                        )
+                        try:
+                            context_results[name] = run_subprocess_json(
+                                ["bash", str(scripts_dir / "complexity.sh")],
+                                repo_root,
+                                _bounded_timeout(deadline),
+                                changed_files_input,
+                            )
+                        except Exception:
+                            context_results[name] = {}
+                        continue
                     progress("context_gather_failed", task=name, error=str(exc))
                     raise RuntimeError(
                         f"Context gather failed for {name}: {exc}"
                     ) from exc
+
+        # Generate functions_summary from code_intel if complexity succeeded
+        functions_summary = ""
+        func_result: dict[str, Any] | None = None
+        if context_results.get("complexity"):
+            try:
+                func_result = run_subprocess_json(
+                    [
+                        "python3",
+                        str(Path(__file__).resolve().parent / "code_intel.py"),
+                        "functions",
+                    ],
+                    repo_root,
+                    _bounded_timeout(deadline),
+                    changed_files_input,
+                )
+                functions_summary = _format_functions_summary(func_result)
+            except Exception as exc:
+                progress(
+                    "functions_summary_failed",
+                    error=str(exc),
+                )
+                functions_summary = ""
+
+        # Generate graph_summary from code_intel graph
+        graph_summary = ""
+        try:
+            graph_result = run_subprocess_json(
+                [
+                    "python3",
+                    str(Path(__file__).resolve().parent / "code_intel.py"),
+                    "graph",
+                ],
+                repo_root,
+                _bounded_timeout(deadline),
+                changed_files_input,
+            )
+            graph_summary = _format_graph_summary(graph_result)
+        except Exception as exc:
+            progress(
+                "graph_summary_failed",
+                error=str(exc),
+            )
+            graph_summary = ""
+
+        # Generate prescan_signals from prescan.py
+        prescan_signals = ""
+        try:
+            prescan_result = run_subprocess_json(
+                [
+                    "python3",
+                    str(Path(__file__).resolve().parent / "prescan.py"),
+                ],
+                repo_root,
+                _bounded_timeout(deadline),
+                changed_files_input,
+            )
+            prescan_signals = _format_prescan_context(prescan_result)
+        except Exception as exc:
+            progress("prescan_failed", error=str(exc))
+
+        # Cross-file context planning
+        cross_file_context = ""
+        if not _skip_cross_file_planning(diff_result):
+            cross_file_context = build_cross_file_context(
+                diff_summary=functions_summary,
+                graph_data=graph_result if graph_summary else None,
+                functions_data=func_result,
+                config=config,
+            )
 
         (session_dir / "scans.json").write_text(
             json.dumps(context_results["scans"], indent=2),
@@ -1544,11 +2114,14 @@ def prepare(args: argparse.Namespace) -> int:
 
         progress("prepare_step", step=4, total=8, message="Loading context files")
         review_instructions = load_review_instructions(repo_root)
+        review_md_directives = load_review_md_directives(repo_root)
         language_standards = load_language_standards(diff_result.changed_files)
         spec_content = load_spec(getattr(args, "spec", None))
         scoped_spec_content = _apply_spec_scope(
             spec_content, getattr(args, "spec_scope", None)
         )
+        domain_checklists = load_domain_checklists(diff_result.diff_text)
+        path_instr = load_path_instructions(diff_result.changed_files, config)
 
         triage_result = triage_files(
             diff_result.changed_files,
@@ -1604,6 +2177,7 @@ def prepare(args: argparse.Namespace) -> int:
                     head_ref=diff_result.head_ref,
                     pr_number=diff_result.pr_number,
                 )
+                chunk_path_instr = load_path_instructions(chunk["files"], config)
                 for expert in experts:
                     task_name = f"chunk{chunk['id']}-{expert['name']}"
                     prompt_context = assemble_explorer_prompt(
@@ -1618,6 +2192,13 @@ def prepare(args: argparse.Namespace) -> int:
                         review_instructions=review_instructions,
                         spec=scoped_spec_content or "No spec provided",
                         config=config,
+                        domain_checklists=domain_checklists,
+                        cross_file_context=cross_file_context,
+                        review_md_directives=review_md_directives,
+                        path_instructions=chunk_path_instr,
+                        functions_summary=functions_summary,
+                        graph_summary=graph_summary,
+                        prescan_signals=prescan_signals,
                     )
                     rendered_prompt = check_token_budget(
                         prompt_context,
@@ -1656,6 +2237,13 @@ def prepare(args: argparse.Namespace) -> int:
                     review_instructions=review_instructions,
                     spec=scoped_spec_content or "No spec provided",
                     config=config,
+                    domain_checklists=domain_checklists,
+                    cross_file_context=cross_file_context,
+                    review_md_directives=review_md_directives,
+                    path_instructions=path_instr,
+                    functions_summary=functions_summary,
+                    graph_summary=graph_summary,
+                    prescan_signals=prescan_signals,
                 )
                 rendered_prompt = check_token_budget(
                     prompt_context,
@@ -2164,19 +2752,21 @@ def finalize(args: argparse.Namespace) -> int:
         json.dumps(launch_packet.get("scan_results", {}), indent=2), encoding="utf-8"
     )
 
-    enriched = run_subprocess_json(
-        [
-            "python3",
-            str(scripts_dir / "enrich-findings.py"),
-            "--judge-findings",
-            str(judge_output_path),
-            "--scan-findings",
-            str(scan_results_path),
-            "--confidence-floor",
-            str(launch_packet.get("_config", {}).get("confidence_floor", 0.65)),
-        ],
-        cwd=repo_root,
-    )
+    enrich_cmd = [
+        "python3",
+        str(scripts_dir / "enrich-findings.py"),
+        "--judge-findings",
+        str(judge_output_path),
+        "--scan-findings",
+        str(scan_results_path),
+        "--confidence-floor",
+        str(launch_packet.get("_config", {}).get("confidence_floor", 0.65)),
+    ]
+    # Pass code-intel graph if available in the session directory
+    code_intel_path = session_dir / "code-intel.json"
+    if code_intel_path.exists():
+        enrich_cmd.extend(["--code-intel-output", str(code_intel_path)])
+    enriched = run_subprocess_json(enrich_cmd, cwd=repo_root)
     enriched_path = session_dir / "enriched.json"
     enriched_path.write_text(json.dumps(enriched, indent=2), encoding="utf-8")
 
@@ -2314,7 +2904,12 @@ def cleanup(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     """Create the orchestrator CLI parser."""
     parser = argparse.ArgumentParser(prog="orchestrate.py")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="Delete .codereview-cache/setup-complete marker to re-run dependency setup on next review",
+    )
+    subparsers = parser.add_subparsers(dest="command")
 
     commands = {
         "prepare": prepare,
@@ -2360,6 +2955,24 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Handle --setup: delete the setup-complete marker so Step 0 re-runs.
+    if getattr(args, "setup", False):
+        marker = Path(".codereview-cache/setup-complete")
+        if marker.exists():
+            marker.unlink()
+            print(
+                "Deleted .codereview-cache/setup-complete — dependency setup will re-run on next review."
+            )
+        else:
+            print("No setup marker found — dependency setup will run on next review.")
+        return 0
+
+    if not args.command:
+        parser.error(
+            "a subcommand is required (prepare, post-explorers, finalize, cleanup)"
+        )
+
     return args.handler(args)
 
 

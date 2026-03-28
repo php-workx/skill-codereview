@@ -17,17 +17,28 @@ from scripts.orchestrate import (
     _apply_spec_scope,
     _chunk_diff,
     _count_changed_lines_for_file,
+    _skip_cross_file_planning,
     assemble_expert_panel,
     assemble_explorer_prompt,
     assemble_report_envelope,
+    build_cross_file_context,
     build_parser,
     check_token_budget,
+    drop_least_relevant_checklist,
     extract_diff,
     finalize,
     load_config,
+    load_domain_checklists,
+    load_path_instructions,
+    load_review_md_directives,
+    load_review_md_skip_patterns,
     post_explorers,
     prepare,
     select_mode,
+    truncate_cross_file_top3_high_risk,
+    truncate_review_md_always_check_only,
+    truncate_to_changed_hunks_only,
+    truncate_spec_to_5k,
     triage_files,
 )
 
@@ -464,7 +475,12 @@ class OrchestratePlumbingTests(unittest.TestCase):
 
             context_responses = {
                 "discover-project.py": {"language": "python"},
-                "complexity.sh": {"hotspots": [{"file": "tracked.txt", "score": "C"}]},
+                "code_intel.py:complexity": {
+                    "hotspots": [{"file": "tracked.txt", "score": "C"}],
+                    "analyzer": "regex-only",
+                    "tool_status": {},
+                },
+                "code_intel.py:functions": {"functions": []},
                 "git-risk.sh": {"tiers": [{"file": "tracked.txt", "tier": "high"}]},
                 "run-scans.sh": {"findings": [{"tool": "semgrep"}]},
                 "coverage-collect.py": {
@@ -475,12 +491,15 @@ class OrchestratePlumbingTests(unittest.TestCase):
             def fake_run(command, *args, **kwargs):
                 from pathlib import Path
 
-                name = next(
+                script_name = next(
                     (Path(p).name for p in command if p.endswith((".py", ".sh"))),
                     None,
                 )
-                if name and name in context_responses:
-                    return context_responses[name]
+                if script_name == "code_intel.py":
+                    sub = command[-1] if len(command) > 2 else "complexity"
+                    script_name = f"code_intel.py:{sub}"
+                if script_name and script_name in context_responses:
+                    return context_responses[script_name]
                 return {}
 
             with (
@@ -789,6 +808,171 @@ class OrchestratePlumbingTests(unittest.TestCase):
         with self.assertRaises(PromptBudgetExceeded):
             check_token_budget(context, "correctness", prompt_budget_tokens=10)
 
+    def test_prompt_context_new_fields_default_empty(self) -> None:
+        """New context enrichment fields default to empty string."""
+        context = PromptContext(
+            global_contract="c",
+            pass_prompt="p",
+            diff="d",
+            changed_files="f",
+            complexity="cx",
+            git_risk="r",
+            scan_results="s",
+            callers="cl",
+            language_standards="ls",
+            review_instructions="ri",
+            spec="sp",
+        )
+        self.assertEqual(context.prescan_signals, "")
+        self.assertEqual(context.domain_checklists, "")
+        self.assertEqual(context.cross_file_context, "")
+        self.assertEqual(context.review_md_directives, "")
+        self.assertEqual(context.path_instructions, "")
+        self.assertEqual(context.functions_summary, "")
+        self.assertEqual(context.graph_summary, "")
+
+    def test_prompt_context_render_includes_new_sections(self) -> None:
+        """New fields render with correct section headers when non-empty."""
+        context = PromptContext(
+            global_contract="contract",
+            pass_prompt="focus",
+            diff="diff",
+            changed_files="f.py",
+            complexity="",
+            git_risk="",
+            scan_results="",
+            callers="",
+            language_standards="",
+            review_instructions="",
+            spec="",
+            prescan_signals="CRITICAL: 1 secret",
+            domain_checklists="## SQL Safety\n- check params",
+            cross_file_context="views.py calls login()",
+            review_md_directives="always check auth",
+            path_instructions="src/auth: focus on bypass",
+            functions_summary="| f.py | login | user | bool |",
+            graph_summary="changed: login -> callers: views.py",
+        )
+        rendered = context.render()
+        self.assertIn("### Prescan Signals\nCRITICAL: 1 secret", rendered)
+        self.assertIn("### Domain-Specific Checklists\n## SQL Safety", rendered)
+        self.assertIn("### Cross-File Context\nviews.py calls login()", rendered)
+        self.assertIn("### Repo-Level Review Directives\nalways check auth", rendered)
+        self.assertIn(
+            "### Path-Specific Instructions\nsrc/auth: focus on bypass", rendered
+        )
+        self.assertIn("### Function Definitions\n| f.py | login", rendered)
+        self.assertIn("### Dependency Graph\nchanged: login -> callers", rendered)
+
+    def test_prompt_context_render_omits_empty_new_sections(self) -> None:
+        """Empty new fields don't produce section headers in render output."""
+        context = PromptContext(
+            global_contract="contract",
+            pass_prompt="focus",
+            diff="diff",
+            changed_files="f.py",
+            complexity="",
+            git_risk="",
+            scan_results="",
+            callers="",
+            language_standards="",
+            review_instructions="",
+            spec="",
+        )
+        rendered = context.render()
+        self.assertNotIn("Prescan Signals", rendered)
+        self.assertNotIn("Domain-Specific Checklists", rendered)
+        self.assertNotIn("Cross-File Context", rendered)
+        self.assertNotIn("Repo-Level Review Directives", rendered)
+        self.assertNotIn("Path-Specific Instructions", rendered)
+        self.assertNotIn("Function Definitions", rendered)
+        self.assertNotIn("Dependency Graph", rendered)
+
+    def test_budget_cascade_worst_case_survives(self) -> None:
+        """Synthetic prompt exceeding 70k tokens passes cascade without crash."""
+        big = "x " * 20_000
+        context = PromptContext(
+            global_contract="contract " * 500,
+            pass_prompt="focus " * 500,
+            diff="@@\n+" + "line\n+" * 30_000,
+            changed_files="a.py\nb.py",
+            complexity="hotspot " * 500,
+            git_risk="risk " * 500,
+            scan_results="finding " * 500,
+            callers="caller " * 500,
+            language_standards="standard " * 500,
+            review_instructions="instruction " * 500,
+            spec="spec " * 5_000,
+            prescan_signals=big,
+            domain_checklists=big,
+            cross_file_context=big,
+            review_md_directives=big,
+            path_instructions=big,
+            functions_summary=big,
+            graph_summary=big,
+        )
+        self.assertGreater(context.estimate_tokens(), 70_000)
+        rendered = check_token_budget(
+            context, "correctness", prompt_budget_tokens=70_000
+        )
+        self.assertLessEqual(len(rendered) // 4, 70_000)
+
+    def test_budget_cascade_sheds_in_priority_order(self) -> None:
+        """Truncation cascade sheds lowest-value context first."""
+        context = PromptContext(
+            global_contract="contract",
+            pass_prompt="focus",
+            diff="+" + "d" * 200,
+            changed_files="f.py",
+            complexity="",
+            git_risk="risk " * 50,
+            scan_results="scan " * 50,
+            callers="",
+            language_standards="std " * 50,
+            review_instructions="",
+            spec="",
+            graph_summary="graph " * 50,
+            functions_summary="func " * 50,
+        )
+        check_token_budget(context, "correctness", prompt_budget_tokens=200)
+        # Language standards shed first (priority P10)
+        self.assertEqual(context.language_standards, "")
+        # Scan results summarized next (priority P9)
+        self.assertIn("scan summary:", context.scan_results)
+
+    def test_truncate_to_changed_hunks_handles_format_diff(self) -> None:
+        """truncate_to_changed_hunks_only detects format-diff syntax."""
+        format_diff = (
+            "## File: src/auth/login.py\n"
+            "\n"
+            "@@ def validate_session (line 42)\n"
+            "__new hunk__\n"
+            "42  session = cache.get(token)\n"
+            "43 +if session and not session.expired:\n"
+            "44 +    session.refresh()\n"
+            "45 +    return session\n"
+            "46  return None\n"
+            "__old hunk__\n"
+            " session = cache.get(token)\n"
+            "-if session:\n"
+            "-    return session\n"
+            " return None\n"
+        )
+        result = truncate_to_changed_hunks_only(format_diff)
+        self.assertIn("## File: src/auth/login.py", result)
+        self.assertIn("__new hunk__", result)
+        self.assertIn("+if session and not session.expired:", result)
+        self.assertIn("-if session:", result)
+
+    def test_truncate_spec_to_5k(self) -> None:
+        """truncate_spec_to_5k truncates large specs and leaves small ones alone."""
+        short = "spec content"
+        self.assertEqual(truncate_spec_to_5k(short), short)
+        long_spec = "x" * 25_000
+        result = truncate_spec_to_5k(long_spec)
+        self.assertIn("[spec truncated for budget]", result)
+        self.assertLess(len(result), 25_000)
+
     def test_chunk_diff_filters_to_requested_files(self) -> None:
         """_chunk_diff returns only hunks for files in chunk_files."""
         diff_text = (
@@ -1006,6 +1190,389 @@ class SuggestMissingTestsTests(unittest.TestCase):
         )
         rendered = ctx.render()
         self.assertNotIn("Do NOT suggest adding new tests", rendered)
+
+
+class DomainChecklistTests(unittest.TestCase):
+    """Tests for domain-specific checklist detection and loading."""
+
+    def test_sql_pattern_triggers_sql_checklist(self) -> None:
+        diff = "+    cursor.execute(SELECT * FROM users WHERE id = ?)"
+        result = load_domain_checklists(diff)
+        self.assertIn("SQL Safety", result)
+        self.assertIn("parameterized queries", result)
+
+    def test_orm_pattern_triggers_sql_checklist(self) -> None:
+        diff = "+from sqlalchemy import Column, Integer"
+        result = load_domain_checklists(diff)
+        self.assertIn("SQL Safety", result)
+
+    def test_llm_pattern_triggers_llm_checklist(self) -> None:
+        diff = "+import openai\n+client = openai.Client()"
+        result = load_domain_checklists(diff)
+        self.assertIn("LLM Trust", result)
+        self.assertIn("API keys", result)
+
+    def test_anthropic_pattern_triggers_llm_checklist(self) -> None:
+        diff = "+from anthropic import Anthropic"
+        result = load_domain_checklists(diff)
+        self.assertIn("LLM Trust", result)
+
+    def test_concurrency_pattern_triggers_concurrency_checklist(self) -> None:
+        diff = "+async def fetch_data():\n+    await asyncio.gather(*tasks)"
+        result = load_domain_checklists(diff)
+        self.assertIn("Concurrency", result)
+        self.assertIn("deadlock", result.lower())
+
+    def test_goroutine_pattern_triggers_concurrency_checklist(self) -> None:
+        diff = "+go func() {\n+    mu.Lock()\n+}"
+        result = load_domain_checklists(diff)
+        self.assertIn("Concurrency", result)
+
+    def test_multiple_checklists_load_simultaneously(self) -> None:
+        diff = (
+            "+cursor.execute(SELECT * FROM users)\n"
+            "+import openai\n"
+            "+async def handler():\n"
+        )
+        result = load_domain_checklists(diff)
+        self.assertIn("SQL Safety", result)
+        self.assertIn("LLM Trust", result)
+        self.assertIn("Concurrency", result)
+
+    def test_no_checklist_when_no_patterns_match(self) -> None:
+        diff = "+x = 1 + 2\n+print(x)\n"
+        result = load_domain_checklists(diff)
+        self.assertEqual(result, "")
+
+    def test_checklist_includes_header(self) -> None:
+        diff = "+from sqlalchemy import create_engine"
+        result = load_domain_checklists(diff)
+        self.assertIn("## Domain-Specific Checklists (auto-detected)", result)
+        self.assertIn("triggered by:", result)
+
+    def test_drop_least_relevant_checklist_empty_input(self) -> None:
+        self.assertEqual(drop_least_relevant_checklist(""), "")
+
+    def test_drop_least_relevant_checklist_single_section(self) -> None:
+        text = "### SQL Safety\n\n- [ ] Item 1\n"
+        result = drop_least_relevant_checklist(text)
+        self.assertEqual(result, text)
+
+    def test_drop_least_relevant_checklist_drops_last_section(self) -> None:
+        text = (
+            "### SQL Safety\n\n- [ ] Item 1\n\n"
+            "### Concurrency\n\n- [ ] Item 2\n\n"
+            "### LLM Trust\n\n- [ ] Item 3\n"
+        )
+        result = drop_least_relevant_checklist(text)
+        self.assertIn("SQL Safety", result)
+        self.assertIn("Concurrency", result)
+        self.assertNotIn("LLM Trust", result)
+
+
+class ReviewMdDirectivesTests(unittest.TestCase):
+    """Tests for structured REVIEW.md parsing (sc-drzb)."""
+
+    _FULL_REVIEW_MD = (
+        "# Code Review Guidelines\n\n"
+        "## Always check\n"
+        "- New API endpoints have corresponding integration tests\n"
+        "- Database migrations are backward-compatible\n\n"
+        "## Style\n"
+        "- Prefer early returns over nested conditionals\n"
+        "- Use structured logging (key=value)\n\n"
+        "## Skip\n"
+        "- Generated files under src/gen/\n"
+        "- Vendored dependencies\n"
+    )
+
+    def test_parse_all_three_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "REVIEW.md").write_text(self._FULL_REVIEW_MD, encoding="utf-8")
+            result = load_review_md_directives(repo)
+
+        self.assertIn("### Mandatory Checks", result)
+        self.assertIn(
+            "- New API endpoints have corresponding integration tests", result
+        )
+        self.assertIn("- Database migrations are backward-compatible", result)
+        self.assertIn("### Style Preferences", result)
+        self.assertIn("- Prefer early returns over nested conditionals", result)
+        self.assertIn("- Use structured logging (key=value)", result)
+
+    def test_only_always_check_section(self) -> None:
+        content = "# Guidelines\n\n## Always check\n- All tests pass\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "REVIEW.md").write_text(content, encoding="utf-8")
+            result = load_review_md_directives(repo)
+
+        self.assertIn("### Mandatory Checks", result)
+        self.assertIn("- All tests pass", result)
+        self.assertNotIn("### Style Preferences", result)
+
+    def test_missing_review_md_returns_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = load_review_md_directives(Path(tmpdir))
+        self.assertEqual(result, "")
+
+    def test_no_recognized_sections_returns_empty(self) -> None:
+        content = "# Code Review Guidelines\n\n## Some Other Section\n- Random item\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "REVIEW.md").write_text(content, encoding="utf-8")
+            result = load_review_md_directives(repo)
+        self.assertEqual(result, "")
+
+    def test_thirty_item_cap_per_section(self) -> None:
+        items = "\n".join(f"- Item {i}" for i in range(35))
+        content = f"## Always check\n{items}\n\n## Style\n{items}\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "REVIEW.md").write_text(content, encoding="utf-8")
+            with mock.patch("scripts.orchestrate.progress") as mock_progress:
+                result = load_review_md_directives(repo)
+
+        # Should cap at 30 items per section
+        self.assertEqual(result.count("- Item"), 60)
+        # Should have warned twice (once per section)
+        cap_calls = [
+            c for c in mock_progress.call_args_list if c[0][0] == "review_md_cap"
+        ]
+        self.assertEqual(len(cap_calls), 2)
+
+    def test_truncation_keeps_mandatory_drops_style(self) -> None:
+        directives = (
+            "### Mandatory Checks\n"
+            "- Check A\n"
+            "- Check B\n\n"
+            "### Style Preferences\n"
+            "- Style A\n"
+        )
+        result = truncate_review_md_always_check_only(directives)
+        self.assertIn("### Mandatory Checks", result)
+        self.assertIn("- Check A", result)
+        self.assertIn("- Check B", result)
+        self.assertNotIn("### Style Preferences", result)
+        self.assertNotIn("- Style A", result)
+
+    def test_truncation_empty_input(self) -> None:
+        self.assertEqual(truncate_review_md_always_check_only(""), "")
+
+    def test_truncation_no_mandatory_section(self) -> None:
+        text = "### Style Preferences\n- Style A\n"
+        self.assertEqual(truncate_review_md_always_check_only(text), "")
+
+    def test_skip_pattern_extraction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "REVIEW.md").write_text(self._FULL_REVIEW_MD, encoding="utf-8")
+            result = load_review_md_skip_patterns(repo)
+
+        self.assertEqual(
+            result,
+            [
+                "Generated files under src/gen/",
+                "Vendored dependencies",
+            ],
+        )
+
+    def test_skip_patterns_missing_review_md(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = load_review_md_skip_patterns(Path(tmpdir))
+        self.assertEqual(result, [])
+
+    def test_skip_patterns_no_skip_section(self) -> None:
+        content = "## Always check\n- Item\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "REVIEW.md").write_text(content, encoding="utf-8")
+            result = load_review_md_skip_patterns(repo)
+        self.assertEqual(result, [])
+
+
+class PathInstructionsTests(unittest.TestCase):
+    """Tests for load_path_instructions()."""
+
+    def test_single_pattern_match(self) -> None:
+        config = {
+            "path_instructions": [
+                {"path": "src/auth/*", "instructions": "Focus on auth bypass."},
+            ]
+        }
+        result = load_path_instructions(["src/auth/login.py"], config)
+        self.assertIn("src/auth/*", result)
+        self.assertIn("Focus on auth bypass.", result)
+
+    def test_multiple_patterns_match_same_file(self) -> None:
+        config = {
+            "path_instructions": [
+                {"path": "src/*.py", "instructions": "Check types."},
+                {"path": "src/auth*", "instructions": "Check auth."},
+            ]
+        }
+        result = load_path_instructions(["src/auth.py"], config)
+        self.assertIn("Check types.", result)
+        self.assertIn("Check auth.", result)
+
+    def test_no_patterns_match(self) -> None:
+        config = {
+            "path_instructions": [
+                {"path": "migrations/**", "instructions": "Check migrations."},
+            ]
+        }
+        result = load_path_instructions(["src/app.py"], config)
+        self.assertEqual(result, "")
+
+    def test_missing_path_instructions_in_config(self) -> None:
+        result = load_path_instructions(["src/app.py"], {})
+        self.assertEqual(result, "")
+
+    def test_empty_changed_files(self) -> None:
+        config = {
+            "path_instructions": [
+                {"path": "src/*", "instructions": "Review carefully."},
+            ]
+        }
+        result = load_path_instructions([], config)
+        self.assertEqual(result, "")
+
+
+class CrossFilePlanningTests(unittest.TestCase):
+    """Tests for cross-file context planner (sc-xpjx)."""
+
+    def _make_diff(self, files: list[str]) -> DiffResult:
+        return DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base="abc123",
+            changed_files=files,
+            diff_text="fake diff",
+        )
+
+    # --- _skip_cross_file_planning ---
+
+    def test_skip_test_only_diffs(self) -> None:
+        dr = self._make_diff(["tests/test_foo.py", "src/bar_test.go"])
+        self.assertTrue(_skip_cross_file_planning(dr))
+
+    def test_skip_docs_only_diffs(self) -> None:
+        dr = self._make_diff(["README.md", "docs/guide.txt", "CHANGELOG.rst"])
+        self.assertTrue(_skip_cross_file_planning(dr))
+
+    def test_no_skip_normal_diffs(self) -> None:
+        dr = self._make_diff(["src/app.py", "lib/utils.ts"])
+        self.assertFalse(_skip_cross_file_planning(dr))
+
+    def test_no_skip_mixed_test_and_impl(self) -> None:
+        dr = self._make_diff(["src/app.py", "tests/test_app.py"])
+        self.assertFalse(_skip_cross_file_planning(dr))
+
+    def test_skip_empty_changed_files(self) -> None:
+        dr = self._make_diff([])
+        self.assertTrue(_skip_cross_file_planning(dr))
+
+    # --- truncate_cross_file_top3_high_risk ---
+
+    def test_truncate_keeps_first_3_sections(self) -> None:
+        text = (
+            "Preamble line\n"
+            "#### Section A — high risk\ndetails A\n"
+            "#### Section B — high risk\ndetails B\n"
+            "#### Section C — medium risk\ndetails C\n"
+            "#### Section D — low risk\ndetails D\n"
+        )
+        result = truncate_cross_file_top3_high_risk(text)
+        self.assertIn("Section A", result)
+        self.assertIn("Section B", result)
+        self.assertIn("Section C", result)
+        self.assertNotIn("Section D", result)
+        self.assertIn("Preamble", result)
+
+    def test_truncate_empty_input(self) -> None:
+        self.assertEqual(truncate_cross_file_top3_high_risk(""), "")
+
+    def test_truncate_fewer_than_3_sections(self) -> None:
+        text = "#### Only one\ndetails\n"
+        result = truncate_cross_file_top3_high_risk(text)
+        self.assertIn("Only one", result)
+
+    # --- build_cross_file_context ---
+
+    def test_disabled_in_config_returns_empty(self) -> None:
+        config = {**DEFAULT_CONFIG, "cross_file_planner": {"enabled": False}}
+        result = build_cross_file_context(
+            diff_summary="some diff",
+            graph_data=None,
+            functions_data={"functions": [{"name": "foo", "file": "a.py"}]},
+            config=config,
+        )
+        self.assertEqual(result, "")
+
+    def test_empty_functions_data_returns_empty(self) -> None:
+        result = build_cross_file_context(
+            diff_summary="some diff",
+            graph_data=None,
+            functions_data=None,
+            config=DEFAULT_CONFIG,
+        )
+        self.assertEqual(result, "")
+
+    def test_empty_functions_list_returns_empty(self) -> None:
+        result = build_cross_file_context(
+            diff_summary="some diff",
+            graph_data=None,
+            functions_data={"functions": []},
+            config=DEFAULT_CONFIG,
+        )
+        self.assertEqual(result, "")
+
+    def test_returns_sections_for_valid_functions(self) -> None:
+        functions_data = {
+            "functions": [
+                {"name": "create_token", "file": "auth.py"},
+                {"name": "verify_user", "file": "auth.py"},
+            ]
+        }
+        result = build_cross_file_context(
+            diff_summary="some diff",
+            graph_data=None,
+            functions_data=functions_data,
+            config=DEFAULT_CONFIG,
+        )
+        self.assertIn("#### create_token", result)
+        self.assertIn("#### verify_user", result)
+        self.assertIn("callers of create_token()", result)
+
+    def test_caps_at_10_functions(self) -> None:
+        functions_data = {
+            "functions": [{"name": f"func_{i}", "file": "mod.py"} for i in range(15)]
+        }
+        result = build_cross_file_context(
+            diff_summary="diff",
+            graph_data=None,
+            functions_data=functions_data,
+            config=DEFAULT_CONFIG,
+        )
+        # Should have at most 10 sections
+        self.assertLessEqual(result.count("####"), 10)
+
+    def test_skips_short_function_names(self) -> None:
+        functions_data = {
+            "functions": [
+                {"name": "x", "file": "a.py"},
+                {"name": "valid_name", "file": "b.py"},
+            ]
+        }
+        result = build_cross_file_context(
+            diff_summary="diff",
+            graph_data=None,
+            functions_data=functions_data,
+            config=DEFAULT_CONFIG,
+        )
+        self.assertNotIn("#### x", result)
+        self.assertIn("#### valid_name", result)
 
 
 if __name__ == "__main__":

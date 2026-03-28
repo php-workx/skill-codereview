@@ -162,6 +162,7 @@ class OrchestrateAlignmentTests(unittest.TestCase):
                     },
                 },
                 {"coverage": []},
+                {"functions": []},  # code_intel functions
             ]
 
             with (
@@ -447,6 +448,7 @@ class OrchestrateAlignmentTests(unittest.TestCase):
                 {"tiers": []},
                 {"findings": [], "tool_status": {}},
                 {"coverage": []},
+                {"functions": []},  # code_intel functions
             ]
 
             with (
@@ -501,6 +503,7 @@ class OrchestrateAlignmentTests(unittest.TestCase):
                 {"tiers": []},
                 {"findings": [], "tool_status": {}},
                 {"coverage": []},
+                {"functions": []},  # code_intel functions
             ]
 
             with (
@@ -560,6 +563,7 @@ class OrchestrateAlignmentTests(unittest.TestCase):
                 {"tiers": []},
                 {"findings": [], "tool_status": {}},
                 {"coverage": []},
+                {"functions": []},  # code_intel functions
             ]
 
             with (
