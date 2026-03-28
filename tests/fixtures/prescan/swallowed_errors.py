@@ -4,8 +4,8 @@
 def process():
     try:
         do_something()  # noqa: F821 — intentional undefined for fixture
-    except:  # noqa: E722 — intentional bare except for prescan detection
-        pass  # P-ERR: swallowed error
+    except:  # noqa: E722 -- bare except for test
+        pass
 
 
 def careful_handler():

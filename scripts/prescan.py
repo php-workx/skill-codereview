@@ -202,7 +202,7 @@ class SwallowedErrorChecker(PatternChecker):
     severity = "high"
     pattern_name = "swallowed_errors"
     _PATS = [
-        re.compile(r"except[^:]*:\s*\n\s+pass\b", re.MULTILINE),
+        re.compile(r"except[^:]*:.*\n\s+pass\b", re.MULTILINE),
         re.compile(r"catch\s*\([^)]*\)\s*\{\s*\}", re.MULTILINE),
         re.compile(r"_\s*=\s*err\b"),
     ]
