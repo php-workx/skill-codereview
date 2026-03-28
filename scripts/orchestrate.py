@@ -2813,13 +2813,29 @@ def finalize(args: argparse.Namespace) -> int:
         enriched = run_subprocess_json(enrich_cmd, cwd=repo_root)
     except Exception as exc:
         progress("enrich_findings_failed", error=str(exc))
-        # Fallback: use raw judge output as findings
+        # Fallback: use raw judge output with basic tier assignment
         findings = (
             judge_output
             if isinstance(judge_output, list)
             else judge_output.get("findings", [])
         )
-        enriched = {"findings": findings, "tier_summary": {}, "dropped": {}}
+        tier_counts: dict[str, int] = {}
+        for f in findings:
+            sev = f.get("severity", "low")
+            has_fm = bool(f.get("failure_mode"))
+            if sev == "critical" or (sev == "high" and has_fm):
+                tier = "must_fix"
+            elif sev == "high" or (sev == "medium" and has_fm):
+                tier = "should_fix"
+            else:
+                tier = "consider"
+            f.setdefault("action_tier", tier)
+            tier_counts[tier] = tier_counts.get(tier, 0) + 1
+        enriched = {
+            "findings": findings,
+            "tier_summary": tier_counts,
+            "dropped": {},
+        }
     enriched_path = session_dir / "enriched.json"
     enriched_path.write_text(json.dumps(enriched, indent=2), encoding="utf-8")
 

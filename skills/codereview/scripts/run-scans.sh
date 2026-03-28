@@ -723,7 +723,8 @@ else
 	record_status "semgrep" "not_installed" "null" 0 "pip install semgrep"
 
 	# --- code_intel.py patterns fallback (when semgrep is unavailable) ---
-	CODE_INTEL_SCRIPT="$SCRIPT_DIR/../../../scripts/code_intel.py"
+	# code_intel.py is co-installed alongside run-scans.sh by install-codereview-skill.sh
+	CODE_INTEL_SCRIPT="$SCRIPT_DIR/code_intel.py"
 	if command -v python3 >/dev/null 2>&1 && [ -f "$CODE_INTEL_SCRIPT" ]; then
 		log "code_intel patterns: running as semgrep fallback"
 		(

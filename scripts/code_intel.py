@@ -531,7 +531,7 @@ def cmd_complexity(files: list[str]) -> dict[str, Any]:
         "analyzer": analyzer,
         "hotspots": [asdict(r) for r in merged],
         "tool_status": {
-            "tree_sitter": "ran" if _has_treesitter else "not_installed",
+            "tree_sitter": "installed_unused" if _has_treesitter else "not_installed",
             **tool_status,
         },
     }
@@ -760,9 +760,11 @@ def cmd_patterns(files: list[str]) -> dict[str, Any]:
                     }
                 )
     return {
-        "analyzer": "tree-sitter" if _has_treesitter else "regex-only",
+        "analyzer": "regex-only",  # tree-sitter parsing not yet implemented
         "findings": findings,
-        "tool_status": {"tree_sitter": "ran" if _has_treesitter else "not_installed"},
+        "tool_status": {
+            "tree_sitter": "installed_unused" if _has_treesitter else "not_installed"
+        },
     }
 
 

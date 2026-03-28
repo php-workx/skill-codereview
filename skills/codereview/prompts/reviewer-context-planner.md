@@ -31,7 +31,7 @@ When the diff imports a local module and uses it in a new way:
 - Skip deleted symbols (- prefix lines)
 - Use word-boundary patterns: \bsymbolName\b
 - Max 10 queries total
-- Include fileGlob to narrow search when possible
+- Include file_glob to narrow search when possible (e.g., "*.py", "!*_test.go")
 
 ## Output
 ```json

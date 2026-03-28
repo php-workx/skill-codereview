@@ -91,15 +91,14 @@ def validate_finding(finding: dict, index: int) -> bool:
     """Check that a finding has required fields.  Warn and return False if not."""
     if not finding.get("file"):
         print(
-            f"WARNING: finding #{index} missing 'file' field, skipping: "
-            f"{json.dumps(finding, default=str)[:120]}",
+            f"WARNING: finding #{index} missing 'file' field, skipping",
             file=sys.stderr,
         )
         return False
     if finding.get("line") is None:
         print(
-            f"WARNING: finding #{index} missing 'line' field, skipping: "
-            f"{json.dumps(finding, default=str)[:120]}",
+            f"WARNING: finding #{index} missing 'line' field, skipping"
+            f" (file={finding.get('file', '?')})",
             file=sys.stderr,
         )
         return False
@@ -341,12 +340,12 @@ def main():
         combined, args.confidence_floor
     )
 
-    # 7. Evidence check — downgrade AI high/critical without failure_mode
-    combined, downgraded_to_medium = apply_evidence_check(combined)
-
-    # 8. Code-intel integration — boost severity for high-caller findings
+    # 7. Code-intel integration — boost severity for high-caller findings (before evidence gate)
     graph = load_code_intel(args.code_intel_output)
     combined = apply_code_intel(combined, graph)
+
+    # 8. Evidence check — downgrade AI high/critical without failure_mode (after boost)
+    combined, downgraded_to_medium = apply_evidence_check(combined)
 
     # 9. Assign action_tier
     for f in combined:

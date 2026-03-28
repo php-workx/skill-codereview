@@ -83,7 +83,17 @@ def _is_test_file(fp: str) -> bool:
     name = Path(fp).name.lower()
     if any(p in ("tests", "test", "__tests__", "spec") for p in parts):
         return True
-    return name.startswith("test_") or name.startswith("test.")
+    # Prefix patterns: test_foo.py, test.foo.py
+    if name.startswith("test_") or name.startswith("test."):
+        return True
+    # Suffix patterns: foo_test.py, foo_test.go, foo.test.ts, foo.spec.js
+    stem = Path(fp).stem.lower()
+    if stem.endswith("_test") or stem.endswith(".test") or stem.endswith(".spec"):
+        return True
+    # Java convention: FooTest.java, FooTests.java
+    if name.endswith(".java") and (stem.endswith("test") or stem.endswith("tests")):
+        return True
+    return False
 
 
 def _should_skip(fp: str) -> bool:
