@@ -159,8 +159,10 @@ filter_to_changed_files() {
 
 has_dependency_manifest_changes() {
 	local file=""
+	local base=""
 	for file in "${FILES[@]}"; do
-		case "$file" in
+		base="${file##*/}"
+		case "$base" in
 		package.json | package-lock.json | npm-shrinkwrap.json | yarn.lock | pnpm-lock.yaml | bun.lockb | bun.lock | deno.lock | deno.json | deno.jsonc)
 			return 0
 			;;
@@ -816,17 +818,25 @@ if command -v sg >/dev/null 2>&1; then
 		clone_output=$(git clone --quiet https://github.com/coderabbitai/ast-grep-essentials.git \
 			"$AST_GREP_RULES" 2>&1) || {
 			log "ast-grep: clone failed: $clone_output"
-			record_status "ast_grep" "clone_failed" "null" 0 "git clone coderabbitai/ast-grep-essentials"
+			record_status "ast_grep" "failed" "null" 0 "git clone coderabbitai/ast-grep-essentials: $clone_output"
 			AST_GREP_RULES=""
 		}
-		if [ -n "$AST_GREP_RULES" ] && [ -d "$AST_GREP_RULES" ]; then
-			checkout_output=$(git -C "$AST_GREP_RULES" checkout "$AST_GREP_PINNED_SHA" 2>&1) || {
-				log "ast-grep: checkout of pinned SHA failed: $checkout_output"
-				record_status "ast_grep" "checkout_failed" "null" 0 "git checkout $AST_GREP_PINNED_SHA"
-				rm -rf "$AST_GREP_RULES"
-				AST_GREP_RULES=""
-			}
-		fi
+	fi
+	if [ -n "$AST_GREP_RULES" ] && [ -d "$AST_GREP_RULES" ]; then
+		fetch_output=$(git -C "$AST_GREP_RULES" fetch --quiet origin 2>&1) || {
+			log "ast-grep: fetch failed: $fetch_output"
+			record_status "ast_grep" "failed" "null" 0 "git fetch origin: $fetch_output"
+			rm -rf "$AST_GREP_RULES"
+			AST_GREP_RULES=""
+		}
+	fi
+	if [ -n "$AST_GREP_RULES" ] && [ -d "$AST_GREP_RULES" ]; then
+		checkout_output=$(git -C "$AST_GREP_RULES" checkout --quiet "$AST_GREP_PINNED_SHA" 2>&1) || {
+			log "ast-grep: checkout of pinned SHA failed: $checkout_output"
+			record_status "ast_grep" "failed" "null" 0 "git checkout $AST_GREP_PINNED_SHA: $checkout_output"
+			rm -rf "$AST_GREP_RULES"
+			AST_GREP_RULES=""
+		}
 	fi
 	if [ -n "$AST_GREP_RULES" ] && [ -f "$AST_GREP_RULES/sgconfig.yml" ]; then
 		(

@@ -350,6 +350,24 @@ else
 	fail "run-scans.sh has dependency manifest gating helper for OSV" "helper not found"
 fi
 
+if grep -Fq "base=\"\${file##*/}\"" "$SCRIPTS/run-scans.sh"; then
+	pass "run-scans.sh manifest detection uses basename for nested paths"
+else
+	fail "run-scans.sh manifest detection uses basename for nested paths" "basename extraction not found"
+fi
+
+if grep -Fq "git -C \"\$AST_GREP_RULES\" fetch --quiet origin" "$SCRIPTS/run-scans.sh"; then
+	pass "run-scans.sh always fetches ast-grep rules before checkout"
+else
+	fail "run-scans.sh always fetches ast-grep rules before checkout" "ast-grep fetch not found"
+fi
+
+if grep -Fq 'record_status "ast_grep" "failed"' "$SCRIPTS/run-scans.sh"; then
+	pass "run-scans.sh records canonical failed status for ast-grep setup errors"
+else
+	fail "run-scans.sh records canonical failed status for ast-grep setup errors" "canonical failed status not found"
+fi
+
 # 5l. justfile quality targets exist
 if [ -f "$REPO_ROOT/justfile" ] && grep -q '^pre-commit:' "$REPO_ROOT/justfile" &&
 	grep -q '^pre-push:' "$REPO_ROOT/justfile" &&

@@ -144,16 +144,15 @@ Optional repo-level config via `.codereview.yaml`. See `docs/CONFIGURATION.md` f
 |------|------|
 | `prompts/reviewer-global-contract.md` | Shared contract prepended to all explorer prompts |
 | `prompts/reviewer-correctness-pass.md` | Correctness explorer (core) |
-| `prompts/reviewer-security-pass.md` | Security explorer (core) |
+| `prompts/reviewer-security-config-pass.md` | Security config explorer (core) |
 | `prompts/reviewer-test-adequacy-pass.md` | Test adequacy explorer (core) |
-| `prompts/reviewer-reliability-performance-pass.md` | Reliability explorer (core) |
+| `prompts/reviewer-security-dataflow-pass.md` | Security dataflow explorer (activated) |
+| `prompts/reviewer-reliability-performance-pass.md` | Reliability explorer (activated; also reused for shell-script reviews) |
 | `prompts/reviewer-error-handling-pass.md` | Error handling explorer (activated) |
 | `prompts/reviewer-api-contract-pass.md` | API/contract explorer (activated) |
 | `prompts/reviewer-concurrency-pass.md` | Concurrency explorer (activated) |
 | `prompts/reviewer-spec-verification-pass.md` | Spec verification explorer (activated) |
-| `prompts/reviewer-shell-script-pass.md` | Shell script explorer (activated) |
-| `prompts/reviewer-security-config-pass.md` | Security config explorer (activated) |
-| `prompts/reviewer-security-dataflow-pass.md` | Security dataflow explorer (activated) |
+| `prompts/reviewer-reliability-performance-pass.md` | Shell script explorer (activated; shared prompt) |
 | `prompts/reviewer-judge.md` | Review judge (adversarial validation) |
 
 If you need to understand the review internals, inspect `scripts/orchestrate.py` instead of expanding this skill.

@@ -184,7 +184,7 @@ Tools for building evaluation pipelines:
 
 ## Kodus-AI's Internal Evaluation (Reference Implementation)
 
-Source: local path `~/workspaces/kodus-ai`, specifically the `evals/` directory. Uses PromptFoo.
+Source: public repo [`kodustech/kodus-ai`](https://github.com/kodustech/kodus-ai), specifically the [`evals/`](https://github.com/kodustech/kodus-ai/tree/main/evals), [`evals/promptfoo/`](https://github.com/kodustech/kodus-ai/tree/main/evals/promptfoo), and [`evals/promptfoo-safeguard/`](https://github.com/kodustech/kodus-ai/tree/main/evals/promptfoo-safeguard) directories. Uses PromptFoo.
 
 ### Dataset Structure
 

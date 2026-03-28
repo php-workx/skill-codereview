@@ -13,10 +13,11 @@ Check the diff for insecure cryptographic APIs and weak randomness. Use this loo
 |----------|-------------------|-----|---------|
 | `random.Random()`, `random.random()`, `random.randint()` | `secrets.token_hex()`, `secrets.token_urlsafe()`, `random.SystemRandom()` | 330 | Only flag in security contexts (tokens, keys, nonces, session IDs). `random.random()` for jitter/display shuffling is NOT vulnerable. |
 | `Math.random()` | `crypto.getRandomValues()`, `crypto.randomUUID()` | 330 | Same context rule |
-| MD5, SHA1 for security purposes | SHA-256+, bcrypt, scrypt, argon2 | 327/328 | MD5/SHA1 for checksums/cache keys is acceptable |
-| DES, 3DES, RC4, Blowfish | AES-256-GCM, ChaCha20-Poly1305 | 327 | |
-| ECB mode | GCM, CBC with HMAC, CTR | 327 | |
-| RSA < 2048 bits | RSA 2048+, Ed25519, ECDSA P-256+ | 327 | |
+| MD5, SHA1 for security purposes | SHA-256+ | 327/328 | MD5/SHA1 for checksums/cache keys is acceptable |
+| Plain password hashing with fast hashes | bcrypt, scrypt, argon2 | 327/328 | Use dedicated password hashing/KDF primitives for password storage |
+| DES, 3DES, RC4, Blowfish | AES-256-GCM, ChaCha20-Poly1305 | 327 | Recommend authenticated ciphers only |
+| ECB mode | AES-GCM, ChaCha20-Poly1305, CBC with HMAC | 327 | CTR without authentication is insufficient |
+| RSA < 2048 bits for encryption | RSA-OAEP with RSA 2048+, hybrid encryption | 327 | Ed25519/ECDSA are signature schemes, not drop-in encryption replacements |
 
 1. For each crypto-related API call in the diff, match against the table above.
 2. **Read** surrounding code to determine the context. Use these signals to distinguish security vs non-security use:

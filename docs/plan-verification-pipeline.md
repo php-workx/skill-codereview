@@ -40,13 +40,13 @@ These patterns were identified during the PR-Agent analysis but don't justify st
 
 Currently, the judge does everything in one pass: verify findings, check for contradictions, deduplicate, calibrate severity, and produce a verdict. By extracting verification into a separate step, the judge receives pre-filtered findings and can focus on synthesis and verdict.
 
-Inspired by Claude Octopus's Round 2 verification gate, which assigns a verdict to each finding before synthesis. Architecture significantly refined based on analysis of the **Kodus-AI code review platform** (local path `~/workspaces/kodus-ai`), whose 3-stage safeguard pipeline (feature extraction → deterministic triage → agent verification) provides a concrete, production-tested blueprint for this feature.
+Inspired by Claude Octopus's Round 2 verification gate, which assigns a verdict to each finding before synthesis. Architecture significantly refined based on analysis of the **Kodus-AI code review platform** ([`kodustech/kodus-ai`](https://github.com/kodustech/kodus-ai), especially [`evals/promptfoo-safeguard/`](https://github.com/kodustech/kodus-ai/tree/main/evals/promptfoo-safeguard)), whose 3-stage safeguard pipeline (feature extraction → deterministic triage → agent verification) provides a concrete, production-tested blueprint for this feature.
 
 ### Architecture
 
 The verification round has **three stages**, inspired by Kodus-AI's safeguard pipeline. The key insight: separating feature extraction (cheap batch LLM call), deterministic triage (free, instant logic), and deep verification (expensive per-finding agent) dramatically reduces cost while improving precision.
 
-```
+```text
 Explorers (parallel)
     │
     ▼
@@ -128,7 +128,7 @@ Output:
     ...
   ]
 }
-```
+```text
 
 ### Stage 2: Deterministic Triage
 
@@ -250,7 +250,7 @@ Output your verdicts as a JSON array:
   { "finding_index": 1, "verdict": "false_positive", "reason": "Input is validated by middleware at api/middleware.py:23 before reaching this handler" },
   { "finding_index": 2, "verdict": "needs_investigation", "reason": "Call chain too deep to trace — login() → session_manager() → cache.get() → unclear if cache is thread-safe" }
 ]
-```
+```text
 
 ### Activation threshold
 
@@ -278,7 +278,7 @@ verification:
 
 Add new **Step 4a.5** between explorer collection (4a) and judge launch (4b):
 
-```
+```text
 Step 4a.5: Finding Verification (when threshold met)
 
 Stage 1: Feature Extraction
@@ -390,7 +390,7 @@ If the verification round (Feature 0) is skipped (below threshold or `--no-verif
 
 ### Logic
 
-```
+```text
 If --spec provided:
   Run spec-verification explorer FIRST (before other explorers)
   Read spec_requirements from output
@@ -453,7 +453,7 @@ Added to the top of the markdown report, before the detailed findings:
 - `tests/test_auth.py:34` — Test mocks the database, cannot catch schema drift
 
 **Spec:** 8/10 requirements implemented, 1 partial, 1 not started
-```
+```text
 
 ### Implementation
 
@@ -495,7 +495,7 @@ For each high/critical finding with confidence < 0.85:
     │     If uncertain: keep as-is, note "unverified by spot-check"
     │
     └── If spot-check disabled OR no alternate model: skip (current behavior)
-```
+```text
 
 ### Activation
 
@@ -583,7 +583,7 @@ Add to `prompts/reviewer-verifier.md` after the verdict assignment:
    - The judge will strip the broken fix from the final output
 
    If the fix is valid or no fix is suggested: `fix_valid: true` (default)
-```
+```text
 
 ### Judge handling
 
@@ -639,7 +639,7 @@ Step 2m.5: Context Sufficiency Check (NEW)
         ├── Execute additional queries via Grep
         ├── Merge new results with existing context
         └── Proceed to Step 2h (no further iteration — max 2 rounds total)
-```
+```text
 
 ### Sufficiency criteria
 
@@ -699,7 +699,7 @@ Max 5 additional queries. Use word-boundary ripgrep patterns only.
 cross_file:
   sufficiency_check: true   # enable/disable sufficiency feedback loop
   max_rounds: 2             # max collection rounds (1 = no sufficiency check)
-```
+```text
 
 ### Files to create
 
@@ -745,7 +745,7 @@ Step 2n: Documentation Context (NEW)
     │   └── Format results as context snippets
     │
     └── Include in context packet (Step 2h)
-```
+```text
 
 ### Why opt-in
 
@@ -817,7 +817,7 @@ Addition to the judge prompt (Feature 1's Pass 2: Synthesis). After severity cal
   "score": 8,
   "score_reason": "Verified: map write without nil check on error path, confirmed via Read"
 }
-```
+```text
 
 ### Interaction with action tiers
 
@@ -838,7 +838,7 @@ Configurable via `.codereview.yaml`:
 scoring:
   min_score: 0         # drop findings below this score (0 = keep all)
   show_scores: true    # include score in report output
-```
+```text
 
 ### Files to modify
 
@@ -897,7 +897,7 @@ New script: `scripts/detect-plan-context.sh`
    - --ticket <id>        (tk ticket)
    - --bead <id>          (bd bead)
    - --plan <file>[#N]    (plan file, optionally feature number)
-```
+```text
 
 **Output format:**
 ```json
@@ -992,7 +992,7 @@ Extends the existing `spec_requirements` array in findings-schema.json:
     ]
   }
 }
-```
+```text
 
 ### Interaction with existing pipeline
 
@@ -1080,7 +1080,7 @@ repair_json() {
   # Strategy 2-6: progressive fixes on raw content
   # ... (each strategy tries jq validation after the fix)
 }
-```
+```text
 
 ### Interaction with pipeline
 
@@ -1109,7 +1109,7 @@ Motivated by CodeRabbit gap analysis: findings #1, #5, #6, #14, #15, #24, #26, #
 ```
 Always run:  correctness, security, reliability, test-adequacy  (4 core)
 Skip logic:  error-handling, api-contract, concurrency, spec-verification  (4 extended, skip signals)
-```
+```text
 
 The extended passes have simple skip signals (e.g., concurrency skips if no concurrency primitives in diff). But the core passes always run, and no new experts can join based on diff content.
 
@@ -1125,7 +1125,7 @@ diff content:   API & Contract expert        ← route/endpoint/handler defs, sc
                 Spec Verification expert     ← --spec flag provided
                 [future] Database expert     ← migration files, schema changes, SQL
                 [future] Infrastructure expert ← Kubernetes manifests, Terraform, CI/CD configs
-```
+```text
 
 **Key changes from current:**
 1. **Reliability moves from core to activated** — it's most valuable when the diff touches resource management, external calls, or hot paths. On a diff that's pure business logic, the correctness pass already covers logic bugs.
@@ -1190,7 +1190,7 @@ log "Expert panel: ${EXPERTS[*]} (${#EXPERTS[@]} experts)"
 
 ### Shell & Script Expert
 
-New prompt file: `prompts/reviewer-shell-script-pass.md`
+Shared prompt file: `prompts/reviewer-reliability-performance-pass.md`
 
 **Pass value:** `reliability` (shell issues are typically reliability/correctness, not a new category)
 
@@ -1303,7 +1303,7 @@ For bash scripts that construct structured data (JSON, YAML, XML, SQL):
   "failure_mode": "On malformed input, the validation script crashes instead of reporting a clean FAIL. The review pipeline sees exit code 5 (jq error) instead of exit code 1 (validation failure).",
   "fix": "After the type check fails, set FINDING_COUNT=0 and skip all per-finding validation blocks: if [ \"$(jq '.findings | type' ...)\" != '\"array\"' ]; then FINDING_COUNT=0; else FINDING_COUNT=$(jq '.findings | length' ...); fi"
 }
-```
+```text
 
 ### True Positive — JSON Injection via Bash Interpolation (Medium Confidence)
 ```json
@@ -1341,7 +1341,7 @@ Do NOT report:
 Return ALL findings. Use `pass: "reliability"` for shell correctness findings,
 `pass: "security"` for injection findings.
 Use the JSON schema from the global contract.
-```
+```text
 
 ### Expert interaction model
 
@@ -1378,7 +1378,7 @@ Activated experts (run if activation signal detected):
 Log: "Expert panel: correctness, security, test-adequacy, shell-script, error-handling (5 experts)"
 
 If force_all_passes: true in config, activate all experts regardless of signals.
-```
+```text
 
 ### Configuration
 
@@ -1410,7 +1410,7 @@ experts:
 
 ### Files to create
 
-- `skills/codereview/prompts/reviewer-shell-script-pass.md` — Shell & Script expert prompt (full content above)
+- `skills/codereview/prompts/reviewer-reliability-performance-pass.md` — Reliability/shell expert prompt (shared prompt content above)
 
 ### Files to modify
 
@@ -1442,7 +1442,7 @@ The shell expert prompt is the bulk of the work (written above). The panel assem
 
 ## Execution Order
 
-```
+```text
 Feature 0 (verification round)      ← architectural, do first
     │
     ├── Feature 1 (two-pass judge)   ← restructures judge prompt, depends on Feature 0 design
@@ -1486,7 +1486,7 @@ Feature 0 (verification round)      ← architectural, do first
 | `skills/codereview/prompts/reviewer-context-sufficiency.md` | 6 |
 | `skills/codereview/scripts/detect-plan-context.sh` | 9 |
 | `skills/codereview/prompts/reviewer-plan-compliance.md` | 9 |
-| `skills/codereview/prompts/reviewer-shell-script-pass.md` | 11 |
+| `skills/codereview/prompts/reviewer-reliability-performance-pass.md` | 11 |
 
 ### Total files to modify
 
