@@ -22,6 +22,31 @@ from scripts.orchestrate import (
 
 
 class OrchestrateAlignmentTests(unittest.TestCase):
+    def test_prepare_rejects_existing_non_directory_session_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_file = Path(tmpdir) / "session"
+            session_file.write_text("not a dir", encoding="utf-8")
+            args = Namespace(
+                session_dir=session_file,
+                no_config=True,
+                spec=None,
+                spec_scope=None,
+                base="main",
+                range=None,
+                pr=None,
+                path=None,
+                no_chunk=False,
+                force_chunk=False,
+                force_all_experts=False,
+                confidence_floor=None,
+                mode="base",
+                timeout=1200,
+            )
+
+            result = prepare(args)
+
+        self.assertEqual(result, 1)
+
     def test_prepare_parser_accepts_alignment_flags(self) -> None:
         parser = build_parser()
 
@@ -82,6 +107,22 @@ class OrchestrateAlignmentTests(unittest.TestCase):
 
             with self.assertRaises(FileNotFoundError):
                 extract_diff(repo_root=repo, mode="path", pathspec="missing.txt")
+
+    def test_count_changed_lines_matches_exact_file_not_substring(self) -> None:
+        diff_text = (
+            "diff --git a/src/app.py b/src/app.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+            "diff --git a/src/app.py.bak b/src/app.py.bak\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+newer\n"
+        )
+
+        from scripts.orchestrate import _count_changed_lines_for_file
+
+        self.assertEqual(_count_changed_lines_for_file(diff_text, "src/app.py"), 2)
 
     def test_prepare_writes_contract_fields_and_allowlisted_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

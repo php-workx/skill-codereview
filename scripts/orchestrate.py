@@ -515,6 +515,9 @@ def _apply_cli_config_overrides(
         merged.setdefault("experts", {})["force_all"] = True
         merged.setdefault("expert_panel", {}).setdefault("experts", {})
         merged["expert_panel"]["force_all"] = True
+    passes_str = getattr(args, "passes", None)
+    if passes_str:
+        merged["passes"] = [p.strip() for p in passes_str.split(",") if p.strip()]
     return merged
 
 
@@ -1240,6 +1243,10 @@ def _ensure_session_dir(args: argparse.Namespace, *, create_if_missing: bool) ->
         progress("session_dir_created", session_dir=str(path))
         return path
     path = Path(session)
+    if path.exists() and not path.is_dir():
+        raise ValueError(
+            f"Refusing to use existing non-directory path for --session-dir: {path}"
+        )
     if create_if_missing and path.exists() and path.is_dir():
         if not _has_session_marker(path):
             try:
@@ -1288,7 +1295,14 @@ def _count_changed_lines_for_file(diff_text: str, filepath: str) -> int:
     count = 0
     for line in diff_text.splitlines():
         if line.startswith("diff --git"):
-            in_file = filepath in line
+            match = re.match(r"diff --git a/(.*?) b/(.*)", line)
+            if not match:
+                in_file = False
+                continue
+            old_path, new_path = match.groups()
+            candidates = {old_path, new_path}
+            candidates.discard("/dev/null")
+            in_file = filepath in candidates
         elif (
             in_file
             and line.startswith(("+", "-"))
@@ -2254,6 +2268,11 @@ def build_parser() -> argparse.ArgumentParser:
             command_parser.add_argument("--no-chunk", action="store_true")
             command_parser.add_argument("--force-chunk", action="store_true")
             command_parser.add_argument("--force-all-experts", action="store_true")
+            command_parser.add_argument(
+                "--passes",
+                type=str,
+                help="Comma-separated list of expert passes to run (e.g. correctness,security-config)",
+            )
             command_parser.add_argument("--confidence-floor", type=float)
             command_parser.add_argument("--no-config", action="store_true")
             command_parser.add_argument("--timeout", type=int, default=1200)
