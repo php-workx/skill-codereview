@@ -1299,8 +1299,6 @@ def _ensure_session_dir(args: argparse.Namespace, *, create_if_missing: bool) ->
     if not create_if_missing:
         if not path.exists() or not path.is_dir():
             raise ValueError(f"Session directory does not exist: {path}")
-        if not _has_session_marker(path):
-            raise ValueError(f"Session directory missing session marker: {path}")
         return path
     if path.exists() and path.is_dir():
         if not _has_session_marker(path):
