@@ -201,7 +201,7 @@ For each `must` or `should` requirement:
 }
 ```
 
-**Rules:** All PASS/N/A → `overall: "PASS"`. Any GAP → `overall: "GAP"` and report each gap as a finding with `pass: "spec_verification"`, `severity: "low"`, `action_tier: "consider"`. Cap at 2 completeness gate findings per review.
+**Rules:** All PASS/N/A → `overall: "PASS"`. Any GAP → `overall: "GAP"` and report each gap as a finding with `pass: "spec_verification"`, `severity: "medium"`, `action_tier: "consider"`. Cap at 2 completeness gate findings per review.
 
 ---
 

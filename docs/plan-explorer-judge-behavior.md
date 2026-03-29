@@ -6,14 +6,14 @@ Improve review precision and quality through prompt engineering, judge architect
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| F10: Phantom Knowledge Self-Check | Not started | Quick win — prompt only |
-| F11: Mental Execution Framing | Not started | Quick win — prompt only |
-| F4: Test Pyramid Vocabulary | Not started | Prompt + schema |
-| F5: Per-File Certification | Not started | Judge + global contract |
-| F6: Contract Completeness Gate | Not started | Judge + spec-verification |
-| F7: Output File Batching | Not started | Judge + global contract + orchestrate.py |
-| F8: Pre-Existing Bug Classification | Not started | Depends on enrich-findings.py |
-| F9: Provenance-Aware Review Rigor | Not started | Depends on enrich-findings.py |
+| F10: Phantom Knowledge Self-Check | Implemented (modified) | Softened framing — assumptions lower confidence, not suppressed |
+| F11: Mental Execution Framing | Implemented (modified) | Integrated into Phases 3, 4, 6 — no standalone preamble |
+| F4: Test Pyramid Vocabulary | Implemented | Prompt + schema |
+| F5: Per-File Certification | Implemented | Judge + global contract + orchestrator validation |
+| F6: Contract Completeness Gate | Implemented | Judge + spec-verification |
+| F7: Output File Batching | Partial | Summary table done; file-based batching deferred |
+| F8: Pre-Existing Bug Classification | Implemented | Schema + enrichment + prompts |
+| F9: Provenance-Aware Review Rigor | Implemented | CLI + enrichment + prompts |
 
 ## Architecture Context
 
@@ -131,6 +131,8 @@ IS visible evidence. Cross-file context provided in the context packet IS visibl
 The self-check only applies to claims about code you never read.
 ```
 
+> **Implementation note:** The production implementation uses softened framing instead of the absolutist text above. Assumption-based findings set confidence <= 0.69 and cite the assumption in `evidence_source` — they are NOT suppressed. See `references/design.md` F10 entry for rationale (positional amnesia, risk of suppressing legitimate findings behind opaque abstractions).
+
 ### Why this is high-impact
 
 Kodus-AI's production data shows that phantom knowledge findings account for the largest share of false positives. Their "Edward" gatekeeper persona exists primarily to catch this pattern. By embedding the self-check directly into our explorer contract, we catch these at the source instead of filtering them later.
@@ -215,6 +217,8 @@ Only report issues where you can trace the EXACT execution path:
 Do NOT report: "this could potentially fail if..." — either trace the failure
 or don't report it.
 ```
+
+> **Implementation note:** The production implementation integrates these execution contexts into existing Phases 3, 4, and 6 rather than adding a standalone preamble before Phase 1. The "What to report" section requiring exact execution paths was dropped to avoid contradicting the confidence calibration table's 0.70-0.84 tier. See `references/design.md` F11 entry for rationale.
 
 ### Calibration example addition
 
