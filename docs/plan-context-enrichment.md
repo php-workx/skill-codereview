@@ -6,13 +6,21 @@ Improve review quality by enriching the context available to AI explorers. Pre-c
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| F0c: code_intel.py | Not started | Foundation — build first |
-| F0b: enrich-findings.py | Not started | Post-explorer finding enrichment |
-| F1: Prescan | Not started | Depends on code_intel.py |
-| F2: Domain Checklists | Not started | Independent |
-| F12: Cross-File Planner | Not started | Enhanced by code_intel.py graph |
-| F13: REVIEW.md Directives | Not started | Independent |
-| F15: Path-Based Instructions | Not started | Independent |
+| F0c: code_intel.py | Implemented | 9 subcommands: complexity, functions, imports, exports, callers, patterns, graph (repo search, co-change, depth-2, cache, semantic), format-diff (with --expand-context), setup (with --install, --non-interactive) |
+| F0b: enrich-findings.py | Implemented | 11-step pipeline, llm_prompt, code-intel boost |
+| F1: Prescan | Implemented | 8 pattern checkers (P-SEC through P-STUB), L1-L4 completeness, imports code_intel.py for shared parsing, P-UNWIRED functional |
+| F2: Domain Checklists | Implemented | SQL, LLM, concurrency checklists |
+| F12: Cross-File Planner | Implemented | LLM planner via cross_file_planner.py (Option A wrapper), deterministic fallback, 5 search categories, per-explorer routing, 5k token budget |
+| F13: REVIEW.md Directives | Implemented | Skip patterns, always-check directives |
+| F15: Path-Based Instructions | Implemented | Per-path review instructions with trust boundary tags |
+| Graph: repo-wide search | Implemented | Step 2: grep for callers of changed symbols, "calls" edges, 20 results/symbol cap, timeout guards |
+| Graph: co-change frequency | Implemented | Step 4: git log co-change analysis, frequency >= 3, max 50 edges |
+| Graph: --depth 2 | Implemented | Two-hop traversal, hop_distance field, 500 node cap |
+| Graph: --cache | Implemented | Incremental indexing, mtime-based invalidation, repo-hash keyed |
+| Graph: --semantic | Implemented | model2vec/onnxruntime + sqlite-vec, graceful degradation, cosine similarity edges |
+| format-diff wiring | Implemented | Explorers receive before/after blocks, budget-aware --expand-context, raw diff preserved for tools |
+| PromptBudgetExceeded handler | Implemented | prepare() catches and writes error launch.json |
+| Adaptive expert selection | Implemented | Structural detection from code_intel exports, fallback to diff patterns |
 
 ## Design Principles
 
@@ -228,7 +236,7 @@ CodeRabbit maintains a persistent graph (rebuilt per review). We build it at rev
 
 **Depth control:** Default depth is 1 (changed files + their direct dependents). `--depth 2` traverses two hops but is significantly slower and produces larger graphs. Depth 1 covers the vast majority of cross-file bugs. Depth 2 is useful for large-diff mode where cross-chunk dependencies need deeper tracing.
 
-**Caching (optional):** The graph can be cached in `.codereview-cache/graph-<repo-hash>.json` (structural) and `.codereview-cache/semantic-<repo-hash>.db` (semantic index) for faster subsequent reviews. When cached, only the delta (new/modified files) needs re-parsing and re-embedding. First review builds from scratch; subsequent reviews update incrementally.
+**Caching (optional):** The graph can be cached in `.agents/codereview/graph-<repo-hash>.json` (structural) and `.agents/codereview/semantic-<repo-hash>.db` (semantic index) for faster subsequent reviews. When cached, only the delta (new/modified files) needs re-parsing and re-embedding. First review builds from scratch; subsequent reviews update incrementally.
 
 **Relationship to Feature 12 (cross-file planner):** The structural graph says "file B calls function X from file A." The semantic layer says "function `check_auth_token` is similar in purpose to `validate_session`." The planner (Feature 12) says "file A changed the hash algorithm — search for the corresponding verify function." Together, structural + semantic + planner cover three layers of cross-file relationships: explicit dependencies, implicit similarity, and domain-specific patterns.
 
@@ -268,11 +276,11 @@ Both tiers use `sqlite-vec` for storage and search — a pure-C SQLite extension
 1. After building the structural graph (steps 1-5 above), extract the **text representation** of each node: function name + parameter names + return type + docstring (if present) + first 3 lines of body. This produces a ~50-200 token text per symbol.
 
 2. Generate a 384-dimensional embedding vector for each text:
-   - If `model2vec` is installed: use a distilled MiniLM model (~8MB on disk). First run downloads/distills automatically, cached in `.codereview-cache/models/`. Produces embeddings in microseconds per symbol.
+   - If `model2vec` is installed: use a distilled MiniLM model (~8MB on disk). First run downloads/distills automatically, cached in `.agents/codereview/models/`. Produces embeddings in microseconds per symbol.
    - Elif `onnxruntime` is installed: use a pre-exported MiniLM-L6-v2 ONNX model (~80MB, downloaded once, cached). Produces embeddings in ~0.5ms per symbol.
    - Else: skip semantic layer, warn: "Neither model2vec nor onnxruntime installed — semantic search disabled."
 
-3. Store embeddings in a sqlite-vec database (`.codereview-cache/semantic-<repo-hash>.db`). Each row: `(symbol_id TEXT, file TEXT, kind TEXT, embedding FLOAT[384])`.
+3. Store embeddings in a sqlite-vec database (`.agents/codereview/semantic-<repo-hash>.db`). Each row: `(symbol_id TEXT, file TEXT, kind TEXT, embedding FLOAT[384])`.
 
 4. For each changed symbol in the diff, query the semantic index for the top 5 most similar symbols in the repo (excluding the symbol itself). These are **semantically related** code that may need attention.
 
@@ -364,13 +372,13 @@ echo "$CHANGED_FILES" | python3 scripts/code_intel.py callers --target "login" >
 echo "$CHANGED_FILES" | python3 scripts/code_intel.py patterns > /tmp/codereview-patterns.json
 
 # Dependency graph — structural only
-echo "$CHANGED_FILES" | python3 scripts/code_intel.py graph [--depth 1] [--cache .codereview-cache/] > /tmp/codereview-graph.json
+echo "$CHANGED_FILES" | python3 scripts/code_intel.py graph [--depth 1] [--cache .agents/codereview/] > /tmp/codereview-graph.json
 
 # Dependency graph — structural + semantic similarity
-echo "$CHANGED_FILES" | python3 scripts/code_intel.py graph --semantic [--depth 1] [--cache .codereview-cache/] > /tmp/codereview-graph.json
+echo "$CHANGED_FILES" | python3 scripts/code_intel.py graph --semantic [--depth 1] [--cache .agents/codereview/] > /tmp/codereview-graph.json
 
 # Dependency graph — semantic with specific embedding model
-echo "$CHANGED_FILES" | python3 scripts/code_intel.py graph --semantic --embedding-model onnx [--cache .codereview-cache/] > /tmp/codereview-graph.json
+echo "$CHANGED_FILES" | python3 scripts/code_intel.py graph --semantic --embedding-model onnx [--cache .agents/codereview/] > /tmp/codereview-graph.json
 
 # Transform unified diff into LLM-optimized format
 git diff $BASE_REF | python3 scripts/code_intel.py format-diff > /tmp/codereview-formatted.diff
@@ -748,7 +756,7 @@ Step 0 (first review only): Dependency Setup
            -> yes (recommended) / skip"
    c. If "yes": run code_intel.py setup --install --tier full
    d. If "skip": continue with what's available
-5. After install (or skip), write marker: .codereview-cache/setup-complete
+5. After install (or skip), write marker: .agents/codereview/setup-complete
 6. On subsequent reviews, check for marker -> skip Step 0 entirely
 ```
 
@@ -951,12 +959,12 @@ def detect_installers():
 
 **SKILL.md integration (Step 0):**
 
-The agent checks for `.codereview-cache/setup-complete` before every review. If absent:
+The agent checks for `.agents/codereview/setup-complete` before every review. If absent:
 
 ```
 Step 0: Dependency Setup (first review only)
 
-If .codereview-cache/setup-complete does NOT exist:
+If .agents/codereview/setup-complete does NOT exist:
 
 1. Run: python3 scripts/code_intel.py setup --check --json
 2. Parse the JSON output.
@@ -973,10 +981,10 @@ If .codereview-cache/setup-complete does NOT exist:
    If skip: Note in report footer: "Some optional tools are missing.
             Run code_intel.py setup --check for details."
 
-4. Write .codereview-cache/setup-complete with timestamp.
+4. Write .agents/codereview/setup-complete with timestamp.
 5. Proceed to Step 1.
 
-If .codereview-cache/setup-complete EXISTS:
+If .agents/codereview/setup-complete EXISTS:
   Skip to Step 1.
 
 To re-run setup: /codereview --setup (deletes marker and re-runs Step 0)
@@ -1022,7 +1030,7 @@ In non-interactive mode:
 - Suitable for CI setup steps: `pip install ... && python3 scripts/code_intel.py setup --install --tier full --non-interactive`
 
 **Marker file for CI:**
-Add `.codereview-cache/` to `.gitignore`. The marker file reflects machine state and should not be committed.
+Add `.agents/codereview/` to `.gitignore`. The marker file reflects machine state and should not be committed.
 
 **CI integration example:**
 ```yaml
@@ -1032,7 +1040,7 @@ Add `.codereview-cache/` to `.gitignore`. The marker file reflects machine state
 
 # Or pre-create marker to skip setup entirely (deps installed via Dockerfile)
 - name: Skip codereview setup
-  run: mkdir -p .codereview-cache && touch .codereview-cache/setup-complete
+  run: mkdir -p .agents/codereview && touch .agents/codereview/setup-complete
 ```
 
 **Codex sandbox / restricted environments:**

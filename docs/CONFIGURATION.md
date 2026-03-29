@@ -42,6 +42,10 @@ token_budget:
   explorer_prompt: 70000
   judge_prompt: 80000
 
+suggest_missing_tests: false
+
+minimum_severity: "low"
+
 custom_instructions: |
   Flag raw SQL usage.
   All auth endpoints must enforce rate limits.
@@ -52,6 +56,20 @@ custom_instructions: |
 ### `confidence_floor`
 
 Minimum confidence required for explorer findings to survive into `judge-input.json`.
+
+### `minimum_severity`
+
+Minimum severity for findings to appear in the final report. Findings below this level are dropped after enrichment (after evidence checks and tier assignment, so severity downgrades are applied first).
+
+Valid values: `low` (default — keep all), `medium`, `high`, `critical`.
+
+Example: `minimum_severity: "medium"` drops all `low` severity findings.
+
+### `suggest_missing_tests`
+
+When `false` (default), the test-adequacy explorer only reports issues with existing tests (stale assertions, mocked-everything, wrong expected values). It will NOT suggest adding new tests for untested code.
+
+Set to `true` to enable "missing test" suggestions. CLI: `--suggest-missing-tests`.
 
 ### `passes`
 

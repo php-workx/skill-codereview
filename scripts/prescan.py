@@ -5,7 +5,9 @@ Reads changed file paths from stdin (newline-delimited), outputs JSON prescan
 signals to stdout.  These are *context signals* for explorers, NOT findings --
 they are never passed to enrich-findings.py.
 
-Regex-only mode.  P-UNWIRED is skipped (requires import graph).
+When code_intel.py is co-installed (same ``scripts/`` directory), shared parsing
+functions are imported and the P-UNWIRED checker is activated using code_intel's
+import/export analysis.  Otherwise falls back to regex-only mode.
 
 Usage:  echo "$CHANGED_FILES" | python3 scripts/prescan.py > prescan.json
 """
@@ -18,6 +20,20 @@ import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
+
+# Try to import shared parsing from code_intel (co-installed)
+_CODE_INTEL_AVAILABLE = False
+try:
+    from code_intel import (
+        _detect_language as _ci_detect_language,
+        _read_file_safe as _ci_read_file_safe,
+        _extract_exports as _ci_extract_exports,
+        cmd_imports as _ci_cmd_imports,
+    )
+
+    _CODE_INTEL_AVAILABLE = True
+except ImportError:
+    pass
 
 WALL_CLOCK_LIMIT = 15.0
 PER_FILE_LIMIT = 0.5
@@ -64,11 +80,13 @@ _FUNC_START_RE: dict[str, re.Pattern[str]] = {
 # --- helpers ----------------------------------------------------------------
 
 
-def _detect_language(fp: str) -> str | None:
+def _detect_language_fallback(fp: str) -> str | None:
+    """Prescan-local language detection (fallback when code_intel unavailable)."""
     return EXTENSION_MAP.get(Path(fp).suffix.lower())
 
 
-def _read_file_safe(fp: str) -> str | None:
+def _read_file_safe_fallback(fp: str) -> str | None:
+    """Prescan-local safe file read (fallback when code_intel unavailable)."""
     try:
         p = Path(fp)
         if not p.is_file() or p.stat().st_size > 2_000_000:
@@ -76,6 +94,18 @@ def _read_file_safe(fp: str) -> str | None:
         return p.read_text(encoding="utf-8", errors="replace")
     except (OSError, UnicodeError):
         return None
+
+
+def _detect_language(fp: str) -> str | None:
+    if _CODE_INTEL_AVAILABLE:
+        return _ci_detect_language(fp)
+    return _detect_language_fallback(fp)
+
+
+def _read_file_safe(fp: str) -> str | None:
+    if _CODE_INTEL_AVAILABLE:
+        return _ci_read_file_safe(fp)
+    return _read_file_safe_fallback(fp)
 
 
 def _is_test_file(fp: str) -> bool:
@@ -395,14 +425,61 @@ class StubChecker(PatternChecker):
 
 
 class UnwiredChecker(PatternChecker):
-    """P-UNWIRED requires an import graph -- skipped in regex-only mode."""
+    """P-UNWIRED detects exported definitions with no importers in the changed set.
+
+    Requires code_intel for import graph analysis.  Falls back to empty in
+    regex-only mode.
+    """
 
     pattern_id = "P-UNWIRED"
     severity = "medium"
     pattern_name = "unwired_components"
 
+    def __init__(self) -> None:
+        # Populated by run_prescan before check() is called when code_intel
+        # is available.  Maps exported name -> set of files that import it.
+        self._import_index: dict[str, set[str]] = {}
+        self._active = False
+
+    def build_import_index(self, all_files: list[str]) -> None:
+        """Build a name->importer-files index from changed files via code_intel."""
+        if not _CODE_INTEL_AVAILABLE:
+            return
+        self._import_index.clear()
+        imports_result = _ci_cmd_imports(all_files)
+        for imp in imports_result.get("imports", []):
+            source_file = imp.get("file", "")
+            # Index each imported name
+            for name in imp.get("names", []):
+                self._import_index.setdefault(name, set()).add(source_file)
+            # Also index the module stem (e.g. "from utils import foo" -> module "utils")
+            module = imp.get("module", "")
+            if module:
+                module_stem = module.rsplit(".", 1)[-1]
+                self._import_index.setdefault(module_stem, set()).add(source_file)
+        self._active = True
+
     def check(self, fp: str, content: str, lang: str | None) -> list[dict[str, Any]]:
-        return []  # requires import graph, not available in regex mode
+        if not self._active or not _CODE_INTEL_AVAILABLE or not lang:
+            return []  # requires import graph
+        exports = _ci_extract_exports(fp, content, lang)
+        findings: list[dict[str, Any]] = []
+        for export in exports:
+            name = export.name
+            importers = self._import_index.get(name, set())
+            # Exclude the file itself from importers
+            importers_other = importers - {fp}
+            if not importers_other:
+                findings.append(
+                    _finding(
+                        fp,
+                        export.line,
+                        self.pattern_id,
+                        f"Exported {export.kind} '{name}' has no importers in changed files",
+                        f"{export.kind} {name} at line {export.line}",
+                    )
+                )
+        return findings
 
 
 ALL_CHECKERS: list[PatternChecker] = [
@@ -467,6 +544,7 @@ def _assess_completeness(
 def run_prescan(file_paths: list[str]) -> dict[str, Any]:
     """Run all checkers on given files, return structured output."""
     start_time = time.monotonic()
+    analyzer = "regex+code_intel" if _CODE_INTEL_AVAILABLE else "regex-only"
     filtered = [f for f in file_paths if not _should_skip(f)][:MAX_FILE_COUNT]
     empty_levels = {
         "L4_functional": [],
@@ -477,7 +555,7 @@ def run_prescan(file_paths: list[str]) -> dict[str, Any]:
     if not filtered:
         return {
             "file_count": 0,
-            "analyzer": "regex-only",
+            "analyzer": analyzer,
             "languages_detected": [],
             "patterns": {},
             "implementation_completeness": {
@@ -487,6 +565,13 @@ def run_prescan(file_paths: list[str]) -> dict[str, Any]:
             },
             "summary": {"critical": 0, "high": 0, "medium": 0, "low": 0},
         }
+
+    # Build import index for P-UNWIRED when code_intel is available
+    unwired_checker = next(
+        (c for c in ALL_CHECKERS if isinstance(c, UnwiredChecker)), None
+    )
+    if unwired_checker is not None and _CODE_INTEL_AVAILABLE:
+        unwired_checker.build_import_index(filtered)
 
     checker_findings: dict[str, list[dict[str, Any]]] = {
         c.pattern_name: [] for c in ALL_CHECKERS
@@ -549,7 +634,7 @@ def run_prescan(file_paths: list[str]) -> dict[str, Any]:
     lc = {k: len(v) for k, v in levels.items() if v}
     result: dict[str, Any] = {
         "file_count": len(filtered),
-        "analyzer": "regex-only",
+        "analyzer": analyzer,
         "languages_detected": sorted(languages),
         "patterns": patterns,
         "implementation_completeness": {
