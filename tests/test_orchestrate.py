@@ -1,4 +1,5 @@
 import json
+import os
 from argparse import Namespace
 import subprocess
 import sys
@@ -50,6 +51,16 @@ REPO_ROOT = TESTS_DIR.parent
 
 
 class OrchestratePlumbingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Clear GIT_DIR/GIT_WORK_TREE so temp repo tests use their own git context
+        self._saved_git_env = {}
+        for key in ("GIT_DIR", "GIT_WORK_TREE"):
+            if key in os.environ:
+                self._saved_git_env[key] = os.environ.pop(key)
+
+    def tearDown(self) -> None:
+        os.environ.update(self._saved_git_env)
+
     def test_help_lists_expected_subcommands(self) -> None:
         result = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "orchestrate.py"), "--help"],
@@ -794,23 +805,37 @@ class OrchestratePlumbingTests(unittest.TestCase):
             self.assertTrue(any(review_dir.glob("*.md")))
 
     @staticmethod
+    def _git_env() -> dict[str, str]:
+        return {
+            k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")
+        }
+
+    @staticmethod
     def _run(command: list[str], cwd: Path) -> None:
+        env = {
+            k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")
+        }
         subprocess.run(
             command,
             cwd=cwd,
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
 
     @staticmethod
     def _capture(command: list[str], cwd: Path) -> str:
+        env = {
+            k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")
+        }
         result = subprocess.run(
             command,
             cwd=cwd,
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
         return result.stdout
 
