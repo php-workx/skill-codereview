@@ -48,7 +48,7 @@ mv "$DEST_CLAUDE_TMP" "$DEST_CLAUDE"
 mv "$DEST_CODEX_TMP" "$DEST_CODEX"
 
 # Copy repo-root scripts (live at repo root scripts/, not inside the skill dir)
-for script_name in orchestrate.py code_intel.py prescan.py; do
+for script_name in orchestrate.py code_intel.py prescan.py cross_file_planner.py; do
 	SRC_SCRIPT="$REPO_ROOT/scripts/$script_name"
 	if [[ -f "$SRC_SCRIPT" ]]; then
 		for dest in "$DEST_CLAUDE" "$DEST_CODEX"; do

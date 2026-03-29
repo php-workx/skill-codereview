@@ -238,6 +238,10 @@ class OrchestratePrepareTests(unittest.TestCase):
                 mock.patch(
                     "scripts.orchestrate.run_subprocess_json", side_effect=fake_run
                 ),
+                mock.patch(
+                    "scripts.orchestrate.run_subprocess_text",
+                    return_value="formatted diff output",
+                ),
             ):
                 result = prepare(args)
 
@@ -318,6 +322,10 @@ class OrchestratePrepareTests(unittest.TestCase):
                 ),
                 mock.patch(
                     "scripts.orchestrate.run_subprocess_json", side_effect=fake_run
+                ),
+                mock.patch(
+                    "scripts.orchestrate.run_subprocess_text",
+                    return_value="formatted diff output",
                 ),
             ):
                 result = prepare(args)
@@ -412,6 +420,271 @@ class OrchestratePrepareTests(unittest.TestCase):
 
             self.assertEqual(result, 1)
             self.assertTrue((session_dir / "user-file.txt").exists())
+
+    # -- format-diff wiring tests --
+
+    def _prepare_with_format_diff(
+        self,
+        *,
+        format_diff_return: str = "## File: tracked.txt\nformatted before/after",
+        format_diff_side_effect: Exception | None = None,
+        diff_text: str = "@@\n+two\n",
+        config_overrides: dict | None = None,
+    ) -> tuple[int, Path, mock.MagicMock]:
+        """Helper: run prepare() with configurable format-diff behavior.
+
+        Returns (exit_code, session_dir, run_subprocess_text_mock).
+        """
+        tmpdir = tempfile.mkdtemp()
+        session_dir = Path(tmpdir) / "session"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
+
+        config = DEFAULT_CONFIG.copy()
+        if config_overrides:
+            config.update(config_overrides)
+
+        args = Namespace(
+            session_dir=session_dir,
+            no_config=True,
+            spec=None,
+            spec_scope=None,
+            base="main",
+            mode="base",
+        )
+        diff_result = DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base="abc123",
+            changed_files=["tracked.txt"],
+            diff_text=diff_text,
+        )
+
+        def fake_json_run(
+            command: list[str],
+            cwd: Path | None = None,
+            timeout: float | None = None,
+            input_text: str | None = None,
+        ) -> dict[str, object]:
+            script_name = next(
+                Path(part).name for part in command if part.endswith((".py", ".sh"))
+            )
+            if script_name == "code_intel.py":
+                sub = command[-1] if len(command) > 2 else "complexity"
+                script_name = f"code_intel.py:{sub}"
+            mapping: dict[str, dict[str, object]] = {
+                "discover-project.py": {"language": "python"},
+                "code_intel.py:complexity": {
+                    "hotspots": [],
+                    "analyzer": "regex-only",
+                    "tool_status": {},
+                },
+                "code_intel.py:functions": {"functions": []},
+                "code_intel.py:graph": {},
+                "git-risk.sh": {"tiers": []},
+                "run-scans.sh": {"findings": [], "tool_status": {}},
+                "coverage-collect.py": {"coverage": []},
+                "prescan.py": {},
+            }
+            return mapping.get(script_name, {})
+
+        text_mock = mock.MagicMock()
+        if format_diff_side_effect is not None:
+            text_mock.side_effect = format_diff_side_effect
+        else:
+            text_mock.return_value = format_diff_return
+
+        with (
+            mock.patch("scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT),
+            mock.patch("scripts.orchestrate.extract_diff", return_value=diff_result),
+            mock.patch(
+                "scripts.orchestrate.run_subprocess_json", side_effect=fake_json_run
+            ),
+            mock.patch("scripts.orchestrate.run_subprocess_text", text_mock),
+        ):
+            result = prepare(args)
+
+        return result, session_dir, text_mock
+
+    def test_prepare_calls_format_diff_and_uses_formatted_output(self) -> None:
+        """prepare() calls format-diff and passes result to explorer prompts."""
+        formatted_text = "## File: tracked.txt\n```\nbefore -> after\n```"
+        result, session_dir, text_mock = self._prepare_with_format_diff(
+            format_diff_return=formatted_text,
+        )
+
+        self.assertEqual(result, 0)
+
+        # Verify format-diff was called
+        text_mock.assert_called()
+        format_diff_calls = [
+            c
+            for c in text_mock.call_args_list
+            if any("format-diff" in str(a) for a in c.args)
+        ]
+        self.assertTrue(
+            len(format_diff_calls) >= 1,
+            "format-diff should have been called at least once",
+        )
+
+        # Verify the first call passes raw diff as stdin
+        first_call = format_diff_calls[0]
+        self.assertEqual(first_call.kwargs.get("input_text"), "@@\n+two\n")
+
+        # Verify diff-formatted.patch was written
+        self.assertTrue((session_dir / "diff-formatted.patch").exists())
+        saved = (session_dir / "diff-formatted.patch").read_text(encoding="utf-8")
+        self.assertEqual(saved, formatted_text)
+
+        # Verify explorer prompts contain formatted diff, not raw
+        prompt_files = list(session_dir.glob("explorer-*-prompt.md"))
+        self.assertTrue(prompt_files, "Should have explorer prompt files")
+        for pf in prompt_files:
+            content = pf.read_text(encoding="utf-8")
+            self.assertIn("before -> after", content)
+
+    def test_prepare_format_diff_failure_falls_back_to_raw_diff(self) -> None:
+        """When format-diff fails, prepare() uses raw diff for explorers."""
+        result, session_dir, text_mock = self._prepare_with_format_diff(
+            format_diff_side_effect=RuntimeError("format-diff crashed"),
+        )
+
+        self.assertEqual(result, 0)
+
+        # diff-formatted.patch should NOT exist (format-diff failed)
+        self.assertFalse((session_dir / "diff-formatted.patch").exists())
+
+        # Explorer prompts should contain the raw diff
+        prompt_files = list(session_dir.glob("explorer-*-prompt.md"))
+        self.assertTrue(prompt_files)
+        for pf in prompt_files:
+            content = pf.read_text(encoding="utf-8")
+            self.assertIn("+two", content)
+
+    def test_prepare_format_diff_budget_expansion(self) -> None:
+        """When formatted diff < 50% of budget, prepare() re-runs with --expand-context."""
+        short_formatted = "short formatted"
+        expanded_formatted = "expanded formatted with more context lines"
+
+        call_count = {"n": 0}
+
+        def format_diff_responses(command, cwd=None, timeout=None, input_text=None):
+            call_count["n"] += 1
+            if "--expand-context" in command:
+                return expanded_formatted
+            return short_formatted
+
+        text_mock = mock.MagicMock(side_effect=format_diff_responses)
+
+        tmpdir = tempfile.mkdtemp()
+        session_dir = Path(tmpdir) / "session"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
+
+        args = Namespace(
+            session_dir=session_dir,
+            no_config=True,
+            spec=None,
+            spec_scope=None,
+            base="main",
+            mode="base",
+        )
+        diff_result = DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base="abc123",
+            changed_files=["tracked.txt"],
+            diff_text="@@\n+two\n",
+        )
+
+        def fake_json_run(command, cwd=None, timeout=None, input_text=None):
+            script_name = next(
+                Path(part).name for part in command if part.endswith((".py", ".sh"))
+            )
+            if script_name == "code_intel.py":
+                sub = command[-1] if len(command) > 2 else "complexity"
+                script_name = f"code_intel.py:{sub}"
+            mapping = {
+                "discover-project.py": {"language": "python"},
+                "code_intel.py:complexity": {
+                    "hotspots": [],
+                    "analyzer": "regex-only",
+                    "tool_status": {},
+                },
+                "code_intel.py:functions": {"functions": []},
+                "code_intel.py:graph": {},
+                "git-risk.sh": {"tiers": []},
+                "run-scans.sh": {"findings": [], "tool_status": {}},
+                "coverage-collect.py": {"coverage": []},
+                "prescan.py": {},
+            }
+            return mapping.get(script_name, {})
+
+        with (
+            mock.patch("scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT),
+            mock.patch("scripts.orchestrate.extract_diff", return_value=diff_result),
+            mock.patch(
+                "scripts.orchestrate.run_subprocess_json", side_effect=fake_json_run
+            ),
+            mock.patch("scripts.orchestrate.run_subprocess_text", text_mock),
+        ):
+            result = prepare(args)
+
+        self.assertEqual(result, 0)
+
+        # Should have called format-diff twice: once plain, once with --expand-context
+        format_diff_calls = [
+            c
+            for c in text_mock.call_args_list
+            if any("format-diff" in str(a) for a in c.args)
+        ]
+        self.assertEqual(len(format_diff_calls), 2, "Expected plain + expanded calls")
+
+        # Second call should include --expand-context flag
+        second_cmd = format_diff_calls[1].args[0]
+        self.assertIn("--expand-context", second_cmd)
+
+        # Final diff-formatted.patch should contain expanded output
+        saved = (session_dir / "diff-formatted.patch").read_text(encoding="utf-8")
+        self.assertEqual(saved, expanded_formatted)
+
+    def test_prepare_format_diff_no_expansion_when_large(self) -> None:
+        """When formatted diff >= 50% of budget, no expansion call is made."""
+        # Default budget is 70_000 tokens * 4 chars = 280_000 chars.
+        # 50% threshold = 140_000 chars. Make formatted output large enough.
+        large_formatted = "x" * 150_000
+
+        result, session_dir, text_mock = self._prepare_with_format_diff(
+            format_diff_return=large_formatted,
+        )
+
+        self.assertEqual(result, 0)
+
+        # Should have called format-diff only once (no --expand-context)
+        format_diff_calls = [
+            c
+            for c in text_mock.call_args_list
+            if any("format-diff" in str(a) for a in c.args)
+        ]
+        self.assertEqual(len(format_diff_calls), 1, "Should not expand large diffs")
+        self.assertNotIn("--expand-context", format_diff_calls[0].args[0])
+
+    def test_prepare_raw_diff_preserved_for_scans(self) -> None:
+        """Raw diff is saved to diff.patch even when format-diff succeeds."""
+        formatted_text = "## File: tracked.txt\nformatted"
+        result, session_dir, _ = self._prepare_with_format_diff(
+            format_diff_return=formatted_text,
+        )
+
+        self.assertEqual(result, 0)
+
+        # diff.patch should contain the raw diff (not formatted)
+        raw_saved = (session_dir / "diff.patch").read_text(encoding="utf-8")
+        self.assertEqual(raw_saved, "@@\n+two\n")
+
+        # diff-formatted.patch should contain the formatted version
+        fmt_saved = (session_dir / "diff-formatted.patch").read_text(encoding="utf-8")
+        self.assertEqual(fmt_saved, formatted_text)
 
     def _init_repo(self, repo: Path) -> Path:
         self._run(["git", "init", "-b", "main"], cwd=repo)

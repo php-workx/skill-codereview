@@ -41,7 +41,7 @@ After each script phase, check the `status` field in the output JSON. If `"error
 
 ### Step 0: Dependency Setup (first review only)
 
-If `.codereview-cache/setup-complete` does NOT exist:
+If `.agents/codereview/setup-complete` does NOT exist:
 
 1. Check dependencies:
 
@@ -70,12 +70,39 @@ python3 "$SKILL_SCRIPTS/code_intel.py" setup --install --tier full
    If skip: Note in report footer: "Some optional tools are missing.
             Run `code_intel.py setup --check` for details."
 
-4. Write `.codereview-cache/setup-complete` with timestamp.
+4. Write `.agents/codereview/setup-complete` with timestamp.
 5. Proceed to Step 1.
 
-If `.codereview-cache/setup-complete` EXISTS: skip to Step 1.
+If `.agents/codereview/setup-complete` EXISTS: skip to Step 1.
 
 To re-run setup: `/codereview --setup` (deletes marker and re-runs Step 0)
+
+### Step 0.5: Determine Review Scope (when no --base/--range/--pr/--path given)
+
+If the user provided an explicit `--base`, `--range`, `--pr`, or path argument, skip this step — use their flags directly.
+
+If NO scope flags were provided, check for the last-review marker:
+
+```bash
+SKILL_SCRIPTS="<SKILL_BASE>/scripts"
+cat .agents/codereview/last-review.json 2>/dev/null
+```
+
+**If the marker exists**, parse it and use `AskUserQuestion` to offer scope options:
+- **"Since last review ({head_sha:.7} — {timestamp})"** (Recommended) — uses `--base {head_sha}` to review only changes since the last review
+- **"All uncommitted changes"** — no `--base` flag (reviews all staged + unstaged changes against HEAD)
+- **"Compared to main"** — uses `--base main`
+
+Present the timestamp in relative terms when possible (e.g., "2 hours ago", "yesterday"). Include the file count and verdict from the last review for context: "Last review: {file_count} files, verdict {verdict}".
+
+Do NOT proceed until the user responds. Use the selected option to set the appropriate `--base` flag for Step 1.
+
+**If no marker exists** (first review ever), use `AskUserQuestion`:
+- **"All uncommitted changes (staged + unstaged)"** (Recommended) — no `--base` flag
+- **"Compared to main"** — uses `--base main`
+- **"Specify a base ref"** — prompt for the ref
+
+**Note:** The default mode (no `--base`) captures all uncommitted changes — both staged and unstaged — against HEAD. If there are no uncommitted changes, it falls back to reviewing the last commit (HEAD~1..HEAD).
 
 ### Step 1: Prepare
 

@@ -34,7 +34,19 @@ For each confirmed issue, build your evidence chain:
 - What breaks in production (the failure mode)
 - What the fix should be (smallest safe change)
 
-**Phase 4 — Confidence Calibration**
+**Phase 4 — Severity Classification**
+Assign severity based on production impact, not code aesthetics:
+
+| Severity | Definition | Examples |
+|----------|-----------|----------|
+| **critical** | Data loss, security breach, or crash affecting all users under normal operation. Requires immediate fix before merge. | SQL injection, unhandled null on hot path, credentials in source, data corruption on write |
+| **high** | Incorrect behavior under realistic conditions, exploitable security weakness, or silent data corruption. Should block merge. | Off-by-one causing wrong results, missing auth check on endpoint, race condition under normal concurrency |
+| **medium** | Edge case bugs, performance degradation under load, missing input validation at system boundaries. Fix recommended. | Timeout not set on HTTP call, unbounded list growth, missing bounds check on user input |
+| **low** | Code clarity issues, minor inefficiency, theoretical concerns, documentation inaccuracy. Nice to have. | Misleading variable name, O(n) where O(1) is easy, stale comment, unused import |
+
+**Key rule:** If the issue requires a specific unlikely scenario to trigger (e.g., "if the file is exactly 2^32 bytes"), it's **medium** at most. If it triggers under normal usage, it's **high** or **critical**.
+
+**Phase 5 — Confidence Calibration**
 Set confidence based on evidence strength, not gut feeling:
 
 | Evidence Level | Confidence Range |
