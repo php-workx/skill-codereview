@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Explorer Output",
   "description": "Output schema for codereview explorer sub-agents. Supports 3 shapes: bare findings array, findings+requirements object, or full object with certification and completeness gate.",
-  "oneOf": [
+  "anyOf": [
     {
       "type": "array",
       "description": "Bare findings array (legacy format)",
@@ -13,6 +13,7 @@
       "description": "Object with findings and optional requirements",
       "required": ["findings"],
       "properties": {
+        "pass": { "type": "string" },
         "findings": {
           "type": "array",
           "items": { "$ref": "#/$defs/finding" }
@@ -30,22 +31,18 @@
       "description": "Full object with certification and completeness gate (post-F5/F6)",
       "required": ["findings"],
       "properties": {
+        "pass": { "type": "string" },
         "certification": {
           "type": "object",
-          "description": "Per-file certification data from explorer",
+          "description": "Per-file certification data from explorer, as defined in the global contract.",
           "properties": {
-            "files": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "file": { "type": "string" },
-                  "certified": { "type": "boolean" },
-                  "reason": { "type": "string" }
-                }
-              }
-            }
-          }
+            "status": { "type": "string", "enum": ["clean", "not_applicable"] },
+            "files_checked": { "type": "array", "items": { "type": "string" } },
+            "checks_performed": { "type": "array", "items": { "type": "string" } },
+            "tools_used": { "type": "array", "items": { "type": "string" } },
+            "reason": { "type": "string", "description": "Reason for not_applicable status" }
+          },
+          "required": ["status", "files_checked"]
         },
         "findings": {
           "type": "array",
@@ -57,15 +54,44 @@
         },
         "completeness_gate": {
           "type": "object",
-          "description": "Completeness gate data",
+          "description": "Contract completeness gate from spec-verification explorer Phase 6.",
           "properties": {
-            "passed": { "type": "boolean" },
-            "coverage": { "type": "number" },
-            "gaps": {
-              "type": "array",
-              "items": { "type": "string" }
-            }
-          }
+            "state_transitions": {
+              "type": "object",
+              "properties": {
+                "status": { "type": "string", "enum": ["PASS", "GAP", "N/A"] },
+                "detail": { "type": "string" }
+              },
+              "required": ["status", "detail"]
+            },
+            "error_edge_behavior": {
+              "type": "object",
+              "properties": {
+                "status": { "type": "string", "enum": ["PASS", "GAP", "N/A"] },
+                "detail": { "type": "string" }
+              },
+              "required": ["status", "detail"]
+            },
+            "cross_requirement_consistency": {
+              "type": "object",
+              "properties": {
+                "status": { "type": "string", "enum": ["PASS", "GAP", "N/A"] },
+                "detail": { "type": "string" }
+              },
+              "required": ["status", "detail"]
+            },
+            "testability": {
+              "type": "object",
+              "properties": {
+                "status": { "type": "string", "enum": ["PASS", "GAP", "N/A"] },
+                "detail": { "type": "string" }
+              },
+              "required": ["status", "detail"]
+            },
+            "overall": { "type": "string", "enum": ["PASS", "GAP"] },
+            "gap_count": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["overall", "gap_count"]
         }
       },
       "additionalProperties": false

@@ -86,7 +86,7 @@ The script writes a single JSON object to **stdout**. It always exits 0. Any war
 {
   "findings": [...],
   "tier_summary": { "must_fix": 0, "should_fix": 0, "consider": 0 },
-  "dropped": { "below_confidence_floor": 0, "downgraded_to_medium": 0 }
+  "dropped": { "below_confidence_floor": 0, "downgraded_to_medium": 0, "pre_existing_not_reachable": 0 }
 }
 ```
 
@@ -96,6 +96,7 @@ The script writes a single JSON object to **stdout**. It always exits 0. Any war
 | `tier_summary` | `object` | Count of findings per action tier. Always contains exactly the three keys listed. |
 | `dropped.below_confidence_floor` | `int` | Number of AI findings removed because confidence was below `--confidence-floor`. |
 | `dropped.downgraded_to_medium` | `int` | Number of AI high/critical findings downgraded to medium because `failure_mode` was absent. Note: these findings are still present in the output; the counter reflects severity changes, not removals. |
+| `dropped.pre_existing_not_reachable` | `int` | Number of pre-existing findings removed because they are not reachable from the current diff (i.e., the changed code does not call or interact with the affected file). Present only when `--baseline` is provided; always 0 otherwise. |
 
 ### 3.2 Finding Object
 
@@ -142,8 +143,8 @@ The script processes findings in the following order. Steps are numbered to matc
 4. **Validate required fields** — findings missing `file` or `line` are dropped with a warning to stderr.
 5. **Generate stable IDs** — `id` is assigned to every surviving finding.
 6. **Confidence floor filtering** — AI findings below `--confidence-floor` are removed; the count goes into `dropped.below_confidence_floor`.
-7. **Evidence check** — AI findings at `high` or `critical` severity without a `failure_mode` are downgraded to `medium`; the count goes into `dropped.downgraded_to_medium`.
-8. **Code-intel enrichment** — if `--code-intel-output` is provided, each finding gains `affected_callers`; files with more than 3 callers have severity boosted one level.
+7. **Code-intel enrichment** — if `--code-intel-output` is provided, each finding gains `affected_callers`; files with more than 3 callers have severity boosted one level.
+8. **Evidence check** — AI findings at `high` or `critical` severity without a `failure_mode` are downgraded to `medium`; the count goes into `dropped.downgraded_to_medium`.
 9. **Action tier assignment** — `action_tier` is set on every finding per the rules in §4.
 10. **LLM prompt generation** — unless `--no-llm-prompts` is set, each finding gets an `llm_prompt` template string.
 11. **Sort** — findings are sorted by `tier_order` ascending, then by `severity_weight * confidence` descending within each tier.
@@ -173,17 +174,17 @@ All existing fields and their semantics are unchanged. When `--baseline` is omit
 
 ### 6.2 F9 — Provenance-Aware Review Rigor
 
-**New flag:**
+**Implemented flag** (already present in the script):
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--provenance` | `str` (file path) | `""` | Path to provenance metadata JSON (e.g., author heat-map, file ownership, change frequency). Used to apply provenance-aware enrichment rules. |
+| `--provenance` | `str` (choice) | `"unknown"` | Provenance label for the review run. Accepted values: `human`, `ai-assisted`, `autonomous`, `unknown`. Controls review rigor — autonomous changes receive stricter scrutiny. |
 
 **New output field per finding:**
 
 | Field | Type | Nullable | Description |
 |---|---|---|---|
-| `provenance` | `object \| null` | Yes | Provenance context attached to the finding (e.g., `{"author": "...", "change_frequency": N, "owners": [...]}`). `null` when `--provenance` is omitted. |
+| `provenance` | `string` | No | Provenance label applied to this finding's review run. One of: `human`, `ai-assisted`, `autonomous`, `unknown`. Always present; defaults to `"unknown"` when `--provenance` is omitted. |
 
 All existing fields and their semantics are unchanged.
 

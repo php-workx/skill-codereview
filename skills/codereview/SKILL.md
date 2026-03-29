@@ -89,7 +89,7 @@ To re-run setup: `/codereview --setup` (deletes marker and re-runs Step 0)
 
 If the user did NOT provide `--spec`:
 
-1. Run: `python3 $SKILL_DIR/scripts/orchestrate.py find-spec-candidates --session-dir $SESSION_DIR`
+1. Run: `python3 $SKILL_DIR/scripts/orchestrate.py find-spec-candidates`
    This returns a JSON array of candidate paths with metadata.
 
 2. If candidates are found, show the user:

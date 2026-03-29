@@ -29,6 +29,7 @@ Output (stdout):
 import argparse
 import hashlib
 import json
+import re
 import sys
 
 
@@ -259,24 +260,25 @@ def apply_pre_existing_rules(findings: list) -> tuple[list, int]:
 
 
 AI_CODEGEN_PATTERNS = [
-    "placeholder",
-    "stub",
-    "todo",
-    "unwired",
-    "unused",
-    "dead code",
-    "mock data",
-    "hardcoded",
-    "localhost",
-    "example.com",
-    "silent",
-    "swallow",
-    "empty catch",
-    "pass",
-    "over-abstract",
-    "unnecessary",
-    "premature",
+    r"\bplaceholder\b",
+    r"\bstub\b",
+    r"\btodo\b",
+    r"\bunwired\b",
+    r"\bdead code\b",
+    r"\bmock data\b",
+    r"\bhardcoded\b",
+    r"\blocalhost\b",
+    r"\bexample\.com\b",
+    r"\bsilent\b",
+    r"\bswallow\b",
+    r"\bempty catch\b",
+    r"\bpass\b",
+    r"\bover-abstract\b",
+    r"\bunnecessary\b",
+    r"\bpremature\b",
+    r"\bunused\b",
 ]
+_AI_CODEGEN_RE = re.compile("|".join(AI_CODEGEN_PATTERNS), re.IGNORECASE)
 
 
 def apply_provenance_boost(findings: list[dict], provenance: str) -> list[dict]:
@@ -285,10 +287,10 @@ def apply_provenance_boost(findings: list[dict], provenance: str) -> list[dict]:
         return findings
     for finding in findings:
         summary_lower = (
-            finding.get("summary", "") + " " + finding.get("evidence", "")
+            (finding.get("summary") or "") + " " + (finding.get("evidence") or "")
         ).lower()
-        if finding.get("action_tier") == "consider":
-            if any(p in summary_lower for p in AI_CODEGEN_PATTERNS):
+        if finding.get("action_tier") == "consider" and not finding.get("pre_existing"):
+            if _AI_CODEGEN_RE.search(summary_lower):
                 finding["action_tier"] = "should_fix"
     return findings
 

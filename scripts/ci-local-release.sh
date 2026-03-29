@@ -18,7 +18,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 SKILL_DIR="$REPO_ROOT/skills/codereview"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 ARTIFACT_DIR="$REPO_ROOT/.agents/releases/local-ci/$TIMESTAMP"
-RELEASE_VERSION="${2:-unreleased}"
+RELEASE_VERSION="unreleased"
 ERRORS=0
 WARNINGS=0
 
@@ -90,7 +90,8 @@ PROMPT_FILES=(
 	"prompts/reviewer-judge-calibrator.md"
 	"prompts/reviewer-judge-synthesizer.md"
 	"prompts/reviewer-correctness-pass.md"
-	"prompts/reviewer-security-pass.md"
+	"prompts/reviewer-security-config-pass.md"
+	"prompts/reviewer-security-dataflow-pass.md"
 	"prompts/reviewer-reliability-performance-pass.md"
 	"prompts/reviewer-test-adequacy-pass.md"
 	"prompts/reviewer-error-handling-pass.md"
@@ -187,7 +188,7 @@ if command -v jq &>/dev/null && [ -f "$SKILL_DIR/findings-schema.json" ]; then
   ' "$SKILL_DIR/findings-schema.json" 2>/dev/null | sort)
 
 	# shellcheck disable=SC2016
-	CONTRACT_PASSES=$(sed -n 's/^| `\([a-z_]*\)` |.*/\1/p' "$SKILL_DIR/prompts/reviewer-global-contract.md" 2>/dev/null | sort)
+	CONTRACT_PASSES=$(sed -n 's/^| `\([a-z0-9_-]*\)` |.*/\1/p' "$SKILL_DIR/prompts/reviewer-global-contract.md" 2>/dev/null | sort)
 
 	if [ -n "$SCHEMA_PASSES" ] && [ -n "$CONTRACT_PASSES" ]; then
 		SCHEMA_ONLY=$(comm -23 <(echo "$SCHEMA_PASSES") <(echo "$CONTRACT_PASSES"))
@@ -336,11 +337,11 @@ if command -v jq &>/dev/null; then
 			SIZE=$(wc -c <"$f" | tr -d ' ')
 			SHA=$(shasum -a 256 "$f" | cut -d' ' -f1)
 			printf '{"path":"%s","size":%s,"sha256":"%s"}\n' "$f" "$SIZE" "$SHA"
-		done | jq -s '{
+		done | jq -s --arg release_version "$RELEASE_VERSION" --arg timestamp "$TIMESTAMP" '{
       "manifest_version": "1.0",
       "skill_name": "codereview",
-      "release_version": "'"$RELEASE_VERSION"'",
-      "timestamp": "'"$TIMESTAMP"'",
+      "release_version": $release_version,
+      "timestamp": $timestamp,
       "files": .,
       "file_count": length,
       "total_bytes": (map(.size) | add)

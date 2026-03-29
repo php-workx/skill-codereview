@@ -11,6 +11,7 @@ from unittest import mock
 from scripts.orchestrate import (
     DEFAULT_CONFIG,
     DiffResult,
+    JUDGE_PROMPT_PARTS,
     PromptBudgetExceeded,
     PromptContext,
     SubprocessError,
@@ -21,6 +22,7 @@ from scripts.orchestrate import (
     _skip_cross_file_planning,
     assemble_expert_panel,
     assemble_explorer_prompt,
+    assemble_judge_prompt,
     assemble_report_envelope,
     build_cross_file_context,
     build_launch_packet,
@@ -1736,6 +1738,175 @@ class BuildLaunchPacketTests(unittest.TestCase):
             kwargs = self._base_kwargs(Path(tmpdir))
             packet = build_launch_packet(**kwargs)
         self.assertIn("spec_source", packet)
+
+
+class AssembleJudgePromptTests(unittest.TestCase):
+    """Tests for assemble_judge_prompt — dir mode, part-file pointer mode, legacy mode."""
+
+    def _write_part_files(self, directory: Path) -> dict[str, str]:
+        """Write 5 JUDGE_PROMPT_PARTS files with distinct content. Returns name→content map."""
+        contents = {}
+        for i, name in enumerate(JUDGE_PROMPT_PARTS):
+            content = f"# Part {i}: {name}\nDistinct content for part {i}.\n"
+            (directory / name).write_text(content, encoding="utf-8")
+            contents[name] = content
+        return contents
+
+    def test_dir_mode(self) -> None:
+        """Passing a directory assembles all JUDGE_PROMPT_PARTS joined by --- separators."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prompt_dir = Path(tmpdir)
+            contents = self._write_part_files(prompt_dir)
+
+            result = assemble_judge_prompt(
+                judge_prompt_file=prompt_dir,
+                explorer_findings=[],
+                spec_requirements=[],
+                scan_results={},
+            )
+
+        for content in contents.values():
+            self.assertIn(content.strip(), result)
+        self.assertIn("---", result)
+
+    def test_part_file_pointer_mode(self) -> None:
+        """Passing a path to one of the part files uses parent dir for all parts."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prompt_dir = Path(tmpdir)
+            contents = self._write_part_files(prompt_dir)
+            # Point to first part file
+            part_file = prompt_dir / JUDGE_PROMPT_PARTS[0]
+
+            result = assemble_judge_prompt(
+                judge_prompt_file=part_file,
+                explorer_findings=[],
+                spec_requirements=[],
+                scan_results={},
+            )
+
+        for content in contents.values():
+            self.assertIn(content.strip(), result)
+        self.assertIn("---", result)
+
+    def test_legacy_single_file_mode(self) -> None:
+        """Passing a single file that is not a JUDGE_PROMPT_PARTS member reads it as-is."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legacy_file = Path(tmpdir) / "reviewer-judge.md"
+            legacy_content = "# Legacy judge prompt\nAll-in-one prompt content.\n"
+            legacy_file.write_text(legacy_content, encoding="utf-8")
+
+            result = assemble_judge_prompt(
+                judge_prompt_file=legacy_file,
+                explorer_findings=[],
+                spec_requirements=[],
+                scan_results={},
+            )
+
+        self.assertIn(legacy_content.strip(), result)
+
+
+class ApplyPreExistingRulesTests(unittest.TestCase):
+    """Unit tests for apply_pre_existing_rules and apply_provenance_boost."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import importlib.util
+
+        enrich_path = (
+            Path(__file__).resolve().parent.parent
+            / "skills"
+            / "codereview"
+            / "scripts"
+            / "enrich-findings.py"
+        )
+        spec = importlib.util.spec_from_file_location("enrich_findings", enrich_path)
+        cls.enrich = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        spec.loader.exec_module(cls.enrich)  # type: ignore[union-attr]
+
+    def test_pre_existing_not_newly_reachable_is_dropped(self) -> None:
+        findings = [
+            {
+                "summary": "old bug",
+                "pre_existing": True,
+                "pre_existing_newly_reachable": False,
+            }
+        ]
+        kept, dropped = self.enrich.apply_pre_existing_rules(findings)
+        self.assertEqual(kept, [])
+        self.assertEqual(dropped, 1)
+
+    def test_pre_existing_newly_reachable_medium_tier_downgraded(self) -> None:
+        findings = [
+            {
+                "summary": "old bug now reachable",
+                "pre_existing": True,
+                "pre_existing_newly_reachable": True,
+                "severity": "medium",
+                "action_tier": "should_fix",
+            }
+        ]
+        kept, dropped = self.enrich.apply_pre_existing_rules(findings)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["action_tier"], "consider")
+
+    def test_pre_existing_newly_reachable_high_tier_unchanged(self) -> None:
+        findings = [
+            {
+                "summary": "high severity newly reachable",
+                "pre_existing": True,
+                "pre_existing_newly_reachable": True,
+                "severity": "high",
+                "action_tier": "must_fix",
+            }
+        ]
+        kept, dropped = self.enrich.apply_pre_existing_rules(findings)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["action_tier"], "must_fix")
+
+    def test_non_pre_existing_finding_unchanged(self) -> None:
+        findings = [
+            {
+                "summary": "new bug",
+                "severity": "medium",
+                "action_tier": "should_fix",
+            }
+        ]
+        kept, dropped = self.enrich.apply_pre_existing_rules(findings)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["action_tier"], "should_fix")
+        self.assertEqual(dropped, 0)
+
+    def test_provenance_autonomous_boosts_stub_finding(self) -> None:
+        findings = [{"summary": "stub implementation used", "action_tier": "consider"}]
+        result = self.enrich.apply_provenance_boost(findings, "autonomous")
+        self.assertEqual(result[0]["action_tier"], "should_fix")
+
+    def test_provenance_human_does_not_boost(self) -> None:
+        findings = [{"summary": "stub implementation used", "action_tier": "consider"}]
+        result = self.enrich.apply_provenance_boost(findings, "human")
+        self.assertEqual(result[0]["action_tier"], "consider")
+
+    def test_provenance_autonomous_password_not_boosted_by_pass_pattern(self) -> None:
+        """'password' contains 'pass' but 'pass' pattern is whole-word — 'password' should not match."""
+        # 'hardcoded' IS in the pattern list, so this would match on 'hardcoded'.
+        # Use a summary that only has 'password' (not any other AI_CODEGEN_PATTERNS term).
+        findings2 = [
+            {"summary": "password stored in plain text", "action_tier": "consider"}
+        ]
+        result = self.enrich.apply_provenance_boost(findings2, "autonomous")
+        # 'password' does not match the \bpass\b pattern (word boundary stops it)
+        self.assertEqual(result[0]["action_tier"], "consider")
+
+    def test_provenance_autonomous_pre_existing_not_boosted(self) -> None:
+        findings = [
+            {
+                "summary": "stub implementation used",
+                "action_tier": "consider",
+                "pre_existing": True,
+            }
+        ]
+        result = self.enrich.apply_provenance_boost(findings, "autonomous")
+        self.assertEqual(result[0]["action_tier"], "consider")
 
 
 if __name__ == "__main__":

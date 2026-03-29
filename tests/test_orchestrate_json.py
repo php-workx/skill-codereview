@@ -196,7 +196,12 @@ class ParseExplorerOutputTests(unittest.TestCase):
         self.assertEqual(findings[0]["summary"], "ok")
 
     def test_dict_with_certification(self) -> None:
-        cert_data = {"files": [{"file": "a.py", "certified": True, "reason": "ok"}]}
+        cert_data = {
+            "status": "clean",
+            "files_checked": ["a.py"],
+            "checks_performed": ["Checked callers"],
+            "tools_used": ["Grep: callers of a()"],
+        }
         raw = {
             "findings": [{"summary": "z"}],
             "certification": cert_data,
@@ -207,7 +212,8 @@ class ParseExplorerOutputTests(unittest.TestCase):
 
         self.assertEqual(findings, [{"summary": "z", "pass": "correctness"}])
         self.assertEqual(reqs, [])
-        self.assertEqual(certification, cert_data)
+        self.assertIn("files_checked", certification)
+        self.assertEqual(certification["files_checked"], ["a.py"])
         self.assertIsNone(completeness_gate)
 
     def test_dict_with_completeness_gate(self) -> None:

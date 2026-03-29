@@ -183,6 +183,7 @@ class PromptContext:
     path_instructions: str = ""
     functions_summary: str = ""
     graph_summary: str = ""
+    provenance: str = ""
 
     def render(self) -> str:
         # Wrap diff in structural delimiters — diff content is untrusted user input
@@ -224,6 +225,7 @@ class PromptContext:
             ),
             ("### Language Standards", self.language_standards),
             ("### Review Instructions", self.review_instructions),
+            ("### Code Provenance", self.provenance),
             ("## Spec/Plan", self.spec),
         ]
         return "\n\n".join(
@@ -712,6 +714,7 @@ def build_launch_packet(
     chunks: list[dict[str, Any]] | None = None,
     triage_result: dict[str, str] | None = None,
     triage_summary: str | None = None,
+    provenance: str = "unknown",
     status: str = "ready",
     message: str | None = None,
     error: str | None = None,
@@ -742,6 +745,7 @@ def build_launch_packet(
         "scan_results": scan_results,
         "spec_file": spec_file,
         "spec_source": spec_source,
+        "provenance": provenance,
         "context_summary": context_summary,
         "_config": filter_config_allowlist(config, CONFIG_ALLOWLIST),
         "chunks": chunks,
@@ -1012,6 +1016,7 @@ def assemble_explorer_prompt(
     path_instructions: str = "",
     functions_summary: str = "",
     graph_summary: str = "",
+    provenance: str = "",
 ) -> PromptContext:
     """Assemble a prompt context for an explorer."""
     pass_prompt = _prompt_path_for_expert(expert_name).read_text(encoding="utf-8")
@@ -1043,6 +1048,7 @@ def assemble_explorer_prompt(
         path_instructions=path_instructions,
         functions_summary=functions_summary,
         graph_summary=graph_summary,
+        provenance=provenance,
     )
 
 
@@ -1590,28 +1596,36 @@ def find_spec_candidates(
 
     Returns a list of candidate dicts with keys: path, mtime, size.
     """
+
+    def _safe_mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
     candidates: list[Path] = []
 
     # 1. Recent plan files in .agents/plans/
     plans_dir = repo_root / ".agents" / "plans"
     if plans_dir.is_dir():
-        for f in sorted(
-            plans_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True
-        )[:3]:
+        for f in sorted(plans_dir.glob("*.md"), key=_safe_mtime, reverse=True)[:3]:
             candidates.append(f)
 
     # 2. Spec/plan files near changed files
-    changed_dirs = {(repo_root / Path(f)).parent for f in changed_files if f}
+    changed_dirs = {
+        d
+        for d in ((repo_root / Path(f)).parent for f in changed_files if f)
+        if d.is_dir() and str(d.resolve()).startswith(str(repo_root.resolve()))
+    }
     for d in changed_dirs:
-        if d.is_dir():
-            for pattern in [
-                "spec*.md",
-                "plan*.md",
-                "SPEC.md",
-                "PLAN.md",
-                "requirements*.md",
-            ]:
-                candidates.extend(d.glob(pattern))
+        for pattern in [
+            "spec*.md",
+            "plan*.md",
+            "SPEC.md",
+            "PLAN.md",
+            "requirements*.md",
+        ]:
+            candidates.extend(d.glob(pattern))
 
     # 3. Common spec locations at repo root
     for name in [
@@ -1637,7 +1651,10 @@ def find_spec_candidates(
             rel = c.relative_to(repo_root)
         except ValueError:
             rel = c
-        stat = c.stat()
+        try:
+            stat = c.stat()
+        except OSError:
+            continue
         result.append(
             {
                 "path": str(rel),
@@ -2266,6 +2283,10 @@ def prepare(args: argparse.Namespace) -> int:
             SKILL_DIR / "prompts" / "reviewer-global-contract.md"
         ).read_text(encoding="utf-8")
         prompt_budget = config.get("token_budget", {}).get("explorer_prompt", 70_000)
+        _provenance_val = getattr(args, "provenance", "unknown")
+        _provenance_content = ""
+        if _provenance_val not in ("unknown", "human"):
+            _provenance_content = f"Code Provenance: {_provenance_val}\n\nSee the Provenance-Aware Investigation section in the Global Contract for risk patterns to check."
         waves: list[dict[str, Any]] = []
         if review_mode == "chunked" and chunks:
             for chunk in chunks:
@@ -2301,6 +2322,7 @@ def prepare(args: argparse.Namespace) -> int:
                         functions_summary=functions_summary,
                         graph_summary=graph_summary,
                         prescan_signals=prescan_signals,
+                        provenance=_provenance_content,
                     )
                     rendered_prompt = check_token_budget(
                         prompt_context,
@@ -2346,6 +2368,7 @@ def prepare(args: argparse.Namespace) -> int:
                     functions_summary=functions_summary,
                     graph_summary=graph_summary,
                     prescan_signals=prescan_signals,
+                    provenance=_provenance_content,
                 )
                 rendered_prompt = check_token_budget(
                     prompt_context,
@@ -2373,8 +2396,6 @@ def prepare(args: argparse.Namespace) -> int:
         _spec_file = getattr(args, "spec", None)
         if _spec_file:
             _spec_source = "file"
-        elif getattr(args, "pr", None) is not None:
-            _spec_source = "pr_body"  # PR body can serve as lightweight spec
         else:
             _spec_source = "none"
         packet = build_launch_packet(
@@ -2394,6 +2415,7 @@ def prepare(args: argparse.Namespace) -> int:
             chunks=chunks,
             triage_result=triage_result,
             triage_summary=triage_summary,
+            provenance=getattr(args, "provenance", "unknown"),
         )
         (session_dir / "launch.json").write_text(
             json.dumps(packet, indent=2), encoding="utf-8"
@@ -2580,7 +2602,10 @@ def assemble_judge_prompt(
         sections.extend(["## Spec File", spec_file])
     if context_summary:
         sections.extend(["## Context Summary", context_summary])
-    return "\n\n".join(section for section in sections if section)
+    result = "\n\n".join(section for section in sections if section)
+    if len(result) > 100_000:
+        progress("judge_prompt_large", chars=len(result), threshold=100_000)
+    return result
 
 
 def post_explorers(args: argparse.Namespace) -> int:
@@ -2619,6 +2644,10 @@ def post_explorers(args: argparse.Namespace) -> int:
     for task in get_all_tasks(launch_packet):
         output_path = Path(task["output_file"])
         name = task["name"]
+        # Strip chunk prefix for chunked mode (e.g., "chunk1-correctness" -> "correctness")
+        pass_name = (
+            name.split("-", 1)[1] if name.startswith("chunk") and "-" in name else name
+        )
         if not output_path.exists():
             explorer_status[name] = {"status": "missing", "findings": 0}
             continue
@@ -2632,7 +2661,7 @@ def post_explorers(args: argparse.Namespace) -> int:
             }
             continue
         findings, requirements, certification, completeness_gate = (
-            parse_explorer_output(raw, name)
+            parse_explorer_output(raw, pass_name)
         )
         if findings is None:
             explorer_status[name] = {"status": "wrong_shape", "findings": 0}
@@ -2649,6 +2678,17 @@ def post_explorers(args: argparse.Namespace) -> int:
                 task["chunk_id"], 0
             ) + len(findings)
 
+    # Deduplicate spec_requirements across chunks
+    seen_req_ids: set[str] = set()
+    unique_requirements: list[dict[str, Any]] = []
+    for req in spec_requirements:
+        req_id = req.get("id", "")
+        if req_id and req_id in seen_req_ids:
+            continue
+        seen_req_ids.add(req_id)
+        unique_requirements.append(req)
+    spec_requirements = unique_requirements
+
     raw_count = len(all_findings)
     all_findings = dedup_exact(all_findings)
     config_floor = launch_packet.get("_config", {}).get("confidence_floor", 0.65)
@@ -2664,14 +2704,18 @@ def post_explorers(args: argparse.Namespace) -> int:
         )
         all_findings = all_findings[:50]
 
-    judge_prompt = assemble_judge_prompt(
-        judge_prompt_file=Path(launch_packet["judge"]["prompt_file"]),
-        explorer_findings=all_findings,
-        spec_requirements=spec_requirements,
-        scan_results=launch_packet.get("scan_results", {}),
-        spec_file=launch_packet.get("spec_file"),
-        context_summary=launch_packet.get("context_summary", ""),
-    )
+    try:
+        judge_prompt = assemble_judge_prompt(
+            judge_prompt_file=Path(launch_packet["judge"]["prompt_file"]),
+            explorer_findings=all_findings,
+            spec_requirements=spec_requirements,
+            scan_results=launch_packet.get("scan_results", {}),
+            spec_file=launch_packet.get("spec_file"),
+            context_summary=launch_packet.get("context_summary", ""),
+        )
+    except (FileNotFoundError, OSError) as exc:
+        progress("post_explorers_error", error=f"Cannot assemble judge prompt: {exc}")
+        return 1
     judge_prompt_path = session_dir / "judge-prompt.md"
     judge_prompt_path.write_text(judge_prompt, encoding="utf-8")
 
@@ -2838,9 +2882,11 @@ def render_strengths(strengths: list[str]) -> str:
 def render_tier(title: str, findings: list[dict[str, Any]], lifecycle_key: str) -> str:
     lines = [f"## {title} ({len(findings)} findings)"]
     for finding in findings:
+        label = " (pre-existing)" if finding.get("pre_existing") else ""
         lines.append(
-            "- {summary} [{severity}] {file}:{line} ({lifecycle})".format(
+            "- {summary}{label} [{severity}] {file}:{line} ({lifecycle})".format(
                 summary=finding.get("summary", ""),
+                label=label,
                 severity=finding.get("severity", "low"),
                 file=finding.get("file", ""),
                 line=finding.get("line", 0),
@@ -2990,6 +3036,10 @@ def finalize(args: argparse.Namespace) -> int:
     code_intel_path = session_dir / "code-intel.json"
     if code_intel_path.exists():
         enrich_cmd.extend(["--code-intel-output", str(code_intel_path)])
+    # Pass provenance when not unknown
+    _provenance = launch_packet.get("provenance", "unknown")
+    if _provenance != "unknown":
+        enrich_cmd.extend(["--provenance", _provenance])
     try:
         enriched = run_subprocess_json(enrich_cmd, cwd=repo_root)
     except Exception as exc:
@@ -3116,6 +3166,13 @@ def finalize(args: argparse.Namespace) -> int:
     md_artifact.write_text(markdown, encoding="utf-8")
     _append_timing(session_dir, "finalize", phase_started)
 
+    _finalize_provenance = launch_packet.get("provenance", "unknown")
+    _preview_provenance = (
+        f"**Provenance:** {_finalize_provenance}\n"
+        if _finalize_provenance != "unknown"
+        else ""
+    )
+    report_preview = _preview_provenance + markdown[:3000]
     finalize_result = {
         "status": "complete",
         "verdict": report["verdict"],
@@ -3124,7 +3181,8 @@ def finalize(args: argparse.Namespace) -> int:
         "json_artifact": str(json_artifact),
         "markdown_artifact": str(md_artifact),
         "session_dir": str(session_dir),
-        "report_preview": markdown[:3000],
+        "report_preview": report_preview,
+        "provenance": _finalize_provenance,
         "validation_status": validation_status,
         "validation_note": validation_note,
         "lifecycle_status": lifecycle_status,
@@ -3219,6 +3277,11 @@ def build_parser() -> argparse.ArgumentParser:
                 help="Enable 'you should add a test for X' suggestions (default: off)",
             )
             command_parser.add_argument("--confidence-floor", type=float)
+            command_parser.add_argument(
+                "--provenance",
+                choices=["human", "ai-assisted", "autonomous", "unknown"],
+                default="unknown",
+            )
             command_parser.add_argument("--no-config", action="store_true")
             command_parser.add_argument("--timeout", type=int, default=1200)
         if name == "finalize":
