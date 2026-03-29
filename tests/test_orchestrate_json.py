@@ -1,6 +1,8 @@
 import unittest
 
 from scripts.orchestrate import (
+    _normalize_jsonish_text,
+    _truncate_at_section_boundary,
     dedup_exact,
     extract_json_from_text,
     parse_explorer_output,
@@ -24,10 +26,35 @@ class ExtractJsonFromTextTests(unittest.TestCase):
         )
 
     def test_extract_smart_quotes(self) -> None:
+        LQ = chr(0x201C)  # left double quotation mark
+        RQ = chr(0x201D)  # right double quotation mark
+        smart_input = (
+            "[{"
+            + LQ
+            + "summary"
+            + RQ
+            + ": "
+            + LQ
+            + "test"
+            + RQ
+            + ", "
+            + LQ
+            + "msg"
+            + RQ
+            + ": "
+            + LQ
+            + "use {x} here"
+            + RQ
+            + "}]"
+        )
         self.assertEqual(
-            extract_json_from_text("[{“summary”: “test”, “msg”: “use {x} here”}]"),
+            extract_json_from_text(smart_input),
             [{"summary": "test", "msg": "use {x} here"}],
         )
+
+    def test_normalize_jsonish_converts_smart_quotes_to_ascii(self) -> None:
+        text = chr(0x201C) + "hello" + chr(0x201D)
+        self.assertEqual(_normalize_jsonish_text(text), '"hello"')
 
     def test_extract_trailing_comma(self) -> None:
         self.assertEqual(extract_json_from_text('[{"a": 1},]'), [{"a": 1}])
@@ -252,6 +279,41 @@ class ParseExplorerOutputTests(unittest.TestCase):
         self.assertEqual(findings, [{"summary": "w", "pass": "correctness"}])
         self.assertIsNone(certification)
         self.assertIsNone(completeness_gate)
+
+
+class TruncateAtSectionBoundaryTests(unittest.TestCase):
+    def test_short_text_unchanged(self) -> None:
+        text = "# Title\nSome content"
+        self.assertEqual(_truncate_at_section_boundary(text, 3000), text)
+
+    def test_truncates_at_h2_boundary(self) -> None:
+        section1 = "# Title\n" + "x" * 2000
+        section2 = "\n## Second\nmore content here"
+        text = section1 + section2
+        result = _truncate_at_section_boundary(text, 3000)
+        self.assertEqual(result, section1)
+        self.assertNotIn("## Second", result)
+
+    def test_truncates_at_h3_boundary(self) -> None:
+        section1 = "# Title\n" + "x" * 2000
+        section2 = "\n### Subsection\nmore content"
+        text = section1 + section2
+        result = _truncate_at_section_boundary(text, 3000)
+        self.assertEqual(result, section1)
+        self.assertNotIn("### Subsection", result)
+
+    def test_no_boundary_falls_back_to_cutoff(self) -> None:
+        text = "a" * 5000
+        result = _truncate_at_section_boundary(text, 3000)
+        self.assertEqual(len(result), 3000)
+
+    def test_prefers_h2_over_h3(self) -> None:
+        # h2 boundary appears after h3 but still before cutoff
+        parts = "x" * 1000 + "\n### Early\n" + "y" * 500 + "\n## Later\n" + "z" * 2000
+        result = _truncate_at_section_boundary(parts, 3000)
+        # rfind picks the last occurrence, so ## Later (the later one) wins
+        self.assertIn("### Early", result)
+        self.assertNotIn("## Later", result)
 
 
 if __name__ == "__main__":

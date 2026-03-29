@@ -49,10 +49,24 @@ from datetime import datetime, timedelta, timezone
 # Constants
 # ---------------------------------------------------------------------------
 
-STOP_WORDS = frozenset([
-    "a", "the", "is", "in", "of", "to", "for", "and", "or", "but",
-    "not", "with", "this", "that",
-])
+STOP_WORDS = frozenset(
+    [
+        "a",
+        "the",
+        "is",
+        "in",
+        "of",
+        "to",
+        "for",
+        "and",
+        "or",
+        "but",
+        "not",
+        "with",
+        "this",
+        "that",
+    ]
+)
 
 SUFFIX_PATTERN = re.compile(r"(ing|ed|tion|ment|ness|ly|ble|er|est)$")
 
@@ -62,6 +76,7 @@ FUZZY_MATCH_THRESHOLD = 0.60
 # ---------------------------------------------------------------------------
 # Normalization & Fingerprinting
 # ---------------------------------------------------------------------------
+
 
 def normalize_summary(summary: str) -> str:
     """Normalize a finding summary for fingerprinting.
@@ -95,7 +110,9 @@ def normalize_summary(summary: str) -> str:
     return " ".join(stemmed)
 
 
-def compute_fingerprint(file_path: str, pass_name: str, severity: str, summary: str) -> str:
+def compute_fingerprint(
+    file_path: str, pass_name: str, severity: str, summary: str
+) -> str:
     """Compute a 12-hex-char fingerprint for a finding.
 
     fingerprint = sha256(file + ":" + pass + ":" + severity + ":" + normalize(summary))[:12]
@@ -113,6 +130,7 @@ def stemmed_tokens(summary: str) -> set:
 # ---------------------------------------------------------------------------
 # Fuzzy Matching
 # ---------------------------------------------------------------------------
+
 
 def fuzzy_match(finding_a: dict, finding_b: dict) -> bool:
     """Check if two findings are a fuzzy match.
@@ -146,6 +164,7 @@ def fuzzy_match(finding_a: dict, finding_b: dict) -> bool:
 # ---------------------------------------------------------------------------
 # Loading Helpers
 # ---------------------------------------------------------------------------
+
 
 def load_json_file(path: str, label: str = "file") -> dict | list | None:
     """Load a JSON file, returning None on missing/malformed files."""
@@ -224,7 +243,9 @@ def load_changed_files(path: str) -> set:
 
 
 def auto_discover_previous_review(
-    scope: str, base_ref: str, head_ref: str = "",
+    scope: str,
+    base_ref: str,
+    head_ref: str = "",
     reviews_dir: str = ".agents/reviews",
 ) -> str | None:
     """Scan .agents/reviews/ for most recent file matching scope, base_ref, and head_ref.
@@ -264,6 +285,7 @@ def auto_discover_previous_review(
 # Atomic Write
 # ---------------------------------------------------------------------------
 
+
 def atomic_write_json(path: str, data: dict | list) -> None:
     """Write JSON to a file using temp-file-plus-rename for atomicity."""
     dir_path = os.path.dirname(os.path.abspath(path))
@@ -286,6 +308,7 @@ def atomic_write_json(path: str, data: dict | list) -> None:
 # ---------------------------------------------------------------------------
 # Core Lifecycle Logic
 # ---------------------------------------------------------------------------
+
 
 def add_fingerprints(findings: list) -> list:
     """Add fingerprint field to each finding."""
@@ -313,7 +336,9 @@ def tag_lifecycle(findings: list, previous_findings: list) -> list:
         return findings
 
     # Build fingerprint index of previous findings
-    prev_fingerprints = {pf.get("fingerprint") for pf in previous_findings if pf.get("fingerprint")}
+    prev_fingerprints = {
+        pf.get("fingerprint") for pf in previous_findings if pf.get("fingerprint")
+    }
 
     for f in findings:
         fp = f.get("fingerprint", "")
@@ -422,10 +447,9 @@ def apply_suppressions(
                 should_resurface = file_path in changed_files
             elif deferred_scope == "pass":
                 # Resurface only if file in CHANGED_FILES AND same pass
-                should_resurface = (
-                    file_path in changed_files
-                    and f.get("pass") == matched_suppression.get("pass")
-                )
+                should_resurface = file_path in changed_files and f.get(
+                    "pass"
+                ) == matched_suppression.get("pass")
             elif deferred_scope == "exact":
                 # Resurface only on exact fingerprint match AND file is in changed files
                 should_resurface = match_type == "exact" and file_path in changed_files
@@ -449,7 +473,9 @@ def apply_suppressions(
     return active, suppressed, deferred_resurfaced_count
 
 
-def compute_lifecycle_summary(active: list, suppressed: list, deferred_resurfaced: int) -> dict:
+def compute_lifecycle_summary(
+    active: list, suppressed: list, deferred_resurfaced: int
+) -> dict:
     """Compute lifecycle summary counts."""
     summary = {
         "new": 0,
@@ -480,7 +506,9 @@ def run_lifecycle(args) -> dict:
         previous_findings = load_previous_review(args.previous_review)
     elif args.scope and args.base_ref:
         discovered = auto_discover_previous_review(
-            args.scope, args.base_ref, head_ref=args.head_ref,
+            args.scope,
+            args.base_ref,
+            head_ref=args.head_ref,
         )
         if discovered:
             print(f"Auto-discovered previous review: {discovered}", file=sys.stderr)
@@ -514,7 +542,9 @@ def run_lifecycle(args) -> dict:
         suppressed = []
 
     # 9. Compute summary
-    lifecycle_summary = compute_lifecycle_summary(findings, suppressed, deferred_resurfaced)
+    lifecycle_summary = compute_lifecycle_summary(
+        findings, suppressed, deferred_resurfaced
+    )
 
     return {
         "findings": findings,
@@ -526,6 +556,7 @@ def run_lifecycle(args) -> dict:
 # ---------------------------------------------------------------------------
 # Suppress Subcommand
 # ---------------------------------------------------------------------------
+
 
 def run_suppress(args) -> None:
     """Suppress a finding from a review artifact."""
@@ -544,7 +575,9 @@ def run_suppress(args) -> None:
             break
 
     if target is None:
-        print(f"ERROR: Finding '{args.finding_id}' not found in review", file=sys.stderr)
+        print(
+            f"ERROR: Finding '{args.finding_id}' not found in review", file=sys.stderr
+        )
         sys.exit(1)
 
     # Compute fingerprint
@@ -599,6 +632,7 @@ def run_suppress(args) -> None:
 # Test Fixtures Runner
 # ---------------------------------------------------------------------------
 
+
 def run_test_fixtures(fixture_path: str) -> None:
     """Run fuzzy matching logic against test fixture pairs and report accuracy."""
     data = load_json_file(fixture_path, "test fixtures file")
@@ -629,15 +663,19 @@ def run_test_fixtures(fixture_path: str) -> None:
 
         # Compute fingerprints
         fp_a = compute_fingerprint(
-            finding_a["file"], finding_a["pass"],
-            finding_a["severity"], finding_a["summary"],
+            finding_a["file"],
+            finding_a["pass"],
+            finding_a["severity"],
+            finding_a["summary"],
         )
         fp_b = compute_fingerprint(
-            finding_b["file"], finding_b["pass"],
-            finding_b["severity"], finding_b["summary"],
+            finding_b["file"],
+            finding_b["pass"],
+            finding_b["severity"],
+            finding_b["summary"],
         )
 
-        actual_exact = (fp_a == fp_b)
+        actual_exact = fp_a == fp_b
         actual_fuzzy = fuzzy_match(finding_a, finding_b)
 
         exact_ok = actual_exact == expected_exact
@@ -670,7 +708,9 @@ def run_test_fixtures(fixture_path: str) -> None:
                 tokens_a = stemmed_tokens(finding_a["summary"])
                 tokens_b = stemmed_tokens(finding_b["summary"])
                 intersection = tokens_a & tokens_b
-                smaller = min(len(tokens_a), len(tokens_b)) if tokens_a and tokens_b else 1
+                smaller = (
+                    min(len(tokens_a), len(tokens_b)) if tokens_a and tokens_b else 1
+                )
                 overlap = len(intersection) / smaller if smaller > 0 else 0
                 print(f"    Fuzzy: expected={expected_fuzzy}, actual={actual_fuzzy}")
                 print(f"    Tokens A: {sorted(tokens_a)}")
@@ -681,11 +721,15 @@ def run_test_fixtures(fixture_path: str) -> None:
 
     print(f"\n{'=' * 50}")
     print(f"Results: {total} pairs tested")
-    print(f"  Exact match:  {exact_correct}/{total} correct "
-          f"({exact_fp} false positives, {exact_fn} false negatives)")
-    print(f"  Fuzzy match:  {fuzzy_correct}/{total} correct "
-          f"({fuzzy_fp} false positives, {fuzzy_fn} false negatives)")
-    all_correct = (exact_correct == total and fuzzy_correct == total)
+    print(
+        f"  Exact match:  {exact_correct}/{total} correct "
+        f"({exact_fp} false positives, {exact_fn} false negatives)"
+    )
+    print(
+        f"  Fuzzy match:  {fuzzy_correct}/{total} correct "
+        f"({fuzzy_fp} false positives, {fuzzy_fn} false negatives)"
+    )
+    all_correct = exact_correct == total and fuzzy_correct == total
     print(f"  Overall: {'ALL PASS' if all_correct else 'FAILURES DETECTED'}")
 
     if not all_correct:
@@ -695,6 +739,7 @@ def run_test_fixtures(fixture_path: str) -> None:
 # ---------------------------------------------------------------------------
 # CLI Argument Parsing
 # ---------------------------------------------------------------------------
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser with subcommands."""
@@ -801,6 +846,7 @@ def build_parser() -> argparse.ArgumentParser:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -822,8 +868,11 @@ def main():
             "findings": [],
             "suppressed_findings": [],
             "lifecycle_summary": {
-                "new": 0, "recurring": 0, "rejected": 0,
-                "deferred": 0, "deferred_resurfaced": 0,
+                "new": 0,
+                "recurring": 0,
+                "rejected": 0,
+                "deferred": 0,
+                "deferred_resurfaced": 0,
             },
         }
         json.dump(output, sys.stdout, indent=2)

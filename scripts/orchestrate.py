@@ -1871,6 +1871,17 @@ def _write_session_marker(session_dir: Path) -> None:
     )
 
 
+def _truncate_at_section_boundary(markdown: str, max_length: int = 3000) -> str:
+    """Truncate markdown at the last section heading before *max_length*."""
+    cutoff = max_length
+    for boundary in ["\n## ", "\n### "]:
+        idx = markdown.rfind(boundary, 0, cutoff)
+        if idx > 0:
+            cutoff = idx
+            break
+    return markdown[:cutoff]
+
+
 def _write_last_review_marker(
     repo_root: Path,
     report: dict[str, Any],
@@ -3457,7 +3468,7 @@ def finalize(args: argparse.Namespace) -> int:
         if _finalize_provenance != "unknown"
         else ""
     )
-    report_preview = _preview_provenance + markdown[:3000]
+    report_preview = _preview_provenance + _truncate_at_section_boundary(markdown, 3000)
 
     # Write last-review marker for "since last review" default
     _write_last_review_marker(repo_root, report, launch_packet)
