@@ -4,6 +4,43 @@
 **Author:** Research session 2026-03-29
 **Depends on:** orchestrate.py (existing chunked infrastructure), code_intel.py, cross_file_planner.py, prescan.py
 **Context:** The current chunked mode is disabled in SKILL.md. The orchestrator can build chunks but uses naive directory-based clustering. This spec upgrades chunked review to first-class status with semantic clustering, hierarchical judgment, and full integration with the explorer-judge pipeline.
+**Research:** Competitive analysis of CodeRabbit, Qodo PR-Agent, and Kodus AI approaches to large diffs. See `.agents/research/2026-03-29-chunking-competitive-landscape.md`.
+
+## Competitive Landscape
+
+Three production platforms handle large diffs differently. Our spec incorporates lessons from each.
+
+### PR-Agent / Qodo Merge — Progressive compression + sequential chunks
+
+PR-Agent sorts files by language priority (most common first), then by token count within each language. Patches are added to the prompt until hitting a token buffer, then overflow files become an "other modified files" summary (names only, no diff). For PRs >600 lines, it splits into max 3 chunks of 32k tokens each with independent AI calls. Results are combined sequentially.
+
+**Key innovations we adopt:**
+- **File sorting by language then token count** — ensures highest-value files are reviewed first. We adopt this in our chunk building (Step 1 anchor identification uses edge weight, but within-chunk file ordering should use language priority).
+- **Asymmetric context expansion** — PR-Agent provides 3 lines before a change but only 1 line after, and dynamically extends to function/class boundaries (up to 8 extra lines). We adopt this: our `code_intel.py functions` output already provides function boundaries — we should use them for context expansion instead of fixed line counts.
+- **"Other modified files" summary** — when patches overflow, PR-Agent keeps file names as a summary instead of silently dropping. We adopt this in our truncation cascade (Phase 4 step 14: truncated diff still lists all files as a manifest).
+
+**What we do differently:** PR-Agent chunks sequentially (each chunk → separate AI call → combine results). We use parallel explorers per chunk with per-chunk judges — architecturally different and allows deeper analysis per chunk.
+
+### CodeRabbit — Per-file review with semantic indexing
+
+CodeRabbit does NOT chunk. Instead, it reviews each file individually with rich cross-file context from a persistent semantic index (Codegraph). It uses multi-model triage: cheaper models for summarization and triage, expensive models only for files identified as needing deep review. Custom diff formats (not standard unified diff) are designed "closer to how humans understand changes."
+
+**Key innovations we adopt:**
+- **Multi-model triage** — cheap model identifies what needs deep review. Our risk-tiered wave ordering achieves similar intent at chunk level. We also adopt file-level triage within chunks: Haiku-tier pre-scan to identify which files in a chunk warrant full explorer attention (future optimization).
+- **Verification agents** — CodeRabbit double-checks review suggestions with dedicated agents. Our judge's Verifier expert (Expert 2) serves the same role.
+- **Multi-stage pipeline with noise filtering** — multiple stages reinforce signal. Our hierarchical judgment (per-chunk → synthesizer → final) is structurally similar.
+
+**What we do differently:** CodeRabbit's per-file approach gives each review call maximum context focus but requires many small LLM calls. Our chunk approach (5-15 files per explorer call) is better suited to our parallel explorer architecture and reduces total LLM calls. CodeRabbit's persistent Codegraph is approximated by our `code_intel.py` at review time — we don't maintain persistent indices across reviews.
+
+### Kodus AI — AST-based pre-filtering + folder-level config
+
+Limited public details on large-diff handling. Key insight: AST-based rules run deterministically before LLM review, reducing noise. Folder-level config inheritance allows different review settings per directory in monorepos.
+
+**What we adopt:** AST-based pre-filtering is similar to our prescan. We should ensure prescan signals are available at chunk-building time to inform risk tier assignment.
+
+### Novel Elements in Our Approach
+
+Our hierarchical judgment (per-chunk judges → cross-chunk synthesizer → final judge) is not used by any of these platforms. PR-Agent combines results sequentially. CodeRabbit doesn't chunk. This is either an advantage (focused context per judge, dedicated cross-chunk analysis) or a risk (untested at scale). The testing strategy in this spec (Layer 4 quality evals) is specifically designed to validate this architecture.
 
 ## Problem
 
@@ -203,6 +240,22 @@ Estimate per-file tokens from diff line count (roughly 4 chars/token, ~80 chars/
 If a single file exceeds `MAX_CHUNK_TOKENS`, it gets its own chunk. The explorer will use progressive truncation internally.
 
 If a cluster exceeds the budget, split at the weakest edge (lowest weight connection between sub-clusters).
+
+#### Step 3b: Dynamic Context Expansion (adopted from PR-Agent)
+
+When building the diff for each chunk, expand context around each hunk asymmetrically:
+
+- **Before the change**: extend to the enclosing function/class boundary (using `code_intel.py functions` output), up to 8 extra lines
+- **After the change**: fixed 1 line of context
+
+This replaces the standard unified diff's symmetric 3-line context. Rationale (from PR-Agent's research): "more context preceding a code change is typically more crucial for understanding the modification than the context following it." The function boundary provides natural semantic boundaries instead of arbitrary line counts.
+
+Implementation: `code_intel.py functions` already provides function start/end lines per file. During `_chunk_diff()`, for each hunk:
+1. Find the enclosing function for the hunk's start line
+2. Extend the "before" context to that function's start line (capped at 8 extra lines)
+3. Keep "after" context at 1 line
+
+This is applied during chunk diff assembly, not during the global diff extraction. Standard mode continues using the existing diff format.
 
 #### Step 4: Risk Tier Assignment
 
@@ -508,6 +561,8 @@ Phase 3 — Compress Tier 1 supporting context (last resort before diff):
 
 Phase 4 — Touch the diff (absolute last resort):
   14. Truncate diff to changed hunks only (drop surrounding context lines)
+  14b. Replace truncated file diffs with "Other Modified Files" manifest
+       (file names + line counts, adopted from PR-Agent's overflow strategy)
   15. If STILL over budget → PromptBudgetExceeded (trigger chunked mode)
 ```
 
