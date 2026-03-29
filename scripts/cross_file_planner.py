@@ -89,12 +89,15 @@ def _try_llm_planning(
             if hasattr(block, "text"):
                 text += block.text
 
-        # Parse JSON from response -- look for a JSON array
-        json_match = re.search(r"\[.*\]", text, re.DOTALL)
+        # Parse JSON from response -- look for array or object with "queries" key
+        json_match = re.search(r"[\[{].*[\]}]", text, re.DOTALL)
         if not json_match:
             return None
 
         raw_queries = json.loads(json_match.group())
+        # Accept both {"queries": [...]} and bare [...]
+        if isinstance(raw_queries, dict):
+            raw_queries = raw_queries.get("queries", [])
         if not isinstance(raw_queries, list):
             return None
 

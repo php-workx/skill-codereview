@@ -1242,6 +1242,12 @@ class TestGraphCache(unittest.TestCase):
                 "    return 42\n"
             )
 
+    def tearDown(self) -> None:
+        import shutil
+
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        shutil.rmtree(self.cache_dir, ignore_errors=True)
+
     def test_graph_cache_miss_builds_and_saves(self) -> None:
         """First run with --cache creates cache file on disk."""
         cache_path = _graph_cache_path(self.cache_dir, self.tmpdir)
