@@ -1048,9 +1048,9 @@ def assemble_expert_panel(
         _structural_expert_signals(functions_data) if functions_data else {}
     )
 
-    # Experts covered by structural detection (when data is available)
+    # Experts covered by structural detection (when data has actual functions)
     structurally_decided: set[str] = set()
-    if functions_data is not None:
+    if functions_data and functions_data.get("functions"):
         structurally_decided = {"concurrency", "api-contract"}
 
     added_lines = _added_lines(diff_result.diff_text)

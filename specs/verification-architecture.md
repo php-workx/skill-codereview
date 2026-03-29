@@ -514,7 +514,7 @@ Add `"verification"` to `CONFIG_ALLOWLIST`.
 
 | Risk | Mitigation |
 |------|-----------|
-| Verification adds 15-40s latency | Threshold gating (≤5 findings → skip Stage 3); Stages 1-2 are cheap |
+| Verification adds 50-140s latency (9 findings typical) | Threshold gating (≤5 findings → skip Stage 3); Stages 1-2 are cheap; per-finding parallelism possible |
 | Feature extractor hallucinates features | Conservative defaults (false for structural, true for speculation) |
 | Verification agent is too aggressive (discards real findings) | Judge still runs Pass 1 verification on `needs_investigation`; `--force-verify` for safety-critical reviews |
 | Strengthened handoffs add prompt length | Same total content, just reordered; no additional LLM calls |

@@ -765,4 +765,4 @@ finding_persistence:
 | Feature | Status | Reason |
 |---------|--------|--------|
 | F4: Multi-model spot-check | Deferred | Needs empirical data on same-family model diversity |
-| F11: Adaptive expert panel | Superseded by Spec A | Full design in `specs/adaptive-expert-selection.md` |
+| Adaptive expert panel (was F11 in earlier drafts) | Superseded by Spec A | Full design in `specs/adaptive-expert-selection.md`. F11 ID now refers to finding persistence only. |
