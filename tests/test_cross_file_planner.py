@@ -227,6 +227,23 @@ class FormatOutputTests(unittest.TestCase):
         self.assertEqual(output["stats"]["queries_executed"], 0)
         self.assertEqual(output["stats"]["total_matches"], 0)
 
+    def test_llm_used_flag_propagated(self) -> None:
+        queries = [
+            {
+                "pattern": "x",
+                "rationale": "test",
+                "risk_level": "high",
+                "category": "consumers",
+                "symbol_name": "x",
+                "file_glob": None,
+            }
+        ]
+        results = {"0": {"query": queries[0], "matches": ["a.py"]}}
+        output_false = _format_output(queries, results, llm_used=False)
+        self.assertFalse(output_false["stats"]["llm_used"])
+        output_true = _format_output(queries, results, llm_used=True)
+        self.assertTrue(output_true["stats"]["llm_used"])
+
 
 class EndToEndPlannerTests(unittest.TestCase):
     """Integration tests for the main() function via subprocess."""

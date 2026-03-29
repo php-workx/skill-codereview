@@ -490,7 +490,7 @@ Do NOT report:
 
 #### Pass Value Assignment
 
-Shell correctness findings use `pass: "reliability"`. Injection findings use `pass: "security"`. Logic bugs use `pass: "correctness"`. The judge deduplicates across pass values by file+line.
+Shell correctness findings use `pass: "reliability"`. Injection findings use `pass: "security"`. Logic bugs use `pass: "correctness"`. The judge deduplicates across pass values semantically (Gatekeeper -> Verifier -> Calibrator), not mechanically by file+line.
 
 ### Expert Interaction Model
 

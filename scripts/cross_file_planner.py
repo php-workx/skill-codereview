@@ -31,6 +31,7 @@ def main() -> None:
 
     # Try LLM planning
     queries = _try_llm_planning(diff_summary, graph_data, model, prompt_path)
+    llm_used = queries is not None
 
     # Fallback to deterministic if LLM failed
     if queries is None:
@@ -43,7 +44,7 @@ def main() -> None:
     results = _enforce_budget(results, queries)
 
     # Format output
-    output = _format_output(queries, results)
+    output = _format_output(queries, results, llm_used=llm_used)
     json.dump(output, sys.stdout, indent=2)
 
 
@@ -253,7 +254,10 @@ def _enforce_budget(
 
 
 def _format_output(
-    queries: list[dict[str, Any]], results: dict[str, Any]
+    queries: list[dict[str, Any]],
+    results: dict[str, Any],
+    *,
+    llm_used: bool = False,
 ) -> dict[str, Any]:
     """Format final output with sections tagged by category."""
     sections: list[dict[str, Any]] = []
@@ -277,7 +281,7 @@ def _format_output(
             "queries_planned": len(queries),
             "queries_executed": len(results),
             "total_matches": sum(len(s["matches"]) for s in sections),
-            "llm_used": False,  # Will be True when LLM actually succeeds
+            "llm_used": llm_used,
         },
     }
 

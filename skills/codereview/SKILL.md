@@ -10,7 +10,7 @@ Use this skill to run a local review end to end. Do not reimplement the pipeline
 ## Quick Start
 
 ```text
-/codereview                                                  # staged changes or HEAD~1
+/codereview                                                  # all uncommitted changes (staged + unstaged) or HEAD~1
 /codereview --base main                                      # entire feature branch
 /codereview --range HEAD~5..HEAD                             # specific commits
 /codereview src/auth/                                        # specific path
@@ -23,7 +23,7 @@ Use this skill to run a local review end to end. Do not reimplement the pipeline
 
 ## When to Use / When NOT to Use
 
-**Use** when you have local changes that would benefit from a structured review before they become a PR. Works on staged changes, commits, branches, ranges, paths, and open PRs.
+**Use** when you have local changes that would benefit from a structured review before they become a PR. Works on uncommitted changes, commits, branches, ranges, paths, and open PRs.
 
 **Do NOT use** for reviewing merged code, auditing entire repositories, or as a replacement for CI checks. This skill reviews diffs, not entire codebases.
 

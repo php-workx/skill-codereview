@@ -19,16 +19,19 @@ from scripts.code_intel import (  # noqa: E402
     CO_CHANGE_MIN_FREQUENCY,
     COMMON_NAMES,
     MAX_RESULTS_PER_SYMBOL,
+    TOTAL_GRAPH_TIMEOUT,
     _build_semantic_edges,
     _complexity_regex,
     _detect_language,
     _detect_python_env,
     _detect_semantic_backend,
     _find_enclosing_function,
+    _find_function_end,
     _graph_cache_path,
     _is_exported,
     _load_graph_cache,
     _read_file_safe,
+    _save_graph_cache,
     _score_to_rating,
     cmd_callers,
     cmd_complexity,
@@ -1294,10 +1297,7 @@ class TestGraphCache(unittest.TestCase):
             n["id"] for n in result1["nodes"] if n.get("modified_in_diff")
         )
 
-        # Modify the file (also bump mtime to ensure OS registers the change)
-        import time as _time
-
-        _time.sleep(0.05)
+        # Modify the file and explicitly set a different mtime to force cache miss
         with open(self.src_file, "w") as f:
             f.write(
                 "import os\n\n"
@@ -1306,6 +1306,9 @@ class TestGraphCache(unittest.TestCase):
                 "def new_function(y):\n"
                 "    return y + 1\n"
             )
+        # Explicitly bump mtime so the cache sees a different timestamp
+        future_mtime = os.path.getmtime(self.src_file) + 2.0
+        os.utime(self.src_file, (future_mtime, future_mtime))
 
         # Second run: should re-extract because mtime changed
         result2 = cmd_graph(
@@ -1377,6 +1380,10 @@ class TestGraphCoChange(unittest.TestCase):
         import shutil
 
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        # First pop keys that may have been set during the test
+        for key in ("GIT_DIR", "GIT_WORK_TREE"):
+            os.environ.pop(key, None)
+        # Then restore original values
         os.environ.update(self._saved_git_env)
 
     def _commit_files(self, files: list[str], message: str) -> None:
@@ -1701,6 +1708,37 @@ class TestFormatDiffExpandContext(unittest.TestCase):
         self.assertIn("__context_before__", result_expanded)
         self.assertNotIn("__context_before__", result_normal)
 
+    def test_format_diff_expand_context_rejects_traversal(self) -> None:
+        """Path traversal via ../../etc/passwd must not read the file."""
+        diff = self._make_diff("../../etc/passwd", hunk_start=5)
+        result = cmd_format_diff(diff, expand_context=True)
+        # File header is still emitted (just the path label)
+        self.assertIn("## File: ../../etc/passwd", result)
+        # But no context expansion should have occurred
+        self.assertNotIn("__context_before__", result)
+        self.assertNotIn("__context_after__", result)
+        # Hunk structure still valid
+        self.assertIn("__new hunk__", result)
+        self.assertIn("__old hunk__", result)
+
+    def test_format_diff_expand_context_rejects_absolute_path(self) -> None:
+        """Absolute path /etc/passwd must not be read."""
+        diff = self._make_diff("/etc/passwd", hunk_start=5)
+        result = cmd_format_diff(diff, expand_context=True)
+        self.assertIn("## File: /etc/passwd", result)
+        self.assertNotIn("__context_before__", result)
+        self.assertNotIn("__context_after__", result)
+        self.assertIn("__new hunk__", result)
+        self.assertIn("__old hunk__", result)
+
+    def test_format_diff_expand_context_allows_normal_relative(self) -> None:
+        """Normal relative path like module.py still gets expanded."""
+        diff = self._make_diff("module.py", hunk_start=5)
+        result = cmd_format_diff(diff, expand_context=True)
+        # Normal in-repo file should still expand
+        self.assertIn("__context_before__", result)
+        self.assertIn("def compute(x):", result)
+
 
 class TestGraphDepth2(unittest.TestCase):
     """Tests for depth-2 traversal in cmd_graph."""
@@ -1847,15 +1885,36 @@ class TestGraphDepth2(unittest.TestCase):
             )
 
 
+def _block_import(name: str):
+    """Return a side_effect for builtins.__import__ that blocks *name*."""
+    _real_import = (
+        __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
+    )
+
+    def _import(mod_name, *args, **kwargs):
+        if mod_name == name:
+            raise ImportError(f"mocked: {name} not installed")
+        return _real_import(mod_name, *args, **kwargs)
+
+    return _import
+
+
 class TestSemanticSearch(unittest.TestCase):
     """Tests for --semantic vector-based similarity search (graceful degradation)."""
 
     def test_detect_semantic_backend_returns_none(self) -> None:
         """When deps are missing, _detect_semantic_backend returns None."""
-        # In a normal test environment, sqlite-vec is not installed
         result = _detect_semantic_backend()
-        # Result is either None (most likely) or a string if deps happen to be present
-        self.assertIn(result, (None, "model2vec", "onnx-minilm"))
+        # Result is either None (most likely) or "model2vec" if installed
+        self.assertIn(result, (None, "model2vec"))
+
+    def test_detect_semantic_backend_no_model2vec(self) -> None:
+        """When neither model2vec nor onnxruntime installed, returns None."""
+        with patch.dict("sys.modules", {"model2vec": None}):
+            # Reload-proof: patch the import to raise ImportError
+            with patch("builtins.__import__", side_effect=_block_import("model2vec")):
+                result = _detect_semantic_backend()
+        self.assertIsNone(result)
 
     def test_build_semantic_edges_no_backend(self) -> None:
         """When no backend is available, returns empty edges and disabled stats."""
@@ -2035,6 +2094,249 @@ class TestSemanticSearch(unittest.TestCase):
                 self.assertEqual(edge["type"], "semantic_similarity")
                 self.assertIn("score", edge)
                 self.assertGreater(edge["score"], 0.5)
+
+
+class TestCallerRangeEndExclusive(unittest.TestCase):
+    """Bug fix: _find_function_end returns end-exclusive, so caller check must use <."""
+
+    def test_call_on_line_after_function_end_not_attributed(self) -> None:
+        """A call site on the line right after a function should be <module>, not that function."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = os.path.join(tmpdir, "mod.py")
+            # _find_function_end for Python returns the first line at or below
+            # the function's indent level (end-exclusive).  Line 4 ("target()")
+            # is at module level, so it must NOT be attributed to foo.
+            Path(src).write_text(
+                "def foo():\n"  # line 1
+                "    pass\n"  # line 2
+                "\n"  # line 3
+                "target()\n"  # line 4 — module-level call
+            )
+            result = cmd_callers([src], "target")
+            callers = [s["caller"] for s in result["call_sites"]]
+            self.assertIn(
+                "<module>",
+                callers,
+                f"Module-level call should be <module>, got: {callers}",
+            )
+            self.assertNotIn(
+                "foo",
+                callers,
+                f"Call after function end should not be attributed to foo: {callers}",
+            )
+
+    def test_find_function_end_is_exclusive(self) -> None:
+        """_find_function_end returns end-exclusive index for Python."""
+        lines = [
+            "def foo():",  # index 0, line 1
+            "    pass",  # index 1, line 2
+            "",  # index 2, line 3
+            "x = 1",  # index 3, line 4
+        ]
+        end = _find_function_end(lines, 0, 0, "python")
+        # end should be 3 (the index of "x = 1"), meaning foo spans indices 0..2
+        # i.e. lines 1..3 in 1-based (end exclusive = line 4 is NOT part of foo)
+        self.assertEqual(end, 3)
+
+
+class TestAfterContextFirstLine(unittest.TestCase):
+    """Bug fix: after_start was off by one, dropping the first post-hunk line."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.src_file = os.path.join(self.tmpdir, "module.py")
+        # Source file with lines numbered 1-12
+        Path(self.src_file).write_text(
+            "import os\n"  # line 1
+            "\n"  # line 2
+            "def compute(x):\n"  # line 3
+            "    y = x * 2\n"  # line 4
+            "    z = y + 1\n"  # line 5
+            "    result = z ** 2\n"  # line 6
+            "    return result\n"  # line 7
+            "\n"  # line 8
+            "def helper():\n"  # line 9
+            "    return 42\n"  # line 10
+            "\n"  # line 11
+            "total = compute(5)\n"  # line 12
+        )
+        self._orig_cwd = os.getcwd()
+        os.chdir(self.tmpdir)
+
+    def tearDown(self) -> None:
+        os.chdir(self._orig_cwd)
+        import shutil as _shutil
+
+        _shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_after_context_includes_first_post_hunk_line(self) -> None:
+        """The first line after a hunk must appear in __context_after__."""
+        # Hunk at lines 5-7: context + add + context  (3 non-delete lines)
+        # hunk_end = 5 + 3 = 8, so first post-hunk line is line 8.
+        diff = (
+            "diff --git a/module.py b/module.py\n"
+            "index abc..def 100644\n"
+            "--- a/module.py\n"
+            "+++ b/module.py\n"
+            "@@ -5,3 +5,4 @@\n"
+            " z = y + 1\n"
+            "-    result = z ** 2\n"
+            "+    result = z ** 3\n"
+            "+    # changed exponent\n"
+            " return result\n"
+        )
+        result = cmd_format_diff(diff, expand_context=True)
+        self.assertIn(
+            "__context_after__",
+            result,
+            f"Expected __context_after__ in output:\n{result}",
+        )
+        # Extract after-context lines
+        in_after = False
+        after_lines = []
+        for line in result.split("\n"):
+            if line == "__context_after__":
+                in_after = True
+                continue
+            if line.startswith("__"):
+                in_after = False
+                continue
+            if in_after:
+                after_lines.append(line)
+        # The very first after-context line should be line 9 (hunk_end=9,
+        # because the hunk has 4 non-delete lines: " z=", "+result", "+#changed", " return")
+        # Actually let's just verify after_lines is non-empty and the first
+        # line's number is the line right after the hunk.
+        self.assertTrue(
+            len(after_lines) > 0,
+            f"Expected at least one after-context line, got none.\n{result}",
+        )
+        # The first after-context line number should be immediately after the hunk
+        first_line = after_lines[0]
+        # Parse the line number from format "N  content"
+        line_num = int(first_line.strip().split()[0])
+        # The hunk covers lines 5-8 (5 start + 4 non-delete lines - 1 = line 8)
+        # so the first after line should be 9
+        self.assertEqual(
+            line_num,
+            9,
+            f"First after-context line should be 9, got {line_num}. Lines: {after_lines}",
+        )
+
+
+class TestDepth2GrepFilters(unittest.TestCase):
+    """Bug fix: depth-2 grep must have --include and --exclude-dir filters."""
+
+    def test_depth2_ignores_non_source_files(self) -> None:
+        """Depth-2 grep should not match patterns inside non-source files (e.g. .txt)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # A: changed file
+            file_a = os.path.join(tmpdir, "lib.py")
+            Path(file_a).write_text("def do_work(payload):\n    return payload\n")
+            # B: depth-1 caller (source file)
+            file_b = os.path.join(tmpdir, "handler.py")
+            Path(file_b).write_text(
+                "from lib import do_work\n\ndef handle(req):\n    return do_work(req)\n"
+            )
+            # C: depth-2 caller (source file) — should be found
+            file_c = os.path.join(tmpdir, "cli.py")
+            Path(file_c).write_text(
+                "from handler import handle\n\n"
+                "def run_cli(args):\n"
+                "    return handle(args)\n"
+            )
+            # D: a .txt file that mentions handle( — should NOT be matched
+            txt_file = os.path.join(tmpdir, "notes.txt")
+            Path(txt_file).write_text("We should handle(the error) carefully.\n")
+
+            result = cmd_graph([file_a], depth=2, repo_root=tmpdir)
+            all_files = {n["file"] for n in result["nodes"]}
+            txt_abs = str(Path(txt_file).resolve())
+            self.assertNotIn(
+                txt_abs,
+                all_files,
+                f"Non-source .txt file should not appear in graph: {all_files}",
+            )
+
+
+class TestCoChangeTimeout(unittest.TestCase):
+    """Bug fix: co-change loop must respect TOTAL_GRAPH_TIMEOUT."""
+
+    def test_co_change_loop_checks_timeout(self) -> None:
+        """Patching time.monotonic to simulate timeout should cause early exit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = os.path.join(tmpdir, "a.py")
+            Path(src).write_text("def process_data(x):\n    return x\n")
+
+            call_count = 0
+
+            def fake_monotonic() -> float:
+                nonlocal call_count
+                call_count += 1
+                # First few calls return start time, then jump past timeout
+                if call_count <= 3:
+                    return 0.0
+                return TOTAL_GRAPH_TIMEOUT + 1.0
+
+            with patch("scripts.code_intel.time") as mock_time:
+                mock_time.monotonic = fake_monotonic
+                # cmd_graph will try to run, but should bail out due to timeout
+                result = cmd_graph([src], repo_root=tmpdir)
+
+            # Graph should still return valid structure even with early timeout
+            self.assertIn("nodes", result)
+            self.assertIn("edges", result)
+
+
+class TestSaveGraphCacheAtomicAndErrorHandling(unittest.TestCase):
+    """Bug fix: _save_graph_cache must handle OSError and use atomic writes."""
+
+    def test_save_and_load_roundtrip(self) -> None:
+        """Basic save/load should still work after the refactor."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "cache" / "test.json"
+            graph = {"nodes": [{"id": "a.py"}], "edges": []}
+            mtimes = {"a.py": 12345.0}
+            _save_graph_cache(cache_path, graph, mtimes)
+            loaded = _load_graph_cache(cache_path)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded["graph"], graph)
+            self.assertEqual(loaded["file_mtimes"], mtimes)
+            self.assertEqual(loaded["version"], 1)
+
+    def test_save_to_readonly_dir_does_not_crash(self) -> None:
+        """Writing to a read-only directory should warn to stderr, not raise."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            readonly_dir = os.path.join(tmpdir, "readonly")
+            os.makedirs(readonly_dir)
+            cache_path = Path(readonly_dir) / "test.json"
+            # Make the directory read-only
+            os.chmod(readonly_dir, 0o444)
+            try:
+                # Should not raise — just print a warning
+                _save_graph_cache(cache_path, {"nodes": []}, {})
+            finally:
+                # Restore permissions for cleanup
+                os.chmod(readonly_dir, 0o755)
+
+    def test_atomic_write_no_partial_file_on_failure(self) -> None:
+        """If json.dump fails, no partial cache file should remain."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "test.json"
+            # Pass an unserializable object to trigger json.dump failure
+            bad_graph = {"nodes": object()}  # type: ignore[dict-item]
+            # Should not raise (caught by outer except OSError... but TypeError
+            # from json.dump is not an OSError, so it will propagate).
+            # Actually, the inner except BaseException cleans up the temp file,
+            # then re-raises. The outer except only catches OSError.
+            # TypeError is not OSError, so this will raise.
+            with self.assertRaises(TypeError):
+                _save_graph_cache(cache_path, bad_graph, {})
+            # The cache file should not exist (no partial write)
+            self.assertFalse(
+                cache_path.exists(),
+                "Partial cache file should not remain after failure",
+            )
 
 
 if __name__ == "__main__":

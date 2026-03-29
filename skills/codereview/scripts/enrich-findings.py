@@ -263,25 +263,18 @@ def apply_code_intel(findings: list, graph: dict) -> list:
     if not graph:
         return findings
 
-    # Build a map: file -> caller count from graph nodes/edges
-    nodes = graph.get("nodes", [])
+    # Build a map: file -> caller count from graph edges
     edges = graph.get("edges", [])
 
-    # Count how many callers reference each file (target)
+    # Count how many callers reference each file (target) — only "calls" edges
     file_caller_count: dict[str, int] = {}
     for edge in edges:
+        if edge.get("type") != "calls":
+            continue
         target = edge.get("to", "")
         if target:
-            file_caller_count[target] = file_caller_count.get(target, 0) + 1
-
-    # Also check nodes directly if they carry caller info
-    for node in nodes:
-        node_file = node.get("file", "")
-        callers = node.get("callers", [])
-        if node_file and callers:
-            file_caller_count[node_file] = max(
-                file_caller_count.get(node_file, 0), len(callers)
-            )
+            target_file = target.split("::")[0] if "::" in target else target
+            file_caller_count[target_file] = file_caller_count.get(target_file, 0) + 1
 
     for f in findings:
         file_path = f.get("file", "")

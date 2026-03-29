@@ -52,7 +52,7 @@ Judge (receives only confirmed + needs_investigation findings)
 
 New prompt: `prompts/reviewer-feature-extractor.md`
 
-**11 boolean features per finding:**
+**13 boolean features per finding:**
 
 | Feature | Category | What it detects |
 |---------|----------|----------------|
@@ -63,12 +63,22 @@ New prompt: `prompts/reviewer-feature-extractor.md`
 | `has_missing_error_handling` | Structural defect | Error path leads to crash, corruption, or undefined state |
 | `has_redundant_work_in_loop` | Structural defect | Repeated I/O, allocation, or computation inside a loop |
 | `has_unsafe_data_flow` | Structural defect | Untrusted input reaches sensitive operation without validation |
+| `has_concurrency_issue` | Structural defect | Race condition, deadlock, shared mutable state without synchronization |
 | `requires_assumed_behavior` | Speculation | Finding depends on how unseen/imported code behaves |
 | `is_quality_opinion` | Opinion | Style/preference/best-practice, not a defect |
 | `targets_unchanged_code` | Scope violation | References code not changed in the diff |
-| `improved_code_is_correct` | Meta | The suggested fix compiles/works |
+| `targets_test_code` | Low-value | Finding is about test file code (mock setup, fixture, test helper) |
+| `duplicates_linter_result` | Redundancy | Finding restates what a linter/tool already caught |
 
-Derived from Kodus-AI's 13-feature SafeguardFeatureSet (dropped `requires_assumed_workload` and `is_anti_pattern_only` — merged into existing features).
+Derived from Kodus-AI's 13-feature SafeguardFeatureSet, adapted for our use case. Key differences:
+- Dropped `requires_assumed_workload` (merged into `requires_assumed_behavior`)
+- Dropped `is_anti_pattern_only` (merged into `is_quality_opinion`)
+- Removed `improved_code_is_correct` — fix validation is owned entirely by Feature 5 (Stage 3), which has tool access
+- Added `has_concurrency_issue` — race conditions need a structural feature; without it they hit no structural feature and survive triage only by accident
+- Added `targets_test_code` — test files generate disproportionate low-value findings; detectable from file paths (`test`, `spec`, `__tests__`, `fixtures`) and code patterns (`assert`, `mock`, `@pytest.fixture`)
+- Added `duplicates_linter_result` — catches linter duplicates at triage (free) instead of in the judge (expensive)
+
+**Batch size limit:** Max 15 findings per extraction call. If more findings exist, split into multiple calls. At 30+ findings, extraction quality degrades significantly (attention fatigue on later items).
 
 **Feature extraction prompt** (`prompts/reviewer-feature-extractor.md`):
 
@@ -79,6 +89,8 @@ that describe its nature. Do NOT make keep/discard decisions — just extract fe
 Rules:
 - Only set structural defect features to true if the finding points to specific
   lines in the diff where the defect occurs.
+- Set `has_concurrency_issue` to true if the finding describes a race condition,
+  deadlock, or unsynchronized shared mutable state.
 - Set `requires_assumed_behavior` to true if verifying the finding requires knowing
   how code you cannot see behaves (imported functions, external APIs, database schema).
   Exception: if the defect is structural (unsafe for ANY input), it's a defect even
@@ -88,15 +100,46 @@ Rules:
   documentation suggestions.
 - Set `targets_unchanged_code` to true if the finding's cited lines are all
   in unchanged code (- lines or context lines, not + lines).
+- Set `targets_test_code` to true if the finding's file path contains `test`,
+  `spec`, `__tests__`, or `fixtures`, OR the code uses test framework patterns
+  (assert, mock, @pytest.fixture, describe/it).
+- Set `duplicates_linter_result` to true if the finding restates what a
+  deterministic tool (semgrep, shellcheck, eslint, etc.) would catch.
 - When uncertain, prefer false for structural features (avoids false keeps)
-  and true for speculation features (avoids false keeps).
+  and true for speculation/low-value features (avoids false keeps).
+
+Output ONLY the JSON below. No commentary before or after.
+```
+
+**Calibration examples** (include in the prompt for consistent extraction):
+
+```
+Example 1 — Nil map write on error path:
+Finding: "Map m is nil when skip path is taken, write on line 45 will panic"
+Features: { "has_resource_leak": false, "has_inconsistent_contract": false,
+  "has_wrong_algorithm": false, "has_data_exposure": false,
+  "has_missing_error_handling": true, "has_redundant_work_in_loop": false,
+  "has_unsafe_data_flow": false, "has_concurrency_issue": false,
+  "requires_assumed_behavior": false, "is_quality_opinion": false,
+  "targets_unchanged_code": false, "targets_test_code": false,
+  "duplicates_linter_result": false }
+
+Example 2 — Style suggestion in test file:
+Finding: "Consider using table-driven tests instead of repeated assertions"
+Features: { "has_resource_leak": false, "has_inconsistent_contract": false,
+  "has_wrong_algorithm": false, "has_data_exposure": false,
+  "has_missing_error_handling": false, "has_redundant_work_in_loop": false,
+  "has_unsafe_data_flow": false, "has_concurrency_issue": false,
+  "requires_assumed_behavior": false, "is_quality_opinion": true,
+  "targets_unchanged_code": false, "targets_test_code": true,
+  "duplicates_linter_result": false }
 ```
 
 **Output format:**
 ```json
 {
   "findings": [
-    { "finding_index": 0, "features": { "has_resource_leak": false, "has_inconsistent_contract": false, ... } },
+    { "finding_index": 0, "features": { "has_resource_leak": false, ... } },
     ...
   ]
 }
@@ -110,16 +153,20 @@ Rules:
 STRUCTURAL_DEFECT_FEATURES = [
     'has_resource_leak', 'has_inconsistent_contract', 'has_wrong_algorithm',
     'has_data_exposure', 'has_missing_error_handling', 'has_redundant_work_in_loop',
-    'has_unsafe_data_flow'
+    'has_unsafe_data_flow', 'has_concurrency_issue'
 ]
 
 def triage(features: dict) -> str:
     has_structural = any(features.get(f) for f in STRUCTURAL_DEFECT_FEATURES)
     has_speculation = features.get('requires_assumed_behavior', False)
-    has_hard_discard = (features.get('is_quality_opinion', False)
-                        or features.get('targets_unchanged_code', False))
+    has_hard_discard = (
+        features.get('is_quality_opinion', False)
+        or features.get('targets_unchanged_code', False)
+        or features.get('targets_test_code', False)
+        or features.get('duplicates_linter_result', False)
+    )
 
-    # Rule 1: Hard discard — quality opinions and out-of-scope
+    # Rule 1: Hard discard — quality opinions, out-of-scope, test-only, linter dupes
     if has_hard_discard:
         return 'discard'
 
@@ -127,9 +174,10 @@ def triage(features: dict) -> str:
     if has_speculation and has_structural:
         return 'verify'
 
-    # Rule 3: Speculation only — no structural defect to justify it
+    # Rule 3: Speculation only — may still be real (e.g., unhandled API error),
+    #          send to verification rather than discarding
     if has_speculation and not has_structural:
-        return 'discard'
+        return 'verify'
 
     # Rule 4: Structural defect without speculation — may be mitigated
     if has_structural and not has_speculation:
@@ -137,6 +185,16 @@ def triage(features: dict) -> str:
 
     # Rule 5: No signals — conservative, send to verification
     return 'verify'
+```
+
+**Index validation:** Before triage runs, validate that Stage 1 output `finding_index` values match the input finding indices. If misaligned (off-by-one, reordered, missing), log a warning and fall back to sending all findings to verification (skip triage).
+
+**Triage logging:** Log every triage decision with the features and rule that fired. This enables calibrating triage rules over time — without it, discards are invisible and rules can't be tuned.
+
+```python
+# Log format per finding:
+progress("triage_decision", finding_index=i, decision="discard",
+         rule="rule_1_hard_discard", features={"is_quality_opinion": True, ...})
 ```
 
 **No `keep` outcome.** All non-discarded findings go through verification. Even "obvious" structural defects may be mitigated by code the explorer didn't see. The verification agent fast-tracks clear defects anyway.
@@ -162,17 +220,24 @@ is real. You are skeptical by default — you are looking for reasons the findin
 is WRONG, not reasons it is right.
 ```
 
+**Execution model:** One LLM call per finding. Each finding needs independent tool use to read different code locations. All findings routed to `verify` by triage are verified — no artificial cap.
+
+**Tool budget:** Up to 10 tool calls per finding (Read, Grep, Glob). This is enough for cross-module defense tracing (read cited line → check caller → check caller's caller → check middleware → check config).
+
 **Per finding:**
 1. **Read the code.** Use Read to examine the file and line cited in the finding. If the file or line doesn't exist, verdict: `false_positive`.
 2. **Check the claim.** Does the code actually do what the finding says?
    - If the finding says "nil map write panics" — is the map actually nil at that point?
    - If the finding says "SQL injection" — is the input actually user-controlled?
    - If the finding says "missing error check" — is there a check the explorer missed?
-3. **Search for defenses.** Use Grep to look for:
-   - Input validation before the cited line
-   - Error handling wrapping the cited code
-   - Guard clauses or early returns that prevent the failure mode
-   - Configuration or middleware that addresses the concern
+3. **Search for defenses.** Use Grep to actively search for evidence that DISPROVES the finding. Search strategies by defect type:
+   - **Resource leak** → search for close()/release()/defer in same function and callers
+   - **Wrong algorithm** → trace with concrete input values, verify output is wrong
+   - **Race condition** → search for concurrent callers, check if lock/mutex exists
+   - **Missing error handling** → check if error is handled by caller or middleware
+   - **Interface change** → search for callers, verify they handle the new behavior
+   - **Dead code path** → search for actual callers that reach the path
+   - **Unsafe data flow** → search for input validation before the cited line, sanitization middleware
 4. **Generate verification evidence.** For each finding you verify, produce a `verification_command` — a concrete grep/read command that anyone can run to confirm the finding independently. This is not optional for `confirmed` findings. Examples:
    - `grep -n 'validate_token' src/auth/*.py` → "No validation function found in auth module"
    - `Read src/api/handler.py:42-55` → "Error return on line 48 is caught by middleware at line 12"
@@ -180,17 +245,18 @@ is WRONG, not reasons it is right.
    Inspired by CodeRabbit's verification agent: "comments come with receipts."
 5. **Assign verdict:** `confirmed` | `false_positive` | `needs_investigation`
 
-**Default:** If cannot confirm defect within 3 tool calls → `false_positive`. Skeptical by default.
+**Default verdict:** If after using up to 10 tool calls you cannot find concrete evidence that the defect exists AND you cannot find evidence that disproves it, assign `false_positive`. Err on the side of discarding — it's better to miss a speculative finding than to burden the judge with noise.
 
-**Quick reference by defect type:**
-- Resource leak → search for close()/release()/defer in same function and callers
-- Wrong algorithm → trace with concrete input values, verify output is wrong
-- Race condition → search for concurrent callers, check if lock/mutex exists
-- Missing error handling → check if error is handled by caller or middleware
-- Interface change → search for callers, verify they handle the new behavior
-- Dead code path → search for actual callers that reach the path
+**`needs_investigation` meaning:** The verifier has exhausted its 10-call budget AND believes the finding is likely real but cannot produce a `verification_command` that proves it. This is a genuine dead end — complex dynamic dispatch, runtime configuration, external system behavior — not a budget constraint. The judge does NOT re-investigate with tools; it makes a keep/drop judgment based on the verifier's notes about what was checked and what remained unclear.
 
-**Output:** JSON array of `{finding_index, verdict, reason, verification_command}`.
+**Output:** Produce ONLY the JSON array below. No commentary before or after. Use lowercase verdict strings exactly: `confirmed`, `false_positive`, `needs_investigation`.
+
+```json
+[
+  { "finding_index": 0, "verdict": "confirmed", "reason": "...", "verification_command": "grep ..." },
+  { "finding_index": 1, "verdict": "false_positive", "reason": "...", "verification_command": null }
+]
+```
 
 #### Activation Threshold
 
@@ -217,6 +283,7 @@ In chunked mode (large diffs split into file-based chunks), verification runs **
 - **Step 4-L (chunked):** Each chunk runs its own Stage 1-2-3 verification pipeline
 - **Final judge:** Receives pre-verified findings from all chunks
 - Verification is always active in chunked mode when `always_in_chunked: true` (default), regardless of the per-chunk finding count
+- **Cross-chunk consistency:** The same defect pattern could get `confirmed` in chunk A but `false_positive` in chunk B because different context is available per chunk. The final judge should cross-reference verdicts for similar patterns across chunks and flag inconsistencies. If the same pattern (e.g., "missing nil check on map write") appears in multiple chunks with contradictory verdicts, the judge should investigate the discrepancy and prefer the `confirmed` verdict (false negatives are worse than false positives at the judge stage).
 
 #### SKILL.md Integration
 
@@ -255,23 +322,17 @@ by triage, 2 false positives from verification → 7 findings for judge review")
 
 Judge prompt gains a note: "These findings have been pre-verified. Findings marked `needs_investigation` require your deeper analysis. Do not re-verify `confirmed` findings — focus on synthesis, deduplication, and verdict."
 
-### Feature 1: Two-Pass Judge
+### Feature 1: Strengthen Judge Panel Handoffs (replaces Two-Pass Judge)
 
-Restructure the judge's internal workflow into two distinct, non-interleaved passes.
+The original design proposed restructuring the judge into two explicit passes (verify then synthesize). Per persona review feedback, this is **redundant** with the existing 4-stage Expert Panel (Gatekeeper → Verifier → Calibrator → Synthesizer) which already enforces verify-before-synthesize sequentially.
 
-**Pass 1: Adversarial Verification (existing Steps 1-3)**
-- Step 1: Existence check (verify cited code exists)
-- Step 2: Contradiction check (search for defenses that disprove findings)
-- Step 3: Investigate `needs_investigation` findings from verifier
+Instead of adding a new abstraction layer, strengthen the existing handoffs:
 
-**Pass 2: Synthesis (existing Steps 4-6)**
-- Step 4: Root-cause grouping and deduplication
-- Step 5: Severity calibration and cross-explorer gap analysis
-- Step 6: Verdict and report
+1. **Gatekeeper → Verifier handoff:** When Feature 0 is active, the Gatekeeper receives pre-verified findings. Add to Gatekeeper instructions: "These findings have been pre-verified by a dedicated verification agent. Findings marked `confirmed` do not need re-verification — focus on the 6 auto-discard rules. Findings marked `needs_investigation` should be passed to the Verifier for deeper analysis based on the verifier's notes."
 
-**Key rule:** Complete ALL of Pass 1 before starting Pass 2. No interleaving. Prevents the judge from keeping a finding because it "fits the narrative."
+2. **Verifier handling of `needs_investigation`:** The judge's Verifier stage investigates `needs_investigation` findings using the verifier's notes (what was checked, what remained unclear). It applies judgment — keep or drop — but does NOT repeat the tool-based investigation already performed by the Stage 3 verification agent.
 
-**When Feature 0 is skipped** (below threshold or `--no-verify`): Judge runs both passes on all explorer findings. Two-pass structure still helps — forces verify-before-synthesize even without separate verification agent.
+3. **When Feature 0 is skipped** (below threshold or `--no-verify`): The judge's existing 4-stage panel runs on all explorer findings as today. No change needed — the panel already sequences verification (Gatekeeper + Verifier) before synthesis (Calibrator + Synthesizer).
 
 ### Feature 5: Fix Validation
 
@@ -279,13 +340,15 @@ Extension to Feature 0's verification agent. When verifying a finding, also chec
 
 **Added to `prompts/reviewer-verifier.md`:**
 
-**What gets checked (code breakage only — NOT quality):**
+**Hard checks (trigger `fix_valid: false`):**
 - Undefined variables/functions/types introduced by the fix
 - Type mismatches in typed languages
 - Missing imports required by the fix
 - Syntax errors in the suggested code
-- Fix changes behavior beyond what the finding describes (scope creep)
-- Fix requires changes in other files (not self-contained)
+
+**Soft checks (noted in finding, do NOT trigger `fix_valid: false`):**
+- Fix changes behavior beyond what the finding describes (scope creep) — too subjective for reliable LLM assessment (~40-50% accuracy per prompt engineer review). Noted as: "Fix may change behavior beyond the reported issue."
+- Fix requires changes in other files (not self-contained) — noted as: "Fix may require changes in other files."
 
 **Explicitly NOT checked:**
 - Style or formatting of the fix
@@ -349,53 +412,57 @@ Key Kodus-AI lessons:
 
 ### Wave 1: Feature Extraction + Triage (F0 Stages 1-2)
 
-1. Write `prompts/reviewer-feature-extractor.md` with 11-feature schema and extraction instructions
-2. Implement `triage_findings()` in `scripts/triage-findings.py` (or add to `enrich-findings.py`)
-3. Add Step 4a.5 (Stages 1-2 only) to SKILL.md
-4. Tests: feature extraction output schema, triage routing logic for each rule, threshold gating
+1. Write `prompts/reviewer-feature-extractor.md` with 13-feature schema, calibration examples, and output enforcement
+2. Implement `triage_findings()` in `scripts/triage-findings.py` (or add to `enrich-findings.py`) with index validation
+3. Implement batch splitting (max 15 findings per extraction call)
+4. Add structured triage logging (every decision with features and rule that fired)
+5. Add Step 4a.5 (Stages 1-2 only) to SKILL.md
+6. Tests: feature extraction output schema (13 features), batch splitting at >15 findings, triage routing logic for each rule (5 rules), index validation, threshold gating, triage log format
 
-### Wave 2: Verification Agent + Fix Validation (F0 Stage 3 + F5)
+### Wave 2: Verification Agent + Fix Validation + Judge Handoffs (F0 Stage 3 + F5 + F1)
 
-1. Write `prompts/reviewer-verifier.md` with verification instructions + fix validation
+1. Write `prompts/reviewer-verifier.md` with verification instructions (10-call budget, one call per finding, inline search strategies, strict output enforcement) + fix validation (4 hard checks, 2 soft signals)
 2. Add Stage 3 to Step 4a.5 in SKILL.md
 3. Wire verification verdicts into judge input
-4. Update judge prompt with pre-verified findings note
-5. Tests: verification verdicts, fix validation, `confirmed`/`false_positive`/`needs_investigation` routing
-
-### Wave 3: Two-Pass Judge (F1)
-
-1. Restructure `prompts/reviewer-judge.md` into Pass 1 (verification) / Pass 2 (synthesis)
-2. Add explicit "complete Pass 1 before starting Pass 2" instruction
-3. Tests: judge produces correct output with pre-verified findings, judge handles `needs_investigation`
+4. Update judge prompt: Gatekeeper instructions for pre-verified findings, Verifier handling of `needs_investigation` based on verifier notes
+5. Tests: verification verdicts, fix validation (hard vs soft checks), `confirmed`/`false_positive`/`needs_investigation` routing, output JSON format compliance, chunked mode cross-chunk consistency
 
 ---
 
 ## Acceptance Criteria
 
 ### Wave 1
-- [ ] Feature extractor produces 11 boolean features per finding
+- [ ] Feature extractor produces 13 boolean features per finding
+- [ ] Batch splitting: >15 findings → 2+ extraction calls
+- [ ] Calibration examples included in feature extraction prompt
+- [ ] Output enforcement: "Output ONLY the JSON" instruction present
+- [ ] Index validation: misaligned finding indices → warning + fallback to verify-all
 - [ ] Triage: `is_quality_opinion` → discard
 - [ ] Triage: `targets_unchanged_code` → discard
+- [ ] Triage: `targets_test_code` → discard
+- [ ] Triage: `duplicates_linter_result` → discard
 - [ ] Triage: structural + speculation → verify
-- [ ] Triage: speculation only → discard
+- [ ] Triage: speculation only → verify (NOT discard)
 - [ ] Triage: structural only → verify
 - [ ] Triage: no signals → verify
+- [ ] Every triage decision logged with features and rule
 - [ ] Stages 1-2 run even below threshold when `always_triage: true`
 - [ ] Stages 1-2 skipped when `--no-verify`
 
 ### Wave 2
-- [ ] Verifier reads cited code and searches for defenses
+- [ ] Verifier: one call per finding, up to 10 tool calls per finding
+- [ ] Verifier reads cited code and searches for defenses using inline search strategies
 - [ ] Verifier produces `verification_command` for confirmed findings
-- [ ] Verifier defaults to `false_positive` when can't confirm within 3 tool calls
-- [ ] Fix validation: broken fix → `fix_valid: false`, finding still confirmed
-- [ ] Judge receives only confirmed + needs_investigation findings
-- [ ] Judge prompt includes pre-verified findings note
-
-### Wave 3
-- [ ] Judge completes Pass 1 (verification) before starting Pass 2 (synthesis)
-- [ ] Judge handles `needs_investigation` findings with deeper analysis in Pass 1
+- [ ] Verifier defaults to `false_positive` when can't confirm within 10 tool calls
+- [ ] `needs_investigation` = genuinely unresolvable after thorough investigation (not budget constraint)
+- [ ] Fix validation hard checks: undefined names, type mismatches, missing imports, syntax errors → `fix_valid: false`
+- [ ] Fix validation soft signals: scope creep, not self-contained → noted in finding, NOT `fix_valid: false`
+- [ ] Verifier output: strict JSON format, lowercase verdict strings only
+- [ ] Judge Gatekeeper: skips re-verification for `confirmed` findings
+- [ ] Judge Verifier stage: handles `needs_investigation` using verifier notes (no tool re-investigation)
 - [ ] Judge strips broken fixes (`fix_valid: false`) from output
-- [ ] Two-pass structure works correctly when verification is skipped (below threshold)
+- [ ] Judge receives only confirmed + needs_investigation findings
+- [ ] Chunked mode: cross-chunk verdict consistency check by judge
 
 ---
 
@@ -403,12 +470,12 @@ Key Kodus-AI lessons:
 
 | Operation | Expected | Hard Limit |
 |-----------|----------|------------|
-| Stage 1: Feature extraction (batch) | 3-8s | 30s |
-| Stage 2: Deterministic triage | <50ms | 200ms |
-| Stage 3: Verification agent | 10-30s | 120s |
-| Total verification overhead | 15-40s | 150s |
+| Stage 1: Feature extraction (per batch of ≤15) | 3-8s | 30s |
+| Stage 2: Deterministic triage + index validation | <50ms | 200ms |
+| Stage 3: Verification agent (per finding, up to 10 tool calls) | 5-15s | 60s |
+| Total verification overhead (9 findings typical) | 50-140s | 300s |
 
-**Cost:** Stage 1 is one LLM call (~$0.05). Stage 3 is one LLM call with tool use (~$0.20-0.50 depending on finding count). Total: ~$0.25-0.55 per verified review.
+**Cost:** Stage 1 is 1-2 LLM calls (~$0.05-0.10). Stage 3 is one LLM call per verified finding (~$0.10-0.25 each). For a typical review with 9 findings routed to verify: ~$1.00-2.50 total verification cost. This is justified by the precision improvement — without verification, the judge processes 30-90% more findings, most of which are noise.
 
 ---
 

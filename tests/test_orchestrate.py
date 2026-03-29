@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from scripts.orchestrate import (
+    CONFIG_ALLOWLIST,
     DEFAULT_CONFIG,
     DiffResult,
     PromptBudgetExceeded,
@@ -59,6 +60,10 @@ class OrchestratePlumbingTests(unittest.TestCase):
                 self._saved_git_env[key] = os.environ.pop(key)
 
     def tearDown(self) -> None:
+        # First pop keys that may have been set during the test
+        for key in ("GIT_DIR", "GIT_WORK_TREE"):
+            os.environ.pop(key, None)
+        # Then restore original values
         os.environ.update(self._saved_git_env)
 
     def test_help_lists_expected_subcommands(self) -> None:
@@ -127,6 +132,13 @@ class OrchestratePlumbingTests(unittest.TestCase):
         self.assertEqual(config["confidence_floor"], 0.65)
         self.assertEqual(config["large_diff"], DEFAULT_CONFIG["large_diff"])
         self.assertEqual(config["ignore_paths"], ["vendor/"])
+
+    def test_load_config_rejects_invalid_minimum_severity(self) -> None:
+        fake_yaml = mock.Mock()
+        fake_yaml.safe_load.return_value = {"minimum_severity": "ultra"}
+        with mock.patch("scripts.orchestrate.yaml", fake_yaml):
+            with self.assertRaises(ValueError):
+                load_config(TESTS_DIR / "fixtures" / "orchestrate" / "codereview.yaml")
 
     def test_assemble_expert_panel_always_includes_core_experts(self) -> None:
         diff_result = DiffResult(
@@ -336,11 +348,11 @@ class OrchestratePlumbingTests(unittest.TestCase):
         self.assertEqual(result.changed_files, ["tracked.txt"])
         self.assertIn("+two", result.diff_text)
 
-    def test_extract_diff_staged_mode_falls_back_to_commit_when_empty(self) -> None:
+    def test_extract_diff_worktree_mode_falls_back_to_commit_when_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = self._init_repo_with_feature_commit(Path(tmpdir))
 
-            result = extract_diff(repo_root=repo, mode="staged")
+            result = extract_diff(repo_root=repo, mode="worktree")
 
         self.assertEqual(result.changed_files, ["tracked.txt"])
         self.assertIn("+two", result.diff_text)
@@ -803,6 +815,98 @@ class OrchestratePlumbingTests(unittest.TestCase):
             review_dir = repo_root / ".agents" / "reviews"
             self.assertTrue(any(review_dir.glob("*.json")))
             self.assertTrue(any(review_dir.glob("*.md")))
+
+    def test_finalize_survives_marker_oserror(self) -> None:
+        """finalize() returns 0 even when _write_last_review_marker raises OSError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            session_dir = repo_root / "session"
+            session_dir.mkdir(parents=True)
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
+            (session_dir / "changed-files.txt").write_text(
+                "scripts/orchestrate.py\n", encoding="utf-8"
+            )
+            judge_output = json.loads(
+                (
+                    TESTS_DIR / "fixtures" / "orchestrate" / "mock-judge-output.json"
+                ).read_text(encoding="utf-8")
+            )
+            judge_output_path = session_dir / "judge.json"
+            judge_output_path.write_text(json.dumps(judge_output), encoding="utf-8")
+
+            launch_packet = {
+                "review_id": "review-123",
+                "session_dir": str(session_dir),
+                "scope": "branch",
+                "base_ref": "main",
+                "head_ref": "feature",
+                "mode": "standard",
+                "_config": {"confidence_floor": 0.65},
+                "tool_status": {
+                    "semgrep": {"status": "ran", "finding_count": 1, "note": None}
+                },
+                "diff_result": {"changed_files": ["scripts/orchestrate.py"]},
+                "scan_results": {"findings": []},
+            }
+            (session_dir / "launch.json").write_text(
+                json.dumps(launch_packet), encoding="utf-8"
+            )
+
+            enriched = {
+                "findings": [
+                    {
+                        "id": "security-allowlist-01",
+                        "source": "ai",
+                        "pass": "security",
+                        "severity": "high",
+                        "confidence": 0.93,
+                        "file": "scripts/orchestrate.py",
+                        "line": 89,
+                        "summary": "Subprocess command is assembled from untrusted input",
+                        "failure_mode": "A crafted review task could execute arbitrary commands.",
+                        "fix": "Require allowlisted commands before dispatch.",
+                        "action_tier": "must_fix",
+                    }
+                ],
+                "tier_summary": {"must_fix": 1, "should_fix": 0, "consider": 0},
+                "dropped": {"below_confidence_floor": 0},
+            }
+            lifecycle = {
+                "findings": enriched["findings"],
+                "suppressed_findings": [],
+                "lifecycle_summary": {
+                    "new": 1,
+                    "recurring": 0,
+                    "rejected": 0,
+                    "deferred": 0,
+                    "deferred_resurfaced": 0,
+                },
+            }
+
+            with (
+                mock.patch(
+                    "scripts.orchestrate.detect_repo_root", return_value=repo_root
+                ),
+                mock.patch(
+                    "scripts.orchestrate.run_subprocess_json",
+                    side_effect=[enriched, lifecycle],
+                ),
+                mock.patch(
+                    "scripts.orchestrate.subprocess.run",
+                    return_value=subprocess.CompletedProcess(["bash"], 0, "", ""),
+                ),
+                mock.patch(
+                    "scripts.orchestrate._write_last_review_marker",
+                    side_effect=PermissionError("read-only filesystem"),
+                ),
+                mock.patch("scripts.orchestrate.progress") as mock_progress,
+            ):
+                result = finalize(Namespace(session_dir=session_dir, judge_output=None))
+
+            self.assertEqual(result, 0)
+            # Verify the error was reported via progress
+            progress_events = [c.args[0] for c in mock_progress.call_args_list]
+            self.assertIn("last_review_marker_failed", progress_events)
 
     @staticmethod
     def _git_env() -> dict[str, str]:
@@ -1997,7 +2101,7 @@ class LastReviewMarkerTests(unittest.TestCase):
         report = {"verdict": "FIX_REQUIRED"}
         launch_packet = {
             "base_ref": "",
-            "scope": "staged",
+            "scope": "worktree",
             "head_ref": "INDEX",
             "changed_files": [],
         }
@@ -2031,6 +2135,14 @@ class LastReviewMarkerTests(unittest.TestCase):
         marker = json.loads((self.cache_dir / "last-review.json").read_text())
         self.assertNotIn("old", marker)
         self.assertEqual(marker["head_sha"], "newsha")
+
+
+class ConfigAllowlistTests(unittest.TestCase):
+    def test_allowlist_contains_minimum_severity(self) -> None:
+        self.assertIn("minimum_severity", CONFIG_ALLOWLIST)
+
+    def test_allowlist_contains_suggest_missing_tests(self) -> None:
+        self.assertIn("suggest_missing_tests", CONFIG_ALLOWLIST)
 
 
 if __name__ == "__main__":

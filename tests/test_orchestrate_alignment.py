@@ -193,6 +193,8 @@ class OrchestrateAlignmentTests(unittest.TestCase):
                 launch["_config"]["confidence_floor"],
                 DEFAULT_CONFIG["confidence_floor"],
             )
+            self.assertIn("minimum_severity", launch["_config"])
+            self.assertIn("suggest_missing_tests", launch["_config"])
 
     def test_finalize_writes_finalize_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -16,7 +16,6 @@ import json
 import os
 import re
 import sys
-from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +117,7 @@ CI_PATTERNS = [
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def find_project_root(filepath: str, repo_root: str) -> tuple:
     """Walk up from filepath to find nearest project root marker.
@@ -253,7 +253,7 @@ def extract_pyproject_project_scripts(filepath: str) -> list:
             if in_section:
                 if stripped.startswith("["):
                     break  # new section
-                m = re.match(r'^([a-zA-Z][a-zA-Z0-9_-]*)\s*=', stripped)
+                m = re.match(r"^([a-zA-Z][a-zA-Z0-9_-]*)\s*=", stripped)
                 if m:
                     keys.append(m.group(1))
     except (OSError, IOError):
@@ -281,9 +281,7 @@ def extract_cargo_info(filepath: str) -> dict:
         if members_match:
             block = members_match.group(1)
             # Look for members = [...]
-            members_line = re.search(
-                r'members\s*=\s*\[(.*?)\]', block, re.DOTALL
-            )
+            members_line = re.search(r"members\s*=\s*\[(.*?)\]", block, re.DOTALL)
             if members_line:
                 for m in re.finditer(r'"([^"]+)"', members_line.group(1)):
                     info["workspace_members"].append(m.group(1))
@@ -298,7 +296,7 @@ def extract_cargo_info(filepath: str) -> dict:
             if in_dev_deps:
                 if stripped.startswith("["):
                     break
-                m = re.match(r'^([a-zA-Z][a-zA-Z0-9_-]*)\s*=', stripped)
+                m = re.match(r"^([a-zA-Z][a-zA-Z0-9_-]*)\s*=", stripped)
                 if m:
                     info["dev_dependencies"].append(m.group(1))
     except (OSError, IOError):
@@ -396,7 +394,10 @@ def extract_gemfile_info(filepath: str) -> dict:
                         has_rails = True
     except (OSError, IOError):
         pass
-    return {"gems": gems[:20], "has_rails": has_rails}  # Cap at 20 to keep output compact
+    return {
+        "gems": gems[:20],
+        "has_rails": has_rails,
+    }  # Cap at 20 to keep output compact
 
 
 def extract_pom_info(filepath: str) -> dict:
@@ -543,9 +544,7 @@ def find_ci_files(repo_root: str) -> list:
         try:
             for entry in sorted(os.listdir(workflows_dir)):
                 if entry.endswith((".yml", ".yaml")):
-                    ci_files.append(
-                        os.path.join(".github", "workflows", entry)
-                    )
+                    ci_files.append(os.path.join(".github", "workflows", entry))
         except OSError:
             pass
 
@@ -642,15 +641,9 @@ def collect_build_files(root_abs: str, root_rel: str) -> list:
     for marker in PROJECT_MARKERS:
         if marker in entries:
             abs_path = os.path.join(root_abs, marker)
-            rel_path = (
-                os.path.join(root_rel, marker)
-                if root_rel != "."
-                else marker
-            )
+            rel_path = os.path.join(root_rel, marker) if root_rel != "." else marker
             if os.path.isfile(abs_path):
-                build_files.append(
-                    build_file_entry(abs_path, rel_path, marker)
-                )
+                build_files.append(build_file_entry(abs_path, rel_path, marker))
 
     return build_files
 
@@ -658,6 +651,7 @@ def collect_build_files(root_abs: str, root_rel: str) -> list:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     # Read changed files from stdin (fail-open on binary/encoding errors)
@@ -668,7 +662,9 @@ def main():
             if line:
                 changed_files.append(line)
     except UnicodeDecodeError:
-        print("WARNING: binary data on stdin, skipping remaining input", file=sys.stderr)
+        print(
+            "WARNING: binary data on stdin, skipping remaining input", file=sys.stderr
+        )
 
     if not changed_files:
         # No input — output an empty profile
@@ -694,8 +690,10 @@ def main():
         root_rel, marker = find_project_root(filepath, repo_root)
         # Skip paths that find_project_root flagged as outside repo
         # (returns "." with None marker when path escapes repo root)
-        if root_rel == "." and marker is None and (
-            os.path.isabs(filepath) or filepath.startswith("..")
+        if (
+            root_rel == "."
+            and marker is None
+            and (os.path.isabs(filepath) or filepath.startswith(".."))
         ):
             continue
         if root_rel not in contexts:
@@ -717,11 +715,7 @@ def main():
     # Build context entries
     context_list = []
     for root_rel, ctx_data in sorted(contexts.items()):
-        root_abs = (
-            os.path.join(repo_root, root_rel)
-            if root_rel != "."
-            else repo_root
-        )
+        root_abs = os.path.join(repo_root, root_rel) if root_rel != "." else repo_root
         marker = ctx_data["marker"]
         language = detect_language(marker, root_rel, repo_root)
 
@@ -732,13 +726,9 @@ def main():
         # parent but we have root="."), ensure we still report something
         if not build_files and marker:
             marker_abs = os.path.join(root_abs, marker)
-            marker_rel = (
-                os.path.join(root_rel, marker) if root_rel != "." else marker
-            )
+            marker_rel = os.path.join(root_rel, marker) if root_rel != "." else marker
             if os.path.isfile(marker_abs):
-                build_files.append(
-                    build_file_entry(marker_abs, marker_rel, marker)
-                )
+                build_files.append(build_file_entry(marker_abs, marker_rel, marker))
 
         # Find tool configs
         tool_configs = find_tool_configs(root_abs, root_rel)

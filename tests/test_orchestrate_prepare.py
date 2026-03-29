@@ -39,6 +39,13 @@ class OrchestratePrepareTests(unittest.TestCase):
                 self._saved_git_env[key] = os.environ.pop(key)
 
     def tearDown(self) -> None:
+        # Clean up format-diff temp dir if it was created
+        if hasattr(self, "_fmt_tmpdir"):
+            self._fmt_tmpdir.cleanup()
+        # First pop keys that may have been set during the test
+        for key in ("GIT_DIR", "GIT_WORK_TREE"):
+            os.environ.pop(key, None)
+        # Then restore original values
         os.environ.update(self._saved_git_env)
 
     def test_extract_diff_base_mode_returns_changed_files_and_diff_text(self) -> None:
@@ -398,20 +405,20 @@ class OrchestratePrepareTests(unittest.TestCase):
             self.assertEqual(launch["status"], "empty")
             self.assertEqual(launch["message"], "No changes found to review")
 
-    def test_extract_diff_staged_mode_with_staged_files(self) -> None:
-        """extract_diff in staged mode returns staged files when they exist."""
+    def test_extract_diff_worktree_mode_with_staged_files(self) -> None:
+        """extract_diff in worktree mode returns staged files when they exist."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = self._init_repo(Path(tmpdir))
             # Modify and stage a file (but don't commit)
             (repo / "tracked.txt").write_text("one\nstaged change\n", encoding="utf-8")
             self._run(["git", "add", "tracked.txt"], cwd=repo)
 
-            result = extract_diff(repo_root=repo, mode="staged")
+            result = extract_diff(repo_root=repo, mode="worktree")
 
         self.assertIsInstance(result, DiffResult)
         self.assertIn("tracked.txt", result.changed_files)
         self.assertIn("+staged change", result.diff_text)
-        self.assertEqual(result.mode, "staged")
+        self.assertEqual(result.mode, "worktree")
 
     def test_prepare_refuses_non_session_directory_with_existing_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -446,7 +453,8 @@ class OrchestratePrepareTests(unittest.TestCase):
 
         Returns (exit_code, session_dir, run_subprocess_text_mock).
         """
-        tmpdir = tempfile.mkdtemp()
+        self._fmt_tmpdir = tempfile.TemporaryDirectory()
+        tmpdir = self._fmt_tmpdir.name
         session_dir = Path(tmpdir) / "session"
         session_dir.mkdir(parents=True, exist_ok=True)
         (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
@@ -679,6 +687,84 @@ class OrchestratePrepareTests(unittest.TestCase):
         ]
         self.assertEqual(len(format_diff_calls), 1, "Should not expand large diffs")
         self.assertNotIn("--expand-context", format_diff_calls[0].args[0])
+
+    def test_prepare_expand_context_failure_emits_progress(self) -> None:
+        """When --expand-context format-diff fails, a progress event is emitted."""
+        short_formatted = "short formatted"
+        call_count = {"n": 0}
+
+        def format_diff_responses(command, cwd=None, timeout=None, input_text=None):
+            call_count["n"] += 1
+            if "--expand-context" in command:
+                raise RuntimeError("expand failed")
+            return short_formatted
+
+        text_mock = mock.MagicMock(side_effect=format_diff_responses)
+
+        tmpdir = tempfile.mkdtemp()
+        session_dir = Path(tmpdir) / "session"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
+
+        args = Namespace(
+            session_dir=session_dir,
+            no_config=True,
+            spec=None,
+            spec_scope=None,
+            base="main",
+            mode="base",
+        )
+        diff_result = DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base="abc123",
+            changed_files=["tracked.txt"],
+            diff_text="@@\n+two\n",
+        )
+
+        def fake_json_run(command, cwd=None, timeout=None, input_text=None):
+            script_name = next(
+                Path(part).name for part in command if part.endswith((".py", ".sh"))
+            )
+            if script_name == "code_intel.py":
+                sub = command[-1] if len(command) > 2 else "complexity"
+                script_name = f"code_intel.py:{sub}"
+            mapping = {
+                "discover-project.py": {"language": "python"},
+                "code_intel.py:complexity": {
+                    "hotspots": [],
+                    "analyzer": "regex-only",
+                    "tool_status": {},
+                },
+                "code_intel.py:functions": {"functions": []},
+                "code_intel.py:graph": {},
+                "git-risk.sh": {"tiers": []},
+                "run-scans.sh": {"findings": [], "tool_status": {}},
+                "coverage-collect.py": {"coverage": []},
+                "prescan.py": {},
+            }
+            return mapping.get(script_name, {})
+
+        with (
+            mock.patch("scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT),
+            mock.patch("scripts.orchestrate.extract_diff", return_value=diff_result),
+            mock.patch(
+                "scripts.orchestrate.run_subprocess_json", side_effect=fake_json_run
+            ),
+            mock.patch("scripts.orchestrate.run_subprocess_text", text_mock),
+            mock.patch("scripts.orchestrate.progress") as mock_progress,
+        ):
+            result = prepare(args)
+
+        self.assertEqual(result, 0)
+
+        # Verify the expand failure was reported via progress
+        progress_events = [c.args[0] for c in mock_progress.call_args_list]
+        self.assertIn("format_diff_expand_failed", progress_events)
+
+        # The non-expanded formatted diff should still be used
+        saved = (session_dir / "diff-formatted.patch").read_text(encoding="utf-8")
+        self.assertEqual(saved, short_formatted)
 
     def test_prepare_raw_diff_preserved_for_scans(self) -> None:
         """Raw diff is saved to diff.patch even when format-diff succeeds."""

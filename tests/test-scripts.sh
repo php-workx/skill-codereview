@@ -197,11 +197,11 @@ assert_json_field "--no-llm-prompts: no llm_prompt fields" "$ENRICH_NO_LLM" \
 # 2m. --code-intel-output: severity boost for high-caller findings
 cat >$TEST_TMPDIR/test-graph.json <<'GJSON'
 {"nodes": [], "edges": [
-  {"from": "src/main.py", "to": "src/auth.py"},
-  {"from": "src/views.py", "to": "src/auth.py"},
-  {"from": "src/api.py", "to": "src/auth.py"},
-  {"from": "src/admin.py", "to": "src/auth.py"},
-  {"from": "src/main.py", "to": "src/utils.py"}
+  {"from": "src/main.py", "to": "src/auth.py", "type": "calls"},
+  {"from": "src/views.py", "to": "src/auth.py", "type": "calls"},
+  {"from": "src/api.py", "to": "src/auth.py", "type": "calls"},
+  {"from": "src/admin.py", "to": "src/auth.py", "type": "calls"},
+  {"from": "src/main.py", "to": "src/utils.py", "type": "calls"}
 ]}
 GJSON
 ENRICH_INTEL=$(python3 "$SCRIPTS/enrich-findings.py" \

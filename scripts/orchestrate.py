@@ -845,7 +845,15 @@ def load_config(
     loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(loaded, dict):
         raise ValueError(".codereview.yaml must parse to a mapping")
-    return deep_merge(DEFAULT_CONFIG, loaded)
+    config = deep_merge(DEFAULT_CONFIG, loaded)
+    VALID_SEVERITIES = {"low", "medium", "high", "critical"}
+    min_sev = config.get("minimum_severity")
+    if min_sev is not None and min_sev not in VALID_SEVERITIES:
+        raise ValueError(
+            f"Invalid minimum_severity: {min_sev!r}. "
+            f"Must be one of: {', '.join(sorted(VALID_SEVERITIES))}"
+        )
+    return config
 
 
 def _apply_cli_config_overrides(
@@ -1398,7 +1406,7 @@ def extract_diff(
             max_diff_bytes=max_diff_bytes,
         )
 
-    if mode == "staged":
+    if mode == "worktree":
         # Check for any working tree changes (staged + unstaged) against HEAD
         worktree_files = _changed_files_for_command(
             repo_root,
@@ -1951,7 +1959,7 @@ def _determine_diff_mode(args: argparse.Namespace) -> str:
         return "path"
     if getattr(args, "base", None):
         return "base"
-    return "staged"
+    return "worktree"
 
 
 def _changed_files_input(changed_files: list[str]) -> str:
@@ -2052,7 +2060,7 @@ def _format_prescan_context(prescan_json: dict[str, Any]) -> str:
 def _scan_base_ref(diff_result: DiffResult) -> str:
     if diff_result.base_ref:
         return diff_result.base_ref
-    if diff_result.mode == "staged":
+    if diff_result.mode == "worktree":
         return "HEAD"
     return "HEAD~1"
 
@@ -2342,6 +2350,7 @@ def prepare(args: argparse.Namespace) -> int:
             progress("format_diff_failed", error=str(exc))
 
         # Budget-aware expansion: if formatted diff is small, re-run with more context
+        # Note: --expand-context runs even without tree-sitter; falls back to keyword heuristic
         prompt_budget_cfg = config.get("token_budget", {}).get(
             "explorer_prompt", 70_000
         )
@@ -2362,8 +2371,8 @@ def prepare(args: argparse.Namespace) -> int:
                     (session_dir / "diff-formatted.patch").write_text(
                         formatted_diff, encoding="utf-8"
                     )
-            except Exception:
-                pass  # keep non-expanded formatted diff
+            except Exception as exc:
+                progress("format_diff_expand_failed", error=str(exc))
 
         # Build a DiffResult with formatted diff for explorer prompts only;
         # raw diff stays for deterministic tools (scans, prescan already ran).
@@ -2886,7 +2895,14 @@ def assemble_report_envelope(
         "findings": final_findings,
         "suppressed_findings": lifecycle.get("suppressed_findings", []),
         "tier_summary": tier_summary,
-        "dropped": enriched.get("dropped", {"below_confidence_floor": 0}),
+        "dropped": enriched.get(
+            "dropped",
+            {
+                "below_confidence_floor": 0,
+                "below_minimum_severity": 0,
+                "downgraded_to_medium": 0,
+            },
+        ),
         "lifecycle_summary": lifecycle.get(
             "lifecycle_summary",
             {
@@ -3221,7 +3237,10 @@ def finalize(args: argparse.Namespace) -> int:
     _append_timing(session_dir, "finalize", phase_started)
 
     # Write last-review marker for "since last review" default
-    _write_last_review_marker(repo_root, report, launch_packet)
+    try:
+        _write_last_review_marker(repo_root, report, launch_packet)
+    except OSError as exc:
+        progress("last_review_marker_failed", error=str(exc))
 
     finalize_result = {
         "status": "complete",
