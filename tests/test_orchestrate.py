@@ -15,10 +15,13 @@ from scripts.orchestrate import (
     PromptBudgetExceeded,
     PromptContext,
     SubprocessError,
+    _CROSS_FILE_DEFAULT_CATEGORIES,
+    _CROSS_FILE_ROUTING,
     _cleanup_stale_session,
     _apply_spec_scope,
     _chunk_diff,
     _count_changed_lines_for_file,
+    _filter_cross_file_for_expert,
     _skip_cross_file_planning,
     assemble_expert_panel,
     assemble_explorer_prompt,
@@ -588,6 +591,48 @@ class OrchestratePlumbingTests(unittest.TestCase):
             launch = json.loads((session_dir / "launch.json").read_text())
             self.assertEqual(launch["status"], "timeout")
             self.assertIn("Global timeout exceeded", launch["error"])
+
+    def test_prepare_budget_exceeded_writes_error_launch_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir) / "session"
+            args = Namespace(
+                session_dir=session_dir,
+                no_config=True,
+                spec=None,
+                spec_scope=None,
+                base="main",
+                mode="base",
+                timeout=5,
+            )
+
+            diff_result = DiffResult(
+                mode="base",
+                base_ref="main",
+                merge_base="abc123",
+                changed_files=["tracked.txt"],
+                diff_text="@@\n+two\n",
+            )
+
+            with (
+                mock.patch(
+                    "scripts.orchestrate.extract_diff", return_value=diff_result
+                ),
+                mock.patch(
+                    "scripts.orchestrate.run_subprocess_json",
+                    side_effect=PromptBudgetExceeded(
+                        "Prompt exceeds 70000 token budget"
+                    ),
+                ),
+                mock.patch(
+                    "scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT
+                ),
+            ):
+                result = prepare(args)
+
+            self.assertEqual(result, 1)
+            launch = json.loads((session_dir / "launch.json").read_text())
+            self.assertEqual(launch["status"], "budget_exceeded")
+            self.assertIn("70000 token budget", launch["error"])
 
     def test_post_explorers_writes_deduped_judge_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1546,51 +1591,436 @@ class CrossFilePlanningTests(unittest.TestCase):
         )
         self.assertEqual(result, "")
 
-    def test_returns_sections_for_valid_functions(self) -> None:
-        functions_data = {
-            "functions": [
-                {"name": "create_token", "file": "auth.py"},
-                {"name": "verify_user", "file": "auth.py"},
-            ]
+    @mock.patch("scripts.orchestrate.run_subprocess_json")
+    @mock.patch("scripts.orchestrate.detect_repo_root")
+    def test_calls_planner_script(self, mock_root, mock_run) -> None:
+        mock_root.return_value = Path("/tmp/repo")
+        mock_run.return_value = {
+            "sections": [
+                {
+                    "category": "consumers",
+                    "header": "create_token — callers of create_token() changed in auth.py",
+                    "matches": ["api/handler.py", "tests/test_auth.py"],
+                    "risk_level": "high",
+                },
+            ],
+            "stats": {
+                "queries_planned": 1,
+                "queries_executed": 1,
+                "total_matches": 2,
+                "llm_used": False,
+            },
         }
+        functions_data = {"functions": [{"name": "create_token", "file": "auth.py"}]}
         result = build_cross_file_context(
             diff_summary="some diff",
             graph_data=None,
             functions_data=functions_data,
             config=DEFAULT_CONFIG,
         )
-        self.assertIn("#### create_token", result)
-        self.assertIn("#### verify_user", result)
-        self.assertIn("callers of create_token()", result)
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args
+        # Verify the script path ends with cross_file_planner.py
+        cmd = call_args[0][0]
+        self.assertTrue(cmd[1].endswith("cross_file_planner.py"))
+        # Verify input_text contains the functions_data
+        input_json = json.loads(call_args[1]["input_text"])
+        self.assertEqual(input_json["functions_data"], functions_data)
+        self.assertEqual(input_json["diff_summary"], "some diff")
+        self.assertIsNotNone(result)
 
-    def test_caps_at_10_functions(self) -> None:
-        functions_data = {
-            "functions": [{"name": f"func_{i}", "file": "mod.py"} for i in range(15)]
+    @mock.patch("scripts.orchestrate.run_subprocess_json")
+    @mock.patch("scripts.orchestrate.detect_repo_root")
+    def test_formats_sections_with_category_tags(self, mock_root, mock_run) -> None:
+        mock_root.return_value = Path("/tmp/repo")
+        mock_run.return_value = {
+            "sections": [
+                {
+                    "category": "consumers",
+                    "header": "create_token — callers of create_token() changed in auth.py",
+                    "matches": ["api/handler.py"],
+                    "risk_level": "high",
+                },
+                {
+                    "category": "test_impl",
+                    "header": "verify_user — tests related to verify_user()",
+                    "matches": ["tests/test_auth.py"],
+                    "risk_level": "medium",
+                },
+            ],
+            "stats": {
+                "queries_planned": 2,
+                "queries_executed": 2,
+                "total_matches": 2,
+                "llm_used": False,
+            },
         }
         result = build_cross_file_context(
-            diff_summary="diff",
+            diff_summary="some diff",
             graph_data=None,
-            functions_data=functions_data,
+            functions_data={"functions": [{"name": "create_token", "file": "auth.py"}]},
             config=DEFAULT_CONFIG,
         )
-        # Should have at most 10 sections
-        self.assertLessEqual(result.count("####"), 10)
+        self.assertIn("#### [consumers]", result)
+        self.assertIn("#### [test_impl]", result)
+        self.assertIn("_Risk: high_", result)
+        self.assertIn("_Risk: medium_", result)
+        self.assertIn("- api/handler.py", result)
+        self.assertIn("- tests/test_auth.py", result)
 
-    def test_skips_short_function_names(self) -> None:
+    @mock.patch("scripts.orchestrate.run_subprocess_json")
+    @mock.patch("scripts.orchestrate.detect_repo_root")
+    def test_handles_planner_failure(self, mock_root, mock_run) -> None:
+        mock_root.return_value = Path("/tmp/repo")
+        mock_run.side_effect = RuntimeError("planner crashed")
+        result = build_cross_file_context(
+            diff_summary="some diff",
+            graph_data=None,
+            functions_data={"functions": [{"name": "foo", "file": "a.py"}]},
+            config=DEFAULT_CONFIG,
+        )
+        self.assertEqual(result, "")
+
+    @mock.patch("scripts.orchestrate.run_subprocess_json")
+    @mock.patch("scripts.orchestrate.detect_repo_root")
+    def test_empty_sections_returns_empty(self, mock_root, mock_run) -> None:
+        mock_root.return_value = Path("/tmp/repo")
+        mock_run.return_value = {"sections": [], "stats": {}}
+        result = build_cross_file_context(
+            diff_summary="some diff",
+            graph_data=None,
+            functions_data={"functions": [{"name": "foo", "file": "a.py"}]},
+            config=DEFAULT_CONFIG,
+        )
+        self.assertEqual(result, "")
+
+
+class CrossFileRoutingTests(unittest.TestCase):
+    """Tests for per-explorer cross-file context routing (sc-f4if)."""
+
+    _SAMPLE_CONTEXT = (
+        "#### [symmetric] parse_config — symmetric callers in lib/config.py\n"
+        "_Risk: high_\n"
+        "- lib/config.py\n"
+        "\n"
+        "#### [consumers] create_token — callers of create_token() changed in auth.py\n"
+        "_Risk: high_\n"
+        "- api/handler.py\n"
+        "\n"
+        "#### [test_impl] create_token — tests related to create_token()\n"
+        "_Risk: medium_\n"
+        "- tests/test_auth.py\n"
+        "\n"
+        "#### [configuration] DB_URL — config references\n"
+        "_Risk: low_\n"
+        "- settings.py\n"
+        "\n"
+        "#### [upstream] base_class — upstream dependency\n"
+        "_Risk: medium_\n"
+        "- core/base.py\n"
+    )
+
+    def test_filter_cross_file_correctness_gets_all(self) -> None:
+        result = _filter_cross_file_for_expert(self._SAMPLE_CONTEXT, "correctness")
+        self.assertIn("[symmetric]", result)
+        self.assertIn("[consumers]", result)
+        self.assertIn("[test_impl]", result)
+        self.assertIn("[configuration]", result)
+        self.assertIn("[upstream]", result)
+
+    def test_filter_cross_file_security_gets_subset(self) -> None:
+        result = _filter_cross_file_for_expert(self._SAMPLE_CONTEXT, "security-config")
+        self.assertIn("[symmetric]", result)
+        self.assertIn("[consumers]", result)
+        self.assertNotIn("[test_impl]", result)
+        self.assertNotIn("[configuration]", result)
+        self.assertNotIn("[upstream]", result)
+
+    def test_filter_cross_file_test_adequacy_gets_test_impl(self) -> None:
+        result = _filter_cross_file_for_expert(self._SAMPLE_CONTEXT, "test-adequacy")
+        self.assertIn("[test_impl]", result)
+        self.assertNotIn("[symmetric]", result)
+        self.assertNotIn("[consumers]", result)
+        self.assertNotIn("[configuration]", result)
+        self.assertNotIn("[upstream]", result)
+
+    def test_filter_cross_file_unknown_expert_gets_consumers(self) -> None:
+        result = _filter_cross_file_for_expert(
+            self._SAMPLE_CONTEXT, "some-unknown-expert"
+        )
+        self.assertIn("[consumers]", result)
+        self.assertNotIn("[symmetric]", result)
+        self.assertNotIn("[test_impl]", result)
+        self.assertNotIn("[configuration]", result)
+        self.assertNotIn("[upstream]", result)
+
+    def test_filter_cross_file_empty_input(self) -> None:
+        self.assertEqual(_filter_cross_file_for_expert("", "correctness"), "")
+
+    def test_filter_preserves_non_categorized_preamble(self) -> None:
+        context = (
+            "Cross-file context overview\n"
+            "\n"
+            "#### [consumers] foo — callers\n"
+            "_Risk: high_\n"
+            "- bar.py\n"
+        )
+        result = _filter_cross_file_for_expert(context, "test-adequacy")
+        # Non-categorized preamble is kept for all experts
+        self.assertIn("Cross-file context overview", result)
+        # But consumers section should be excluded for test-adequacy
+        self.assertNotIn("[consumers]", result)
+
+    def test_assemble_explorer_prompt_filters_cross_file(self) -> None:
+        diff_result = DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base="abc123",
+            changed_files=["auth.py"],
+            diff_text="@@\n+token = create_token()\n",
+        )
+        ctx = assemble_explorer_prompt(
+            expert_name="test-adequacy",
+            diff_result=diff_result,
+            global_contract="contract",
+            complexity="{}",
+            git_risk="{}",
+            scan_results="{}",
+            callers="",
+            language_standards="",
+            review_instructions="",
+            spec="",
+            cross_file_context=self._SAMPLE_CONTEXT,
+            config={"suggest_missing_tests": True},
+        )
+        # test-adequacy should only see test_impl sections
+        self.assertIn("[test_impl]", ctx.cross_file_context)
+        self.assertNotIn("[consumers]", ctx.cross_file_context)
+        self.assertNotIn("[symmetric]", ctx.cross_file_context)
+        self.assertNotIn("[upstream]", ctx.cross_file_context)
+
+    def test_routing_table_covers_known_categories(self) -> None:
+        """Verify the routing table and defaults use valid categories."""
+        valid_categories = {
+            "symmetric",
+            "consumers",
+            "test_impl",
+            "configuration",
+            "upstream",
+        }
+        for expert, cats in _CROSS_FILE_ROUTING.items():
+            self.assertTrue(
+                cats.issubset(valid_categories),
+                f"{expert} has invalid categories: {cats - valid_categories}",
+            )
+        self.assertTrue(_CROSS_FILE_DEFAULT_CATEGORIES.issubset(valid_categories))
+
+
+class ExpertPanelStructuralDetectionTests(unittest.TestCase):
+    """Tests for structural expert selection via functions_data."""
+
+    def _minimal_diff(self, diff_text: str = "@@\n+print('ok')\n") -> DiffResult:
+        return DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base="abc123",
+            changed_files=["src/app.py"],
+            diff_text=diff_text,
+        )
+
+    def test_expert_panel_uses_structural_data(self) -> None:
+        """When functions_data has concurrent patterns, concurrency expert is activated."""
         functions_data = {
             "functions": [
-                {"name": "x", "file": "a.py"},
-                {"name": "valid_name", "file": "b.py"},
+                {
+                    "file": "src/worker.py",
+                    "name": "run_worker",
+                    "params": ["task_queue", "lock"],
+                    "returns": "None",
+                    "line_start": 10,
+                    "line_end": 25,
+                    "exported": False,
+                    "language": "python",
+                },
             ]
         }
-        result = build_cross_file_context(
-            diff_summary="diff",
-            graph_data=None,
+        panel = assemble_expert_panel(
+            self._minimal_diff(),
+            config={},
+            spec_content=None,
             functions_data=functions_data,
-            config=DEFAULT_CONFIG,
         )
-        self.assertNotIn("#### x", result)
-        self.assertIn("#### valid_name", result)
+        names = [e["name"] for e in panel]
+        self.assertIn("concurrency", names)
+        # Verify activation reason is structural, not pattern_match
+        concurrency_expert = [e for e in panel if e["name"] == "concurrency"][0]
+        self.assertEqual(
+            concurrency_expert["activation_reason"],
+            "structural_function_signature",
+        )
+
+    def test_expert_panel_falls_back_without_data(self) -> None:
+        """When functions_data is None, existing diff-text matching works as before."""
+        diff_text = "@@\n+async def handle():\n+    await do_work()\n"
+        panel = assemble_expert_panel(
+            self._minimal_diff(diff_text),
+            config={},
+            spec_content=None,
+            functions_data=None,
+        )
+        names = [e["name"] for e in panel]
+        self.assertIn("concurrency", names)
+        concurrency_expert = [e for e in panel if e["name"] == "concurrency"][0]
+        self.assertEqual(concurrency_expert["activation_reason"], "pattern_match")
+
+    def test_expert_panel_structural_avoids_false_positives(self) -> None:
+        """A diff with 'async' in a comment but no actual async functions should NOT
+        activate concurrency expert when structural data is available."""
+        # The diff text contains "async" in a comment — would trigger regex
+        diff_text = "@@\n+# TODO: consider making this async later\n+x = 1\n"
+        # But the structural data shows no concurrency-related signatures
+        functions_data = {
+            "functions": [
+                {
+                    "file": "src/app.py",
+                    "name": "compute",
+                    "params": ["x", "y"],
+                    "returns": "int",
+                    "line_start": 1,
+                    "line_end": 5,
+                    "exported": False,
+                    "language": "python",
+                },
+            ]
+        }
+        panel = assemble_expert_panel(
+            self._minimal_diff(diff_text),
+            config={},
+            spec_content=None,
+            functions_data=functions_data,
+        )
+        names = [e["name"] for e in panel]
+        self.assertNotIn("concurrency", names)
+
+    def test_expert_panel_structural_api_detection(self) -> None:
+        """API expert activates when function names and params indicate HTTP handlers."""
+        functions_data = {
+            "functions": [
+                {
+                    "file": "src/views.py",
+                    "name": "get_user_handler",
+                    "params": ["request", "user_id"],
+                    "returns": "Response",
+                    "line_start": 10,
+                    "line_end": 20,
+                    "exported": True,
+                    "language": "python",
+                },
+            ]
+        }
+        panel = assemble_expert_panel(
+            self._minimal_diff(),
+            config={},
+            spec_content=None,
+            functions_data=functions_data,
+        )
+        names = [e["name"] for e in panel]
+        self.assertIn("api-contract", names)
+
+    def test_expert_panel_structural_empty_functions_falls_through(self) -> None:
+        """When functions_data has empty functions list, structurally-decided experts
+        are suppressed (not activated via regex either)."""
+        # Diff text contains "async" which would match regex for concurrency
+        diff_text = "@@\n+# async helper\n"
+        functions_data = {"functions": []}
+        panel = assemble_expert_panel(
+            self._minimal_diff(diff_text),
+            config={},
+            spec_content=None,
+            functions_data=functions_data,
+        )
+        names = [e["name"] for e in panel]
+        # Structural detection found nothing, and regex is suppressed for these experts
+        self.assertNotIn("concurrency", names)
+
+
+class LastReviewMarkerTests(unittest.TestCase):
+    """Tests for _write_last_review_marker."""
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.cache_dir = self.tmpdir / ".agents/codereview"
+
+    def tearDown(self) -> None:
+        import shutil
+
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_writes_marker_with_expected_fields(self) -> None:
+        from scripts.orchestrate import _write_last_review_marker
+
+        report = {"verdict": "PASS"}
+        launch_packet = {
+            "base_ref": "abc123",
+            "scope": "branch",
+            "head_ref": "HEAD",
+            "changed_files": ["a.py", "b.py"],
+        }
+        with mock.patch(
+            "scripts.orchestrate.run_subprocess_text", return_value="deadbeef123\n"
+        ):
+            _write_last_review_marker(self.tmpdir, report, launch_packet)
+
+        marker_path = self.cache_dir / "last-review.json"
+        self.assertTrue(marker_path.exists())
+        marker = json.loads(marker_path.read_text())
+        self.assertEqual(marker["head_sha"], "deadbeef123")
+        self.assertEqual(marker["base_ref"], "abc123")
+        self.assertEqual(marker["scope"], "branch")
+        self.assertEqual(marker["file_count"], 2)
+        self.assertEqual(marker["verdict"], "PASS")
+        self.assertIn("timestamp", marker)
+
+    def test_fallback_head_ref_on_git_failure(self) -> None:
+        from scripts.orchestrate import _write_last_review_marker
+
+        report = {"verdict": "FIX_REQUIRED"}
+        launch_packet = {
+            "base_ref": "",
+            "scope": "staged",
+            "head_ref": "INDEX",
+            "changed_files": [],
+        }
+        with mock.patch(
+            "scripts.orchestrate.run_subprocess_text",
+            side_effect=Exception("git failed"),
+        ):
+            _write_last_review_marker(self.tmpdir, report, launch_packet)
+
+        marker = json.loads((self.cache_dir / "last-review.json").read_text())
+        self.assertEqual(marker["head_sha"], "INDEX")
+
+    def test_overwrites_previous_marker(self) -> None:
+        from scripts.orchestrate import _write_last_review_marker
+
+        self.cache_dir.mkdir(parents=True)
+        (self.cache_dir / "last-review.json").write_text('{"old": true}')
+
+        report = {"verdict": "PASS"}
+        launch_packet = {
+            "base_ref": "main",
+            "scope": "branch",
+            "head_ref": "HEAD",
+            "changed_files": ["x.py"],
+        }
+        with mock.patch(
+            "scripts.orchestrate.run_subprocess_text", return_value="newsha\n"
+        ):
+            _write_last_review_marker(self.tmpdir, report, launch_packet)
+
+        marker = json.loads((self.cache_dir / "last-review.json").read_text())
+        self.assertNotIn("old", marker)
+        self.assertEqual(marker["head_sha"], "newsha")
 
 
 class FindSpecCandidatesTests(unittest.TestCase):

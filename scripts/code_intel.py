@@ -9,11 +9,14 @@ Tree-sitter is optional; all subcommands fall back to regex when unavailable.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -802,6 +805,17 @@ _DEPS: list[dict[str, Any]] = [
 ]
 
 
+def _detect_python_env() -> str:
+    """Detect the current Python environment type."""
+    if "pipx" in sys.prefix:
+        return "pipx"
+    if sys.prefix != sys.base_prefix:
+        return "venv"
+    if os.environ.get("CONDA_DEFAULT_ENV"):
+        return "conda"
+    return "system"
+
+
 def cmd_setup(args: argparse.Namespace) -> dict[str, Any]:
     if getattr(args, "check", False):
         deps_list = [
@@ -833,13 +847,110 @@ def cmd_setup(args: argparse.Namespace) -> dict[str, Any]:
         }
     if getattr(args, "install", False):
         tier = getattr(args, "tier", "minimal")
-        commands = []
+        non_interactive = getattr(args, "non_interactive", False)
+        python_env = _detect_python_env()
+        use_user_flag = python_env == "system"
+
+        results: list[dict[str, Any]] = []
         for d in _DEPS:
             if d["check"]() or (tier == "minimal" and d["tier"] != "minimal"):
                 continue
-            prefix = "pip install" if d["installer"] == "pip" else "go install"
-            commands.append({"command": f"{prefix} {d['package']}", "name": d["name"]})
-        return {"install_commands": commands, "tier": tier}
+
+            installer = d["installer"]
+            package = d["package"]
+            name = d["name"]
+
+            # Build command
+            if installer == "pip":
+                cmd = ["pip", "install"]
+                if use_user_flag:
+                    cmd.append("--user")
+                cmd.append(package)
+            elif installer == "npm":
+                cmd = ["npm", "install", "-g", package]
+            elif installer == "go":
+                cmd = ["go", "install", package]
+            else:
+                results.append(
+                    {
+                        "name": name,
+                        "status": "skipped",
+                        "reason": f"unknown installer: {installer}",
+                    }
+                )
+                continue
+
+            # Check if installer is available
+            if not shutil.which(cmd[0]):
+                results.append(
+                    {
+                        "name": name,
+                        "status": "skipped",
+                        "reason": f"{cmd[0]} not available",
+                    }
+                )
+                continue
+
+            # Execute
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if proc.returncode == 0:
+                    results.append(
+                        {
+                            "name": name,
+                            "status": "installed",
+                            "command": " ".join(cmd),
+                        }
+                    )
+                else:
+                    results.append(
+                        {
+                            "name": name,
+                            "status": "failed",
+                            "command": " ".join(cmd),
+                            "error": proc.stderr[:200],
+                        }
+                    )
+            except subprocess.TimeoutExpired:
+                results.append(
+                    {
+                        "name": name,
+                        "status": "failed",
+                        "command": " ".join(cmd),
+                        "error": "timeout",
+                    }
+                )
+            except Exception as e:
+                results.append(
+                    {
+                        "name": name,
+                        "status": "failed",
+                        "command": " ".join(cmd),
+                        "error": str(e)[:200],
+                    }
+                )
+
+        # Post-install verification
+        verification = cmd_setup(argparse.Namespace(check=True, install=False))
+
+        installed_count = sum(1 for r in results if r["status"] == "installed")
+        failed_count = sum(1 for r in results if r["status"] == "failed")
+        skipped_count = sum(1 for r in results if r["status"] == "skipped")
+
+        summary: dict[str, Any] = {
+            "results": results,
+            "tier": tier,
+            "python_env": python_env,
+            "installed": installed_count,
+            "failed": failed_count,
+            "skipped": skipped_count,
+            "verification": verification,
+        }
+
+        if non_interactive:
+            summary["exit_code"] = 1 if failed_count > 0 else 0
+
+        return summary
     return {"error": "Use --check or --install"}
 
 
@@ -868,16 +979,267 @@ def format_functions_summary(functions_json: dict[str, Any]) -> str:
 
 # --- Subcommand: graph ---
 
+# Repo-wide reference search constants
+COMMON_NAMES = frozenset(
+    {
+        "get",
+        "set",
+        "run",
+        "main",
+        "init",
+        "new",
+        "test",
+        "setup",
+        "close",
+        "open",
+        "start",
+        "stop",
+        "read",
+        "write",
+        "update",
+        "delete",
+        "create",
+        "save",
+        "load",
+        "find",
+        "check",
+        "is",
+        "has",
+        "to",
+        "from",
+    }
+)
+MAX_RESULTS_PER_SYMBOL = 20
+PER_GREP_TIMEOUT = 5
+TOTAL_GRAPH_TIMEOUT = 30
+MAX_GRAPH_NODES = 200
+CO_CHANGE_MIN_FREQUENCY = 3
+CO_CHANGE_MAX_EDGES = 50
+CO_CHANGE_MAX_COMMITS = 100
+
+
+def _detect_semantic_backend() -> str | None:
+    """Detect available semantic search backend. Returns None if nothing available."""
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.enable_load_extension(True)
+            conn.load_extension("vec0")
+        except (AttributeError, OSError):
+            conn.close()
+            return None
+        conn.close()
+    except Exception:
+        return None
+
+    try:
+        import model2vec  # noqa: F401
+
+        return "model2vec"
+    except ImportError:
+        pass
+
+    try:
+        import onnxruntime  # noqa: F401
+
+        return "onnx-minilm"
+    except ImportError:
+        pass
+
+    return None
+
+
+def _build_semantic_edges(
+    nodes: list[dict],
+    files: list[str],
+    repo_root: str,
+    cache_dir: str | None,
+) -> tuple[list[dict], dict]:
+    """Build semantic similarity edges. Returns (edges, stats)."""
+    backend = _detect_semantic_backend()
+    if backend is None:
+        return [], {"enabled": False, "reason": "dependencies not available"}
+
+    # Extract text representation for each function node
+    function_texts: dict[str, str] = {}
+    for node in nodes:
+        if node["kind"] != "function":
+            continue
+        fpath = node["file"]
+        content = _read_file_safe(fpath)
+        if not content:
+            continue
+        lines = content.splitlines()
+        line_start = node.get("line", 0)
+        # Get function signature + first 3 lines of body
+        func_lines = lines[max(0, line_start - 1) : line_start + 3]
+        function_texts[node["id"]] = " ".join(func_lines)
+
+    if len(function_texts) < 2:
+        return [], {
+            "enabled": True,
+            "model": backend,
+            "symbols_indexed": 0,
+            "reason": "too few functions",
+        }
+
+    # Generate embeddings
+    start_time = time.monotonic()
+    try:
+        if backend == "model2vec":
+            import model2vec  # type: ignore[import-untyped]
+
+            model = model2vec.StaticModel.from_pretrained("minishlab/potion-base-8M")
+            texts = list(function_texts.values())
+            ids = list(function_texts.keys())
+            embeddings = model.encode(texts)
+        else:  # onnx-minilm
+            return [], {"enabled": False, "reason": "onnx backend not yet implemented"}
+    except Exception as exc:
+        return [], {"enabled": False, "reason": str(exc)[:100]}
+
+    index_time = int((time.monotonic() - start_time) * 1000)
+
+    # Find top 5 similar for each changed function (pure Python math)
+    changed_ids = {n["id"] for n in nodes if n.get("modified_in_diff")}
+    semantic_edges: list[dict] = []
+
+    import math as _math
+
+    def _cosine_sim(a: list[float], b: list[float]) -> float:
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = _math.sqrt(sum(x * x for x in a))
+        norm_b = _math.sqrt(sum(x * x for x in b))
+        denom = norm_a * norm_b
+        return dot / denom if denom > 0 else 0.0
+
+    for i, src_id in enumerate(ids):
+        if src_id not in changed_ids:
+            continue
+        src_vec = embeddings[i]
+        scores: list[tuple[str, float]] = []
+        for j, tgt_id in enumerate(ids):
+            if i == j:
+                continue
+            tgt_vec = embeddings[j]
+            sim = _cosine_sim(src_vec, tgt_vec)
+            scores.append((tgt_id, sim))
+
+        scores.sort(key=lambda x: x[1], reverse=True)
+        for tgt_id, score in scores[:5]:
+            if score > 0.5:  # minimum similarity threshold
+                semantic_edges.append(
+                    {
+                        "from": src_id,
+                        "to": tgt_id,
+                        "type": "semantic_similarity",
+                        "score": round(score, 3),
+                    }
+                )
+
+    stats = {
+        "enabled": True,
+        "model": backend,
+        "symbols_indexed": len(function_texts),
+        "index_time_ms": index_time,
+    }
+
+    return semantic_edges, stats
+
+
+def _graph_cache_path(cache_dir: str, repo_root: str) -> Path:
+    """Return the cache file path for a given repo root."""
+    repo_hash = hashlib.sha256(repo_root.encode()).hexdigest()[:16]
+    return Path(cache_dir) / f"graph-{repo_hash}.json"
+
+
+def _load_graph_cache(cache_path: Path) -> dict | None:
+    """Load a graph cache file, returning None on miss or corruption."""
+    if not cache_path.exists():
+        return None
+    try:
+        with open(cache_path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _save_graph_cache(cache_path: Path, graph: dict, file_mtimes: dict) -> None:
+    """Persist graph data and file modification times to the cache."""
+    cache_data = {
+        "graph": graph,
+        "file_mtimes": file_mtimes,
+        "version": 1,
+    }
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache_path, "w") as f:
+        json.dump(cache_data, f, indent=2)
+
 
 def cmd_graph(
-    files: list[str], depth: int = 1, semantic: bool = False
+    files: list[str],
+    depth: int = 1,
+    semantic: bool = False,
+    repo_root: str | None = None,
+    cache_dir: str | None = None,
 ) -> dict[str, Any]:
-    """Build a dependency graph from changed files."""
-    if semantic:
-        print("info: semantic search not available", file=sys.stderr)
+    """Build a dependency graph from changed files.
+
+    Args:
+        files: List of changed file paths.
+        depth: Traversal depth (reserved for future use).
+        semantic: Whether to use semantic search (not yet implemented).
+        repo_root: Root directory for repo-wide grep. Defaults to cwd.
+        cache_dir: Directory for incremental indexing cache. If None, no caching.
+    """
+    # --- Cache: collect current file modification times ---
+    file_mtimes: dict[str, float] = {}
+    for fpath in files:
+        try:
+            file_mtimes[fpath] = os.path.getmtime(fpath)
+        except OSError:
+            file_mtimes[fpath] = 0
+
+    # --- Cache: load existing cache and determine stale files ---
+    effective_root = repo_root or str(Path.cwd())
+    cache_path: Path | None = None
+    cached_data: dict | None = None
+    cached_nodes_by_file: dict[str, list[dict[str, Any]]] = {}
+    cached_edges_by_file: dict[str, list[dict[str, Any]]] = {}
+    stale_files: set[str] = set(files)  # default: re-parse everything
+
+    if cache_dir:
+        cache_path = _graph_cache_path(cache_dir, effective_root)
+        cached_data = _load_graph_cache(cache_path)
+        if cached_data and cached_data.get("version") == 1:
+            cached_mtimes = cached_data.get("file_mtimes", {})
+            cached_graph = cached_data.get("graph", {})
+            # Index cached nodes and edges by file
+            for n in cached_graph.get("nodes", []):
+                f = n.get("file", "")
+                cached_nodes_by_file.setdefault(f, []).append(n)
+            for e in cached_graph.get("edges", []):
+                f = e.get("from", "")
+                cached_edges_by_file.setdefault(f, []).append(e)
+            # Only re-parse files whose mtime changed or are new
+            stale_files = set()
+            for fpath in files:
+                if fpath not in cached_mtimes:
+                    stale_files.add(fpath)
+                elif file_mtimes.get(fpath, 0) != cached_mtimes.get(fpath, -1):
+                    stale_files.add(fpath)
+
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     for fpath in files:
+        if fpath not in stale_files:
+            # Reuse cached data for this file
+            nodes.extend(cached_nodes_by_file.get(fpath, []))
+            edges.extend(cached_edges_by_file.get(fpath, []))
+            continue
+
         lang = _detect_language(fpath)
         if not lang:
             continue
@@ -892,6 +1254,7 @@ def cmd_graph(
                     "file": fpath,
                     "line": f.line_start,
                     "modified_in_diff": True,
+                    "hop_distance": 0,
                 }
             )
         for imp in _extract_imports(fpath, content, lang):
@@ -903,16 +1266,360 @@ def cmd_graph(
                     "line": imp.line,
                 }
             )
-    return {
+
+    # --- Step 2: Repo-wide reference search for changed symbols ---
+    search_root = effective_root
+    changed_functions = [n for n in nodes if n["kind"] == "function"]
+    changed_files_set = {str(Path(f).resolve()) for f in files}
+    graph_start = time.monotonic()
+    caller_nodes: list[dict[str, Any]] = []
+    caller_edges: list[dict[str, Any]] = []
+
+    for func_node in changed_functions:
+        if time.monotonic() - graph_start > TOTAL_GRAPH_TIMEOUT:
+            break
+        if len(nodes) + len(caller_nodes) >= MAX_GRAPH_NODES:
+            break
+
+        func_name = func_node["id"].split("::")[-1]
+        func_file = func_node["file"]
+
+        # Skip short or common names to avoid noisy results
+        if len(func_name) < 3 or func_name.lower() in COMMON_NAMES:
+            continue
+
+        pattern = rf"\b{re.escape(func_name)}\s*\("
+        grep_cmd = ["grep", "-rnl", "-E", pattern]
+        # Limit search to known source extensions for performance
+        for ext in EXTENSION_MAP:
+            grep_cmd.append(f"--include=*{ext}")
+        grep_cmd.extend(
+            [
+                "--exclude-dir=.git",
+                "--exclude-dir=node_modules",
+                "--exclude-dir=.venv",
+                "--exclude-dir=__pycache__",
+                "--exclude-dir=vendor",
+                ".",
+            ]
+        )
+        try:
+            result = subprocess.run(
+                grep_cmd,
+                cwd=search_root,
+                capture_output=True,
+                text=True,
+                timeout=PER_GREP_TIMEOUT,
+            )
+            # Resolve grep output paths relative to search_root
+            raw_matches = [
+                line.lstrip("./")
+                for line in result.stdout.strip().split("\n")
+                if line.strip()
+            ]
+            # Normalize to absolute paths for consistent comparison
+            func_file_abs = str(Path(func_file).resolve())
+            matching_files = []
+            for rel_path in raw_matches:
+                abs_path = str((Path(search_root) / rel_path).resolve())
+                if abs_path != func_file_abs:
+                    matching_files.append(abs_path)
+            matching_files = matching_files[:MAX_RESULTS_PER_SYMBOL]
+        except (subprocess.TimeoutExpired, Exception):
+            continue
+
+        for caller_file in matching_files:
+            if caller_file in changed_files_set:
+                continue  # already in the graph from the first pass
+
+            # Add caller node if not already present
+            node_id = caller_file
+            if not any(
+                n["id"] == node_id or n["file"] == caller_file
+                for n in nodes + caller_nodes
+            ):
+                caller_nodes.append(
+                    {
+                        "id": node_id,
+                        "kind": "file",
+                        "file": caller_file,
+                        "line": 0,
+                        "modified_in_diff": False,
+                        "hop_distance": 1,
+                    }
+                )
+
+            # Try to find the specific calling function in caller_file
+            caller_content = _read_file_safe(caller_file)
+            if caller_content:
+                caller_lang = _detect_language(caller_file)
+                if caller_lang:
+                    caller_funcs = _extract_functions(
+                        caller_file, caller_content, caller_lang
+                    )
+                    found_caller = False
+                    for cf in caller_funcs:
+                        func_body = "\n".join(
+                            caller_content.split("\n")[cf.line_start - 1 : cf.line_end]
+                        )
+                        if re.search(pattern, func_body):
+                            fn_node_id = f"{caller_file}::{cf.name}"
+                            if not any(
+                                n["id"] == fn_node_id for n in nodes + caller_nodes
+                            ):
+                                caller_nodes.append(
+                                    {
+                                        "id": fn_node_id,
+                                        "kind": "function",
+                                        "file": caller_file,
+                                        "line": cf.line_start,
+                                        "modified_in_diff": False,
+                                        "hop_distance": 1,
+                                    }
+                                )
+                            caller_edges.append(
+                                {
+                                    "from": fn_node_id,
+                                    "to": func_node["id"],
+                                    "type": "calls",
+                                    "line": cf.line_start,
+                                }
+                            )
+                            found_caller = True
+                            break
+                    if not found_caller:
+                        # Couldn't identify specific function, add file-level edge
+                        caller_edges.append(
+                            {
+                                "from": caller_file,
+                                "to": func_node["id"],
+                                "type": "calls",
+                                "line": 0,
+                            }
+                        )
+                else:
+                    # Unknown language, add file-level edge
+                    caller_edges.append(
+                        {
+                            "from": caller_file,
+                            "to": func_node["id"],
+                            "type": "calls",
+                            "line": 0,
+                        }
+                    )
+
+    nodes.extend(caller_nodes)
+    edges.extend(caller_edges)
+
+    # --- Step 3: Depth-2 traversal (second hop from caller files) ---
+    depth2_nodes: list[dict[str, Any]] = []
+    depth2_edges: list[dict[str, Any]] = []
+
+    if depth >= 2:
+        MAX_DEPTH2_NODES = 500  # higher cap for depth 2
+        # Get all depth-1 caller files that have "calls" edges (not imports)
+        depth1_callers: set[str] = set()
+        for edge in caller_edges:
+            if edge["type"] == "calls":
+                from_id = edge["from"]
+                # Extract the file from the node id
+                file_part = from_id.split("::")[0] if "::" in from_id else from_id
+                if file_part not in changed_files_set:
+                    depth1_callers.add(file_part)
+
+        for caller_file in depth1_callers:
+            if time.monotonic() - graph_start > TOTAL_GRAPH_TIMEOUT:
+                break
+            if len(nodes) + len(depth2_nodes) >= MAX_DEPTH2_NODES:
+                break
+
+            # Read the caller file and extract its functions
+            content = _read_file_safe(caller_file)
+            if not content:
+                continue
+            lang = _detect_language(caller_file)
+            if not lang:
+                continue
+
+            caller_funcs = _extract_functions(caller_file, content, lang)
+            for cf in caller_funcs:
+                # Search for references to this caller function
+                if len(cf.name) < 3 or cf.name.lower() in COMMON_NAMES:
+                    continue
+
+                pattern = rf"\b{re.escape(cf.name)}\s*\("
+                try:
+                    grep_result = subprocess.run(
+                        ["grep", "-rnl", "-E", pattern, "."],
+                        capture_output=True,
+                        text=True,
+                        timeout=PER_GREP_TIMEOUT,
+                        cwd=str(effective_root),
+                    )
+                    raw_matches = [
+                        line.lstrip("./")
+                        for line in grep_result.stdout.strip().split("\n")
+                        if line.strip()
+                    ]
+                    # Normalize to absolute paths for consistent comparison
+                    matching_files = []
+                    for rel_path in raw_matches:
+                        abs_path = str((Path(effective_root) / rel_path).resolve())
+                        if (
+                            abs_path != caller_file
+                            and abs_path not in changed_files_set
+                        ):
+                            matching_files.append(abs_path)
+                    matching_files = matching_files[:10]  # smaller cap for depth 2
+                except (subprocess.TimeoutExpired, Exception):
+                    continue
+
+                for abs_mf in matching_files:
+                    existing_ids = {n["id"] for n in nodes + depth2_nodes}
+                    node_id = abs_mf
+                    if node_id not in existing_ids:
+                        depth2_nodes.append(
+                            {
+                                "id": node_id,
+                                "kind": "file",
+                                "file": abs_mf,
+                                "line": 0,
+                                "modified_in_diff": False,
+                                "hop_distance": 2,
+                            }
+                        )
+                    depth2_edges.append(
+                        {
+                            "from": abs_mf,
+                            "to": f"{caller_file}::{cf.name}",
+                            "type": "calls",
+                            "line": 0,
+                        }
+                    )
+
+        nodes.extend(depth2_nodes)
+        edges.extend(depth2_edges)
+
+        if len(nodes) > MAX_GRAPH_NODES:
+            print(
+                f"warning: graph has {len(nodes)} nodes (exceeds {MAX_GRAPH_NODES})",
+                file=sys.stderr,
+            )
+
+    # Step 4: Co-change frequency from git log
+    co_change_edges: list[dict[str, Any]] = []
+
+    for fpath in files:
+        try:
+            # Get commits that touched this file in the last 6 months
+            log_result = subprocess.run(
+                [
+                    "git",
+                    "log",
+                    "--oneline",
+                    "--follow",
+                    "--since=6 months ago",
+                    "--format=%H",
+                    "--",
+                    fpath,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=str(effective_root),
+            )
+            if log_result.returncode != 0:
+                continue
+
+            commits = [
+                c.strip() for c in log_result.stdout.strip().split("\n") if c.strip()
+            ]
+            commits = commits[:CO_CHANGE_MAX_COMMITS]
+
+            # For each commit, find other files changed in the same commit
+            co_change_counts: dict[str, int] = {}
+            for commit_sha in commits:
+                try:
+                    files_result = subprocess.run(
+                        [
+                            "git",
+                            "diff-tree",
+                            "--no-commit-id",
+                            "--name-only",
+                            "-r",
+                            commit_sha,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        cwd=str(effective_root),
+                    )
+                    if files_result.returncode != 0:
+                        continue
+                    co_files = [
+                        f.strip()
+                        for f in files_result.stdout.strip().split("\n")
+                        if f.strip() and f.strip() != fpath
+                    ]
+                    for cf in co_files:
+                        co_change_counts[cf] = co_change_counts.get(cf, 0) + 1
+                except (subprocess.TimeoutExpired, Exception):
+                    continue
+
+            # Only keep files with frequency >= threshold
+            for co_file, freq in co_change_counts.items():
+                if (
+                    freq >= CO_CHANGE_MIN_FREQUENCY
+                    and len(co_change_edges) < CO_CHANGE_MAX_EDGES
+                ):
+                    co_change_edges.append(
+                        {
+                            "from": fpath,
+                            "to": co_file,
+                            "type": "co_change",
+                            "frequency": freq,
+                        }
+                    )
+        except (subprocess.TimeoutExpired, Exception):
+            continue
+
+    edges.extend(co_change_edges)
+
+    # Step 5: Semantic similarity edges (optional, graceful degradation)
+    semantic_stats: dict[str, Any] = {}
+    if semantic:
+        semantic_edges, semantic_stats = _build_semantic_edges(
+            nodes,
+            files,
+            str(effective_root),
+            cache_dir,
+        )
+        edges.extend(semantic_edges)
+
+    stats: dict[str, Any] = {
+        "nodes": len(nodes),
+        "edges": len(edges),
+        "files_traversed": len(files),
+        "depth": depth,
+        "external_references": len(caller_nodes),
+        "co_change_edges": len(co_change_edges),
+    }
+    if depth >= 2:
+        stats["depth2_nodes"] = len(depth2_nodes)
+    if semantic_stats:
+        stats["semantic"] = semantic_stats
+
+    result = {
         "nodes": nodes,
         "edges": edges,
-        "stats": {
-            "nodes": len(nodes),
-            "edges": len(edges),
-            "files_traversed": len(files),
-            "depth": depth,
-        },
+        "stats": stats,
     }
+
+    # --- Cache: persist updated graph ---
+    if cache_dir and cache_path is not None:
+        _save_graph_cache(cache_path, result, file_mtimes)
+
+    return result
 
 
 def format_graph_summary(graph_json: dict[str, Any]) -> str:
@@ -939,13 +1646,39 @@ def format_graph_summary(graph_json: dict[str, Any]) -> str:
 
 # --- Subcommand: format-diff ---
 
+_FUNCTION_KW_RE = re.compile(
+    r"^\s*(?:(?:async\s+)?(?:def|function|func|fn)\s+\w+|"
+    r"(?:pub(?:\s*\(crate\))?\s+)?(?:async\s+)?fn\s+\w+|"
+    r"class\s+\w+)",
+    re.MULTILINE,
+)
+
+_EXPAND_MAX_SCAN = 8  # max lines to scan upward for enclosing function
+_EXPAND_AFTER_LINES = 3  # max lines of after-context past hunk end
+
+
+def _find_enclosing_function(lines: list[str], hunk_start_line: int) -> int | None:
+    """Find the line number of the enclosing function/class definition.
+
+    Scans upward from hunk_start_line (1-indexed) looking for a function/class
+    keyword. Returns the line number (1-indexed) or None if not found within
+    max_scan lines.
+    """
+    start_idx = max(0, hunk_start_line - 1 - _EXPAND_MAX_SCAN)
+    end_idx = hunk_start_line - 1  # convert to 0-indexed
+
+    for idx in range(end_idx - 1, start_idx - 1, -1):
+        if idx < 0 or idx >= len(lines):
+            continue
+        if _FUNCTION_KW_RE.match(lines[idx]):
+            return idx + 1  # back to 1-indexed
+    return None
+
 
 def cmd_format_diff(diff_text: str, expand_context: bool = False) -> str:
     """Transform a unified diff into LLM-optimized before/after blocks."""
     if not diff_text.strip():
         return ""
-    if expand_context:
-        print("info: --expand-context not yet implemented", file=sys.stderr)
 
     # Split into per-file sections
     file_sections = re.split(r"^diff --git ", diff_text, flags=re.MULTILINE)
@@ -960,6 +1693,18 @@ def cmd_format_diff(diff_text: str, expand_context: bool = False) -> str:
             continue
         file_path = header_match.group(1)
         output_parts.append(f"## File: {file_path}")
+
+        # Pre-read source file if expand_context is requested
+        source_lines: list[str] | None = None
+        if expand_context:
+            source_path = Path(file_path)
+            if source_path.exists():
+                try:
+                    source_lines = source_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    ).splitlines()
+                except (OSError, UnicodeDecodeError):
+                    source_lines = None
 
         # Find all hunks
         hunk_re = re.compile(
@@ -1008,6 +1753,28 @@ def cmd_format_diff(diff_text: str, expand_context: bool = False) -> str:
                     old_lines.append(f" {content}")
                     line_num += 1
 
+            # Expand context to enclosing function boundary if requested
+            if expand_context and source_lines is not None:
+                enclosing_line = _find_enclosing_function(source_lines, new_start)
+                if enclosing_line is not None and enclosing_line < new_start:
+                    # Prepend context from enclosing function to hunk start
+                    context_before = source_lines[enclosing_line - 1 : new_start - 1]
+                    if context_before:
+                        output_parts.append("__context_before__")
+                        for ci, cline in enumerate(context_before):
+                            output_parts.append(f"{enclosing_line + ci}  {cline}")
+
+                # After-context: expand up to _EXPAND_AFTER_LINES past hunk end
+                hunk_end = new_start + sum(1 for ln in lines if not ln.startswith("-"))
+                after_start = hunk_end
+                after_end = min(after_start + _EXPAND_AFTER_LINES, len(source_lines))
+                if after_start < len(source_lines):
+                    context_after_lines = source_lines[after_start:after_end]
+                    if context_after_lines:
+                        output_parts.append("__context_after__")
+                        for ci, cline in enumerate(context_after_lines):
+                            output_parts.append(f"{after_start + 1 + ci}  {cline}")
+
             output_parts.append("__new hunk__")
             output_parts.extend(new_lines)
             output_parts.append("__old hunk__")
@@ -1032,6 +1799,13 @@ def main() -> None:
     gp = sub.add_parser("graph")
     gp.add_argument("--depth", type=int, default=1)
     gp.add_argument("--semantic", action="store_true")
+    gp.add_argument("--repo-root", default=None, help="Root dir for repo-wide grep")
+    gp.add_argument(
+        "--cache",
+        dest="cache_dir",
+        default=None,
+        help="Directory for incremental indexing cache",
+    )
     fp = sub.add_parser("format-diff")
     fp.add_argument("--expand-context", action="store_true")
     sp = sub.add_parser("setup")
@@ -1039,12 +1813,17 @@ def main() -> None:
     sp.add_argument("--install", action="store_true")
     sp.add_argument("--tier", choices=["full", "minimal"], default="minimal")
     sp.add_argument("--json", action="store_true", dest="json_output")
+    sp.add_argument("--non-interactive", action="store_true")
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
         sys.exit(1)
     if args.command == "setup":
         result = cmd_setup(args)
+        if isinstance(result, dict) and "exit_code" in result:
+            json.dump(result, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+            sys.exit(result["exit_code"])
     elif args.command == "format-diff":
         diff_input = sys.stdin.read() if not sys.stdin.isatty() else ""
         formatted = cmd_format_diff(diff_input, expand_context=args.expand_context)
@@ -1061,7 +1840,13 @@ def main() -> None:
             "exports": lambda: cmd_exports(files),
             "callers": lambda: cmd_callers(files, args.target),
             "patterns": lambda: cmd_patterns(files),
-            "graph": lambda: cmd_graph(files, depth=args.depth, semantic=args.semantic),
+            "graph": lambda: cmd_graph(
+                files,
+                depth=args.depth,
+                semantic=args.semantic,
+                repo_root=getattr(args, "repo_root", None),
+                cache_dir=getattr(args, "cache_dir", None),
+            ),
         }
         handler = dispatch.get(args.command)
         if not handler:

@@ -77,6 +77,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         ],
     },
     "suggest_missing_tests": False,
+    "minimum_severity": "low",
 }
 
 CORE_EXPERTS = ["correctness", "security-config", "test-adequacy"]
@@ -115,6 +116,7 @@ CONFIG_ALLOWLIST = {
     "pass_models",
     "triage",
     "suggest_missing_tests",
+    "minimum_severity",
 }
 TEMP_SESSION_PREFIX = "codereview-"
 SMART_QUOTE_MAP = str.maketrans(
@@ -619,47 +621,62 @@ def build_cross_file_context(
     functions_data: dict[str, Any] | None,
     config: dict[str, Any],
 ) -> str:
-    """Build cross-file context using deterministic fallback.
+    """Build cross-file context by calling the planner subprocess.
 
-    In production this will call a Haiku-tier LLM with the planner prompt.
-    For now, extract changed function names from *functions_data* and generate
-    simple search queries (callers, test files).  Execute them via subprocess
-    grep and format results.  Cap at ~5k tokens total.
+    Delegates to scripts/cross_file_planner.py which optionally uses an LLM
+    for intelligent query planning and falls back to deterministic generation.
+    Each returned section is tagged with ``[category]`` for downstream routing.
     """
     planner_cfg = config.get("cross_file_planner", {})
     if not planner_cfg.get("enabled", True):
         return ""
 
-    # Extract changed function names from functions_data
-    funcs: list[dict[str, Any]] = []
-    if functions_data:
-        funcs = functions_data.get("functions", [])
-    if not funcs:
+    if not functions_data or not functions_data.get("functions"):
         return ""
 
-    # Build deterministic search queries from function names
-    sections: list[str] = []
-    token_chars = 0
-    budget = 5_000 * 4  # ~5k tokens in chars
+    timeout = planner_cfg.get("timeout", 10)
+    prompt_path = str(SKILL_DIR / "prompts" / "reviewer-context-planner.md")
 
-    for fn in funcs[:10]:
-        name = fn.get("name", "")
-        file_path = fn.get("file", "")
-        if not name or len(name) < 2:
-            continue
-        rationale = f"callers of {name}() (changed in {file_path})"
-        header = f"#### {name} — {rationale}"
-        section_text = (
-            header + "\n_Deterministic fallback — LLM planner not yet wired._\n"
+    input_data = json.dumps(
+        {
+            "diff_summary": diff_summary,
+            "graph_data": graph_data,
+            "functions_data": functions_data,
+            "model": planner_cfg.get("model", "haiku"),
+            "prompt_path": prompt_path,
+        }
+    )
+
+    try:
+        planner_script = str(Path(__file__).resolve().parent / "cross_file_planner.py")
+        result = run_subprocess_json(
+            [sys.executable, planner_script],
+            cwd=detect_repo_root(),
+            timeout=timeout,
+            input_text=input_data,
         )
-        if token_chars + len(section_text) > budget:
-            break
-        token_chars += len(section_text)
-        sections.append(section_text)
+    except Exception as exc:
+        progress("cross_file_planner_failed", error=str(exc))
+        return ""
 
+    # Format sections into text for PromptContext
+    sections = result.get("sections", [])
     if not sections:
         return ""
-    return "\n\n".join(sections)
+
+    parts: list[str] = []
+    for section in sections:
+        header = section.get("header", "")
+        category = section.get("category", "consumers")
+        matches = section.get("matches", [])
+        risk = section.get("risk_level", "medium")
+        part = f"#### [{category}] {header}\n"
+        part += f"_Risk: {risk}_\n"
+        for m in matches:
+            part += f"- {m}\n"
+        parts.append(part)
+
+    return "\n\n".join(parts)
 
 
 def truncate_spec_to_5k(text: str) -> str:
@@ -917,10 +934,100 @@ def _build_expert(
     }
 
 
+def _structural_expert_signals(
+    functions_data: dict[str, Any],
+) -> dict[str, str]:
+    """Derive expert activations from structural function data.
+
+    Returns a dict mapping expert name -> activation_reason for experts that
+    should be activated based on the structural signals in *functions_data*.
+    """
+    signals: dict[str, str] = {}
+    funcs = functions_data.get("functions", [])
+    if not funcs:
+        return signals
+
+    _CONCURRENCY_TOKENS = {
+        "channel",
+        "mutex",
+        "atomic",
+        "lock",
+        "sync",
+        "goroutine",
+        "async",
+        "await",
+        "threading",
+        "multiprocessing",
+    }
+    _API_NAME_TOKENS = {
+        "route",
+        "handler",
+        "endpoint",
+        "api",
+        "view",
+        "get",
+        "post",
+        "put",
+        "delete",
+        "patch",
+    }
+    _API_REQUEST_TOKENS = {
+        "request",
+        "response",
+        "req",
+        "res",
+        "httpresponse",
+        "httprequest",
+        "httpservletrequest",
+        "httpservletresponse",
+    }
+
+    has_concurrency = False
+    has_api = False
+    has_exported = False
+
+    for fn in funcs:
+        params = fn.get("params", [])
+        returns = fn.get("returns", "") or ""
+        name = fn.get("name", "")
+        exported = fn.get("exported", False)
+
+        params_lower = " ".join(params).lower()
+        returns_lower = returns.lower()
+        name_lower = name.lower()
+
+        # Concurrency: params/returns contain concurrency tokens
+        combined_signature = f"{params_lower} {returns_lower}"
+        if any(tok in combined_signature for tok in _CONCURRENCY_TOKENS):
+            has_concurrency = True
+
+        # API: function name/decorators indicate HTTP handler AND params contain request/response
+        name_matches_api = any(tok in name_lower for tok in _API_NAME_TOKENS)
+        params_have_request = any(tok in params_lower for tok in _API_REQUEST_TOKENS)
+        if name_matches_api and params_have_request:
+            has_api = True
+
+        # Exported functions in the diff
+        if exported:
+            has_exported = True
+
+    if has_concurrency:
+        signals["concurrency"] = "structural_function_signature"
+    if has_api:
+        signals["api-contract"] = "structural_function_signature"
+    if has_exported:
+        signals["api-contract"] = signals.get(
+            "api-contract", "structural_exported_functions"
+        )
+
+    return signals
+
+
 def assemble_expert_panel(
     diff_result: DiffResult,
     config: dict[str, Any],
     spec_content: str | None,
+    functions_data: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the active expert panel for the current diff."""
     force_all, expert_flags = _expert_panel_config(config)
@@ -932,6 +1039,17 @@ def assemble_expert_panel(
         for expert in CORE_EXPERTS
         if expert not in disabled
     ]
+
+    # Derive structural signals when code_intel function data is available
+    structural_signals = (
+        _structural_expert_signals(functions_data) if functions_data else {}
+    )
+
+    # Experts covered by structural detection (when data is available)
+    structurally_decided: set[str] = set()
+    if functions_data is not None:
+        structurally_decided = {"concurrency", "api-contract"}
+
     added_lines = _added_lines(diff_result.diff_text)
     searchable_text = f"{chr(10).join(diff_result.changed_files)}\n{added_lines}"
 
@@ -943,6 +1061,12 @@ def assemble_expert_panel(
         if force_all:
             panel.append(_build_expert(expert, config, "force_all"))
             continue
+        # Use structural signals for experts that have structural detection
+        if expert in structurally_decided:
+            if expert in structural_signals:
+                panel.append(_build_expert(expert, config, structural_signals[expert]))
+            continue
+        # Fall back to regex-on-diff for all other experts
         if re.search(pattern, searchable_text, flags=re.IGNORECASE | re.MULTILINE):
             panel.append(_build_expert(expert, config, "pattern_match"))
 
@@ -995,6 +1119,48 @@ Do NOT report:
 Focus exclusively on the quality and correctness of tests that already exist.
 """
 
+# Per-explorer cross-file routing table
+# Maps expert names to the categories they should receive
+_CROSS_FILE_ROUTING: dict[str, set[str]] = {
+    "correctness": {"symmetric", "consumers", "test_impl", "configuration", "upstream"},
+    "security-config": {"symmetric", "consumers"},
+    "security-dataflow": {"symmetric", "consumers"},
+    "test-adequacy": {"test_impl"},
+    "reliability": {"consumers", "configuration"},
+    "error-handling": {"consumers", "configuration"},
+}
+_CROSS_FILE_DEFAULT_CATEGORIES: set[str] = {
+    "consumers"
+}  # for explorers not in the table
+
+
+def _filter_cross_file_for_expert(cross_file_context: str, expert_name: str) -> str:
+    """Filter cross-file context sections by expert routing table."""
+    if not cross_file_context:
+        return ""
+
+    allowed = _CROSS_FILE_ROUTING.get(expert_name, _CROSS_FILE_DEFAULT_CATEGORIES)
+
+    # Parse sections by splitting on "#### [" headers
+    sections = re.split(r"(?=^#### \[)", cross_file_context, flags=re.MULTILINE)
+
+    filtered = []
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+        # Extract category from header: #### [category] ...
+        cat_match = re.match(r"^#### \[(\w+)\]", section)
+        if cat_match:
+            category = cat_match.group(1)
+            if category in allowed:
+                filtered.append(section)
+        else:
+            # Non-categorized section — include for all experts
+            filtered.append(section)
+
+    return "\n\n".join(filtered)
+
 
 def assemble_explorer_prompt(
     *,
@@ -1029,6 +1195,9 @@ def assemble_explorer_prompt(
     ):
         pass_prompt += _SUPPRESS_MISSING_TESTS
 
+    # Filter cross-file context for this expert
+    filtered_cross_file = _filter_cross_file_for_expert(cross_file_context, expert_name)
+
     return PromptContext(
         global_contract=global_contract,
         pass_prompt=pass_prompt,
@@ -1043,7 +1212,7 @@ def assemble_explorer_prompt(
         spec=spec,
         prescan_signals=prescan_signals,
         domain_checklists=domain_checklists,
-        cross_file_context=cross_file_context,
+        cross_file_context=filtered_cross_file,
         review_md_directives=review_md_directives,
         path_instructions=path_instructions,
         functions_summary=functions_summary,
@@ -1238,29 +1407,31 @@ def extract_diff(
         )
 
     if mode == "staged":
-        staged_files = _changed_files_for_command(
+        # Check for any working tree changes (staged + unstaged) against HEAD
+        worktree_files = _changed_files_for_command(
             repo_root,
-            ["git", "diff", "--cached", "--name-only", "--find-renames"],
+            ["git", "diff", "HEAD", "--name-only", "--find-renames"],
         )
-        if not staged_files:
+        if not worktree_files:
+            # No uncommitted changes — fall back to last commit
             return extract_diff(
                 repo_root=repo_root, mode="commit", max_diff_bytes=max_diff_bytes
             )
         return _git_diff_result(
             repo_root=repo_root,
             mode=mode,
-            base_ref=None,
+            base_ref="HEAD",
             merge_base=None,
-            head_ref="INDEX",
+            head_ref="WORKTREE",
             name_only_command=[
                 "git",
                 "diff",
-                "--cached",
+                "HEAD",
                 "--name-only",
                 "--find-renames",
             ],
-            numstat_command=["git", "diff", "--cached", "--numstat", "--find-renames"],
-            diff_command=["git", "diff", "--cached", "--find-renames"],
+            numstat_command=["git", "diff", "HEAD", "--numstat", "--find-renames"],
+            diff_command=["git", "diff", "HEAD", "--find-renames"],
             max_diff_bytes=max_diff_bytes,
         )
 
@@ -1697,6 +1868,33 @@ def _has_session_marker(session_dir: Path) -> bool:
 def _write_session_marker(session_dir: Path) -> None:
     _session_marker_path(session_dir).write_text(
         "codereview-session\n", encoding="utf-8"
+    )
+
+
+def _write_last_review_marker(
+    repo_root: Path,
+    report: dict[str, Any],
+    launch_packet: dict[str, Any],
+) -> None:
+    """Write .agents/codereview/last-review.json for 'since last review' default."""
+    try:
+        head_sha = run_subprocess_text(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root
+        ).strip()
+    except Exception:
+        head_sha = launch_packet.get("head_ref", "HEAD")
+    marker = {
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "head_sha": head_sha,
+        "base_ref": launch_packet.get("base_ref", ""),
+        "scope": launch_packet.get("scope", ""),
+        "file_count": len(launch_packet.get("changed_files", [])),
+        "verdict": report.get("verdict", ""),
+    }
+    marker_dir = repo_root / ".agents/codereview"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    (marker_dir / "last-review.json").write_text(
+        json.dumps(marker, indent=2), encoding="utf-8"
     )
 
 
@@ -2216,6 +2414,59 @@ def prepare(args: argparse.Namespace) -> int:
             _format_prescan_context(prescan_result) if prescan_result else ""
         )
 
+        # Format diff for explorers (before/after blocks instead of raw unified)
+        formatted_diff = diff_result.diff_text  # default: raw
+        try:
+            fmt_result = run_subprocess_text(
+                ["python3", _code_intel, "format-diff"],
+                cwd=repo_root,
+                timeout=_bounded_timeout(deadline),
+                input_text=diff_result.diff_text,
+            )
+            if fmt_result.strip():
+                formatted_diff = fmt_result
+                (session_dir / "diff-formatted.patch").write_text(
+                    formatted_diff, encoding="utf-8"
+                )
+        except Exception as exc:
+            progress("format_diff_failed", error=str(exc))
+
+        # Budget-aware expansion: if formatted diff is small, re-run with more context
+        prompt_budget_cfg = config.get("token_budget", {}).get(
+            "explorer_prompt", 70_000
+        )
+        budget_chars = prompt_budget_cfg * 4  # rough tokens-to-chars
+        if (
+            len(formatted_diff) < budget_chars * 0.5
+            and formatted_diff != diff_result.diff_text
+        ):
+            try:
+                expanded = run_subprocess_text(
+                    ["python3", _code_intel, "format-diff", "--expand-context"],
+                    cwd=repo_root,
+                    timeout=_bounded_timeout(deadline),
+                    input_text=diff_result.diff_text,
+                )
+                if expanded.strip():
+                    formatted_diff = expanded
+                    (session_dir / "diff-formatted.patch").write_text(
+                        formatted_diff, encoding="utf-8"
+                    )
+            except Exception:
+                pass  # keep non-expanded formatted diff
+
+        # Build a DiffResult with formatted diff for explorer prompts only;
+        # raw diff stays for deterministic tools (scans, prescan already ran).
+        formatted_diff_result = DiffResult(
+            mode=diff_result.mode,
+            base_ref=diff_result.base_ref,
+            merge_base=diff_result.merge_base,
+            changed_files=diff_result.changed_files,
+            diff_text=formatted_diff,
+            head_ref=diff_result.head_ref,
+            pr_number=diff_result.pr_number,
+        )
+
         # Cross-file context planning
         cross_file_context = ""
         if not _skip_cross_file_planning(diff_result):
@@ -2261,7 +2512,10 @@ def prepare(args: argparse.Namespace) -> int:
 
         progress("prepare_step", step=5, total=8, message="Assembling expert panel")
         experts = assemble_expert_panel(
-            diff_result, config, scoped_spec_content or None
+            diff_result,
+            config,
+            scoped_spec_content or None,
+            functions_data=func_result,
         )
 
         review_mode = select_mode(
@@ -2292,13 +2546,15 @@ def prepare(args: argparse.Namespace) -> int:
             for chunk in chunks:
                 wave_tasks: list[dict[str, Any]] = []
                 chunk_diff_result = DiffResult(
-                    mode=diff_result.mode,
-                    base_ref=diff_result.base_ref,
-                    merge_base=diff_result.merge_base,
+                    mode=formatted_diff_result.mode,
+                    base_ref=formatted_diff_result.base_ref,
+                    merge_base=formatted_diff_result.merge_base,
                     changed_files=chunk["files"],
-                    diff_text=_chunk_diff(diff_result.diff_text, chunk["files"]),
-                    head_ref=diff_result.head_ref,
-                    pr_number=diff_result.pr_number,
+                    diff_text=_chunk_diff(
+                        formatted_diff_result.diff_text, chunk["files"]
+                    ),
+                    head_ref=formatted_diff_result.head_ref,
+                    pr_number=formatted_diff_result.pr_number,
                 )
                 chunk_path_instr = load_path_instructions(chunk["files"], config)
                 for expert in experts:
@@ -2351,7 +2607,7 @@ def prepare(args: argparse.Namespace) -> int:
             for expert in experts:
                 prompt_context = assemble_explorer_prompt(
                     expert_name=expert["name"],
-                    diff_result=diff_result,
+                    diff_result=formatted_diff_result,
                     global_contract=global_contract,
                     complexity=json.dumps(context_results["complexity"], indent=2),
                     git_risk=json.dumps(context_results["git_risk"], indent=2),
@@ -2423,6 +2679,32 @@ def prepare(args: argparse.Namespace) -> int:
         _append_timing(session_dir, "prepare", phase_started)
         progress("prepare_step", step=8, total=8, message="Launch packet ready")
         return 0
+    except PromptBudgetExceeded as exc:
+        fallback = diff_result or DiffResult(
+            mode=diff_mode,
+            base_ref=getattr(args, "base", None),
+            merge_base=None,
+            changed_files=[],
+            diff_text="",
+        )
+        packet = build_launch_packet(
+            session_dir=session_dir,
+            diff_result=fallback,
+            review_mode="standard",
+            waves=[],
+            judge={},
+            scan_results={},
+            spec_file=getattr(args, "spec", None),
+            config=config,
+            status="budget_exceeded",
+            error=str(exc),
+        )
+        (session_dir / "launch.json").write_text(
+            json.dumps(packet, indent=2), encoding="utf-8"
+        )
+        _append_timing(session_dir, "prepare", phase_started)
+        progress("prepare_budget_exceeded", error=str(exc))
+        return 1
     except TimeoutError as exc:
         fallback = diff_result or DiffResult(
             mode=diff_mode,
@@ -3032,6 +3314,9 @@ def finalize(args: argparse.Namespace) -> int:
         "--confidence-floor",
         str(launch_packet.get("_config", {}).get("confidence_floor", 0.65)),
     ]
+    min_sev = launch_packet.get("_config", {}).get("minimum_severity", "low")
+    if min_sev and min_sev != "low":
+        enrich_cmd.extend(["--minimum-severity", min_sev])
     # Pass code-intel graph if available in the session directory
     code_intel_path = session_dir / "code-intel.json"
     if code_intel_path.exists():
@@ -3173,6 +3458,10 @@ def finalize(args: argparse.Namespace) -> int:
         else ""
     )
     report_preview = _preview_provenance + markdown[:3000]
+
+    # Write last-review marker for "since last review" default
+    _write_last_review_marker(repo_root, report, launch_packet)
+
     finalize_result = {
         "status": "complete",
         "verdict": report["verdict"],
@@ -3241,7 +3530,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--setup",
         action="store_true",
-        help="Delete .codereview-cache/setup-complete marker to re-run dependency setup on next review",
+        help="Delete .agents/codereview/setup-complete marker to re-run dependency setup on next review",
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -3298,11 +3587,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # Handle --setup: delete the setup-complete marker so Step 0 re-runs.
     if getattr(args, "setup", False):
-        marker = Path(".codereview-cache/setup-complete")
+        marker = Path(".agents/codereview/setup-complete")
         if marker.exists():
             marker.unlink()
             print(
-                "Deleted .codereview-cache/setup-complete — dependency setup will re-run on next review."
+                "Deleted .agents/codereview/setup-complete — dependency setup will re-run on next review."
             )
         else:
             print("No setup marker found — dependency setup will run on next review.")

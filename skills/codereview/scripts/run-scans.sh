@@ -100,11 +100,15 @@ HAS_JS=false
 HAS_RUBY=false
 HAS_JAVA=false
 SH_FILES=()
+PY_FILES=()
 
 for f in "${FILES[@]}"; do
 	case "$f" in
 	*.rs) HAS_RUST=true ;;
-	*.py) HAS_PYTHON=true ;;
+	*.py)
+		HAS_PYTHON=true
+		PY_FILES+=("$f")
+		;;
 	*.go) HAS_GO=true ;;
 	*.ts | *.tsx | *.js | *.jsx) HAS_JS=true ;;
 	*.rb | *.rake | *.gemspec) HAS_RUBY=true ;;
@@ -912,9 +916,9 @@ if $HAS_PYTHON; then
 		(
 			# Check if project has ruff config
 			if [ -f "ruff.toml" ] || [ -f ".ruff.toml" ] || grep -q '\[tool\.ruff\]' pyproject.toml 2>/dev/null; then
-				run_tool ruff 60 ruff check --output-format=json -- "${FILES[@]}"
+				run_tool ruff 60 ruff check --output-format=json -- "${PY_FILES[@]}"
 			else
-				run_tool ruff 60 ruff check --select=E,F,W --output-format=json -- "${FILES[@]}"
+				run_tool ruff 60 ruff check --select=E,F,W --output-format=json -- "${PY_FILES[@]}"
 			fi
 		) &
 		TIER1_PIDS="$TIER1_PIDS $!"

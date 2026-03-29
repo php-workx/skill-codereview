@@ -106,6 +106,28 @@ def validate_finding(finding: dict, index: int) -> bool:
     return True
 
 
+_SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+
+
+def apply_minimum_severity(findings: list, minimum: str) -> tuple[list, int]:
+    """Drop findings below the minimum severity level.
+
+    Returns (kept_findings, dropped_count).
+    """
+    min_rank = _SEVERITY_RANK.get(minimum, 1)
+    if min_rank <= 1:
+        return findings, 0
+    kept = []
+    dropped = 0
+    for f in findings:
+        sev = f.get("severity", "low").lower()
+        if _SEVERITY_RANK.get(sev, 1) >= min_rank:
+            kept.append(f)
+        else:
+            dropped += 1
+    return kept, dropped
+
+
 def apply_confidence_floor(findings: list, floor: float) -> tuple[list, int]:
     """Drop AI findings whose confidence is below *floor*.
 
@@ -391,6 +413,12 @@ def main():
         default="unknown",
         help="Code provenance: human, ai-assisted, autonomous, unknown (default: unknown).",
     )
+    parser.add_argument(
+        "--minimum-severity",
+        default="low",
+        choices=["low", "medium", "high", "critical"],
+        help="Drop findings below this severity (default: low = keep all).",
+    )
     args = parser.parse_args()
 
     # 1. Load both finding sets
@@ -441,6 +469,11 @@ def main():
     # 9c. F9: Provenance boost — elevate AI-codegen risk findings from consider→should_fix
     combined = apply_provenance_boost(combined, args.provenance)
 
+    # 9d. Minimum severity filter — drop findings below configured threshold
+    combined, below_minimum_severity = apply_minimum_severity(
+        combined, args.minimum_severity
+    )
+
     # 10. Generate llm_prompt (deterministic template, not an LLM call)
     if not args.no_llm_prompts:
         for f in combined:
@@ -459,6 +492,7 @@ def main():
         "provenance": args.provenance,
         "dropped": {
             "below_confidence_floor": below_confidence_floor,
+            "below_minimum_severity": below_minimum_severity,
             "downgraded_to_medium": downgraded_to_medium,
             "pre_existing_not_reachable": dropped_pre_existing,
         },
