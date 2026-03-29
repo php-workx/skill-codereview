@@ -373,12 +373,8 @@ def invalid_judge_output_failure() -> None:
     write(session_dir / "judge.json", "this is not json")
 
     with mock.patch.object(orch, "detect_repo_root", return_value=repo):
-        try:
-            orch.finalize(Namespace(session_dir=session_dir, judge_output=None))
-        except ValueError as exc:
-            assert_true("No complete JSON payload found" in str(exc), "judge parsing failure should be surfaced")
-        else:
-            raise AssertionError("finalize should fail on invalid judge output")
+        rc = orch.finalize(Namespace(session_dir=session_dir, judge_output=None))
+        assert_true(rc == 1, "finalize should return 1 on invalid judge output")
 
 
 round_trip()

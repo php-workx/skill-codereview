@@ -14,29 +14,27 @@ The launch packet should capture the review scope, diff metadata, wave plan, jud
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Step 2: Context Gathering                                    │
-│  - Diff analysis, callers/callees, dead code check            │
-│  - Complexity analysis (radon/gocyclo)                        │
-│  - Spec/plan loading                                          │
-│  → Produces context packet                                    │
+│  Step 2: Context Gathering (parallel)                         │
+│  - Diff extraction + format-diff (LLM-optimized before/after) │
+│  - code_intel.py: complexity, functions, graph (callers,      │
+│    co-change, depth-2), imports/exports                       │
+│  - prescan.py: 8 pattern checkers (P-SEC through P-STUB)     │
+│  - Deterministic scans: ruff, semgrep, trivy, shellcheck,    │
+│    gitleaks, ast-grep (per-language file filtering)           │
+│  - Cross-file planner: LLM search for related code outside   │
+│    diff (callers, symmetric ops, test/impl, config deps)     │
+│  - REVIEW.md directives, domain checklists, path instructions │
+│  - Spec/plan loading, coverage data, git risk scoring         │
+│  → Produces enriched PromptContext (12 context sources)       │
 └──────────────────────────────────────────────────────────────┘
                               │
 ┌──────────────────────────────────────────────────────────────┐
-│  Step 3: Deterministic Scans                                  │
-│  semgrep, trivy, osv-scanner, shellcheck, pre-commit,         │
-│  sonarqube (via skill-sonarqube, if installed)                 │
-│  → Produces deterministic findings                            │
-└──────────────────────────────────────────────────────────────┘
-                              │
-┌──────────────────────────────────────────────────────────────┐
-│  Step 3.5: Adaptive Pass Selection                            │
-│  - Evaluate skip signals for extended passes                  │
-│  - Skip concurrency pass if no concurrency primitives         │
-│  - Skip api-contract pass if no public API changes            │
-│  - Skip error-handling pass if test/docs/config only          │
-│  - Skip spec-verification pass if no spec loaded              │
-│  - Core passes (correctness, security, reliability, tests)    │
-│    are never skipped                                          │
+│  Step 3: Adaptive Pass Selection                              │
+│  - Structural detection from code_intel function signatures   │
+│  - Regex fallback when code_intel unavailable                 │
+│  - Core passes always run (correctness, security, tests)      │
+│  - Extended passes auto-activate when relevant                │
+│  - Per-explorer cross-file context routing by category        │
 └──────────────────────────────────────────────────────────────┘
                               │
     ┌────────┬────────┬───────┼───────┬────────┬────────┬────────┐
@@ -68,9 +66,16 @@ The launch packet should capture the review scope, diff metadata, wave plan, jud
 └──────────────────────────────────────────────────────────────┘
                               │
 ┌──────────────────────────────────────────────────────────────┐
-│  Step 5: Classify into tiers                                  │
-│  Step 6: Format report with Next Steps                        │
-│  Step 7: Save artifacts (.md + .json)                         │
+│  Step 5: Enrich findings (enrich-findings.py)                 │
+│  - Merge AI + deterministic findings                          │
+│  - Confidence floor filter, minimum severity filter           │
+│  - Code-intel severity boost (caller count)                   │
+│  - Evidence check (downgrade AI high/critical without         │
+│    failure_mode)                                              │
+│  - Action tier assignment (must_fix/should_fix/consider)      │
+│  Step 6: Lifecycle tracking (fingerprint, suppress, defer)    │
+│  Step 7: Format report + save artifacts (.md + .json)         │
+│  Step 8: Write last-review marker for scope tracking          │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -142,6 +147,13 @@ The launch packet should capture the review scope, diff metadata, wave plan, jud
 | Fuzzy match fallback (60% key term overlap) | Secondary matching when exact fingerprint differs: same `file + pass + severity` and >= 60% stemmed word set overlap. Catches AI summary rewording that escapes stemming (e.g., "missing" vs "lacks"). | Tradeoff: 60% threshold is data-driven via test fixtures. Too low → false matches between genuinely different findings. Too high → misses legitimate rewording |
 | Deferred scope (file/pass/exact) | Controls when deferred findings resurface. `file` (default): any change to the file. `pass`: change to file AND same pass fires. `exact`: only exact fingerprint match. | Granular control prevents noise — e.g., a deferred security finding shouldn't resurface when only correctness pass reviews a typo fix. `exact` is the strictest: effectively permanent deferral unless the exact same finding reappears |
 | Named expert panel | Restructures judge as sequential expert roles (Gatekeeper→Verifier→Calibrator→Synthesizer). Forces sequential reasoning, makes analysis auditable, prevents step skipping. Zero cost — prompt reorganization only. | Kodus-AI panel-of-experts pattern |
+| `code_intel.py` shared module (F0c) | Tree-sitter is optional with regex fallback so the skill works on any machine without pip installs. A single Python module replaces `complexity.sh` (bash) because Python handles multi-language AST parsing, regex patterns, and JSON output more reliably than bash string manipulation — and shares language config across subcommands (complexity, functions, imports, patterns, graph). | Context enrichment: code intelligence foundation |
+| `enrich-findings.py` extraction (F0b) | Mechanical enrichment (ID assignment, tier classification, confidence floor filtering, evidence downgrade) is extracted from the agent into a deterministic script so results are reproducible across runs and independently testable. Judgment-dependent work (deduplication, root-cause grouping, severity calibration) stays in the agent because it requires reading code and reasoning about behavior. | Context enrichment: scripts-over-prompts principle |
+| Prescan as context not findings (F1) | Prescan signals (secrets, swallowed errors, long functions, stubs, dead code candidates) are fed to explorers as investigation hints, not as findings — because regex patterns have high false-positive rates and lack the semantic understanding to confirm issues. Python over bash because multi-language function extraction and AST-aware checks require regex engines and data structures beyond bash's capabilities. Tree-sitter optional with the same regex fallback as `code_intel.py`. | Context enrichment: prescan signals |
+| Static markdown checklists (F2) | Domain checklists are plain markdown files (one per domain: SQL, concurrency, LLM, etc.) because they are human-readable, version-controllable, and require no runtime infrastructure. Domain detection uses inline grep in `orchestrate.py` rather than a separate script because the detection logic is a few regex checks — not complex enough to justify a standalone file. | Context enrichment: domain checklists |
+| LLM-driven cross-file planner (F12) | Pure graph analysis misses non-obvious relationships (a config change that affects a distant handler, a type alias used across modules). An LLM planner using Haiku tier catches these semantic connections at low cost. Results are mechanically enforced — the orchestrator injects planner output into explorer prompts rather than relying on explorers to discover cross-file relationships independently. (deterministic fallback — LLM planner integration planned) | Context enrichment: cross-file analysis |
+| REVIEW.md alongside `.codereview.yaml` (F13) | Config YAML controls pipeline behavior (passes, thresholds, model routing); REVIEW.md provides human-authored review directives in prose. Keeping them separate preserves each file's single responsibility. Markdown format maximizes discoverability — teams already write CONTRIBUTING.md and CODEOWNERS, so REVIEW.md fits naturally. | Context enrichment: repo-level directives |
+| fnmatch path instructions (F15) | Uses `fnmatch` glob patterns (e.g., `src/api/**`) consistent with the existing `ignore_paths` config, avoiding a second pattern syntax. Per-path granularity (not per-directory) allows instructions to target specific file patterns like `*_test.go` or `migrations/*.sql` without requiring directory-level grouping. | Context enrichment: path-based instructions |
 
 ---
 

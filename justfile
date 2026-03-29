@@ -1,5 +1,5 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
-test_modules := "tests.test_orchestrate tests.test_orchestrate_prepare tests.test_orchestrate_json tests.test_orchestrate_phases tests.test_orchestrate_alignment tests.test_eval_store tests.test_eval_owasp"
+test_modules := "tests.test_orchestrate tests.test_orchestrate_prepare tests.test_orchestrate_json tests.test_orchestrate_phases tests.test_orchestrate_alignment tests.test_code_intel tests.test_prescan tests.test_eval_store tests.test_eval_owasp"
 
 default:
   @just --list
@@ -20,7 +20,7 @@ test-scripts:
   bash tests/test-scripts.sh
 
 test-unit:
-  python3 -m unittest {{test_modules}}
+  uv run python -m unittest {{test_modules}}
 
 test-integration:
   bash tests/test-orchestrate-integration.sh

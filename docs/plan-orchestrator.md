@@ -18,7 +18,7 @@ Replace the agent-interpreted SKILL.md workflow with a Python orchestration scri
 
 The pipeline alternates between **script phases** (deterministic, driven by orchestrate.py) and **agent steps** (LLM judgment). orchestrate.py controls the flow — it decides what to run, prepares inputs, and processes outputs. The agent provides judgment at defined points.
 
-New phases can be added freely. Each script phase takes JSON on stdin or via file, produces JSON on stdout, and writes progress to stderr. Each agent step reads a packet from the previous script phase, performs one LLM task, and writes output to a designated file.
+New phases can be added freely. Each script phase takes JSON on stdin or via file, writes its output JSON to a known file path in the session directory, and writes progress to stderr. Each agent step reads a packet from the previous script phase, performs one LLM task, and writes output to a designated file.
 
 ```
 User invokes /codereview --base main
@@ -449,14 +449,14 @@ def filter_config_allowlist(config: dict) -> dict:
                "pushback_level", "judge_model", "pass_models"}
     return {k: v for k, v in config.items() if k in ALLOWED}
 
-def build_launch_packet(*, session_dir, diff_result, mode, waves, judge,
+def build_launch_packet(*, session_dir, diff_result, review_mode, waves, judge,
                         scan_results, spec_file, config, chunks, timing) -> dict:
     """Assemble the launch packet from all Phase 1 outputs."""
     return {
         "status": "ready",
         "review_id": f"{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}-{os.getpid()}",
         "session_dir": session_dir,
-        "mode": mode,
+        "mode": review_mode,
         "scope": diff_result.scope,
         "base_ref": diff_result.base_ref,
         "head_ref": diff_result.head_ref,
@@ -784,7 +784,7 @@ def prepare(args, config, session: Path, repo_root: Path):
     packet = build_launch_packet(
         session_dir=str(session),
         diff_result=diff_result,
-        mode=mode,
+        review_mode=review_mode,
         waves=waves,
         judge=judge_config,
         scan_results=scan_results,  # full dict — build_launch_packet extracts tool_status
@@ -949,7 +949,7 @@ def extract_json_from_text(text: str) -> Any:
     1. Clean text (smart quotes, trailing commas)
     2. Try json.loads(text) directly
     3. Extract from ```json ... ``` markdown blocks
-    4. Use json.JSONDecoder().raw_decode() to find JSON starting at first [ or {
+    4. Use balanced-bracket extraction to find JSON starting at first [ or {
     """
     # 0. Preprocessing: replace smart quotes, strip trailing commas
     cleaned = text.replace('\u201c', '"').replace('\u201d', '"')
@@ -970,16 +970,15 @@ def extract_json_from_text(text: str) -> Any:
         except json.JSONDecodeError:
             pass
 
-    # 3. Use raw_decode() — the standard approach for extracting JSON from larger text.
-    #    Finds JSON starting at the first [ or { and lets the JSON parser determine
-    #    where the structure ends. Handles strings containing brackets correctly.
-    decoder = json.JSONDecoder()
-    for start_char in ('[', '{'):
-        start = cleaned.find(start_char)
-        if start >= 0:
+    # 3. Use balanced-bracket extraction — walks through each [ or { start position,
+    #    extracts a balanced candidate string, and attempts json.loads().
+    #    Recovers partial JSON (e.g. truncated arrays) by trying each start position.
+    starts = [i for i, ch in enumerate(cleaned) if ch in '[{']
+    for start in starts:
+        candidate = _extract_balanced_json_candidate(cleaned, start)
+        if candidate:
             try:
-                obj, end_pos = decoder.raw_decode(cleaned, start)
-                return obj
+                return json.loads(candidate)
             except json.JSONDecodeError:
                 continue
 
@@ -995,9 +994,9 @@ def extract_json_from_text(text: str) -> Any:
 | `test_extract_with_preamble` | `"Here are findings:\n[{"a": 1}]"` | Parsed array |
 | `test_extract_smart_quotes` | `[{\u201csummary\u201d: \u201ctest\u201d}]` | Parsed array |
 | `test_extract_trailing_comma` | `[{"a": 1},]` | Parsed array |
-| `test_extract_braces_in_strings` | `[{"msg": "use {x} here"}]` | Parsed array (raw_decode handles this) |
+| `test_extract_braces_in_strings` | `[{"msg": "use {x} here"}]` | Parsed array (balanced-bracket extraction handles this) |
 | `test_extract_nested_arrays` | `[{"tests": ["a", "b"]}]` | Parsed array |
-| `test_extract_truncated` | `[{"a": 1}, {"b":` | Raises ValueError |
+| `test_extract_truncated` | `[{"a": 1}, {"b":` | Recovers partial JSON (`{"a": 1}`) via balanced-bracket extraction |
 | `test_extract_empty` | `""` | Raises ValueError |
 | `test_extract_trailing_text` | `[{"a": 1}]\nI found 1 issue.` | Parsed array |
 
@@ -1918,9 +1917,9 @@ No LLM mocking needed. Each phase's tests mock only file I/O:
 | `test_extract_json_with_preamble` | "Here are findings:\n[...]" extracts the array |
 | `test_extract_json_smart_quotes` | Curly quotes replaced before parsing |
 | `test_extract_json_trailing_comma` | `[{...},]` parsed after comma removal |
-| `test_extract_json_braces_in_strings` | `{"msg": "use {x}"}` parsed correctly via raw_decode |
+| `test_extract_json_braces_in_strings` | `{"msg": "use {x}"}` parsed correctly via balanced-bracket extraction |
 | `test_extract_json_nested_arrays` | `[{"tests": ["a", "b"]}]` parsed correctly |
-| `test_extract_json_truncated` | Partial JSON raises ValueError |
+| `test_extract_json_truncated` | Partial JSON recovers first complete object via balanced-bracket extraction |
 | `test_extract_json_empty` | Empty string raises ValueError |
 | `test_extract_json_trailing_text` | `[...]\nI found 1 issue.` extracts the array |
 | `test_extract_json_string_value` | `"just a string"` raises ValueError (wrong shape for findings) |
@@ -2234,7 +2233,7 @@ All Fxx identifiers referenced in this plan, with one-line descriptions and thei
 
 **Progress streaming during --prepare (Issue 30):** `--prepare` is a single Bash tool call. All progress lines appear simultaneously after it completes (10-30 seconds). This is an inherent limitation — real-time progress requires streaming, which conflicts with the synchronous Bash tool. Acceptable for MVP; the main value of progress is inter-phase updates ("[AI] Launching explorers...") which the agent controls directly.
 
-**JSON extraction uses raw_decode() (resolved):** The `extract_json_from_text()` function uses `json.JSONDecoder().raw_decode()` instead of naive bracket counting. This correctly handles brackets, quotes, and escape sequences inside JSON strings.
+**JSON extraction uses balanced-bracket extraction (resolved):** The `extract_json_from_text()` function uses balanced-bracket extraction (`_extract_balanced_json_candidate()`) to find complete JSON structures. This correctly handles brackets, quotes, and escape sequences inside JSON strings, and can recover partial objects from truncated arrays.
 
 **Parallel agent limit (Issue 32):** Claude Code supports multiple Agent tool calls in a single message for parallel execution. Document max_parallel as 12 (configurable via `max_parallel_agents` in config). If a wave has more tasks, `plan_waves()` in `--prepare` splits it into sub-waves.
 

@@ -20,7 +20,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 
@@ -68,33 +67,80 @@ COVERAGE_ARTIFACTS = {
     "rust": ["tarpaulin-report.json", "lcov.info", "lcov.json"],
     "typescript": ["coverage/coverage-final.json", "coverage-final.json"],
     "ruby": ["coverage/.resultset.json", "coverage/.last_run.json"],
-    "java": ["target/site/jacoco/jacoco.xml", "build/reports/jacoco/test/jacocoTestReport.xml"],
+    "java": [
+        "target/site/jacoco/jacoco.xml",
+        "build/reports/jacoco/test/jacocoTestReport.xml",
+    ],
 }
 
 # Tool detection commands and versions, per language
 TOOL_DETECTION = {
     "go": [
-        {"name": "go tool cover", "check": ["go", "tool", "cover", "-h"], "tool_key": "coverage_go"},
+        {
+            "name": "go tool cover",
+            "check": ["go", "tool", "cover", "-h"],
+            "tool_key": "coverage_go",
+        },
     ],
     "python": [
-        {"name": "coverage", "check": ["coverage", "--version"], "tool_key": "coverage_python"},
-        {"name": "pytest-cov", "check": ["pytest", "--co", "-q", "--cov", "--help"], "tool_key": "coverage_python"},
+        {
+            "name": "coverage",
+            "check": ["coverage", "--version"],
+            "tool_key": "coverage_python",
+        },
+        {
+            "name": "pytest-cov",
+            "check": ["pytest", "--co", "-q", "--cov", "--help"],
+            "tool_key": "coverage_python",
+        },
     ],
     "rust": [
-        {"name": "cargo-tarpaulin", "check": ["cargo", "tarpaulin", "--version"], "tool_key": "coverage_rust"},
-        {"name": "cargo-llvm-cov", "check": ["cargo", "llvm-cov", "--version"], "tool_key": "coverage_rust"},
+        {
+            "name": "cargo-tarpaulin",
+            "check": ["cargo", "tarpaulin", "--version"],
+            "tool_key": "coverage_rust",
+        },
+        {
+            "name": "cargo-llvm-cov",
+            "check": ["cargo", "llvm-cov", "--version"],
+            "tool_key": "coverage_rust",
+        },
     ],
     "typescript": [
-        {"name": "c8", "check": ["npx", "c8", "--version"], "tool_key": "coverage_typescript"},
-        {"name": "nyc", "check": ["npx", "nyc", "--version"], "tool_key": "coverage_typescript"},
-        {"name": "jest", "check": ["npx", "jest", "--version"], "tool_key": "coverage_typescript"},
+        {
+            "name": "c8",
+            "check": ["npx", "c8", "--version"],
+            "tool_key": "coverage_typescript",
+        },
+        {
+            "name": "nyc",
+            "check": ["npx", "nyc", "--version"],
+            "tool_key": "coverage_typescript",
+        },
+        {
+            "name": "jest",
+            "check": ["npx", "jest", "--version"],
+            "tool_key": "coverage_typescript",
+        },
     ],
     "ruby": [
-        {"name": "simplecov", "check": ["ruby", "-e", "require 'simplecov'"], "tool_key": "coverage_ruby"},
+        {
+            "name": "simplecov",
+            "check": ["ruby", "-e", "require 'simplecov'"],
+            "tool_key": "coverage_ruby",
+        },
     ],
     "java": [
-        {"name": "jacoco-maven", "check": ["mvn", "--version"], "tool_key": "coverage_java"},
-        {"name": "jacoco-gradle", "check": ["gradle", "--version"], "tool_key": "coverage_java"},
+        {
+            "name": "jacoco-maven",
+            "check": ["mvn", "--version"],
+            "tool_key": "coverage_java",
+        },
+        {
+            "name": "jacoco-gradle",
+            "check": ["gradle", "--version"],
+            "tool_key": "coverage_java",
+        },
     ],
 }
 
@@ -109,12 +155,39 @@ TEST_COMMANDS = {
         "pytest-cov": ["pytest", "--cov", "--cov-report=json:{COVER_DIR}/cover.json"],
     },
     "rust": {
-        "cargo-tarpaulin": ["cargo", "tarpaulin", "--out", "json", "--output-dir", "{COVER_DIR}/"],
-        "cargo-llvm-cov": ["cargo", "llvm-cov", "--lcov", "--output-path", "{COVER_DIR}/lcov.info"],
+        "cargo-tarpaulin": [
+            "cargo",
+            "tarpaulin",
+            "--out",
+            "json",
+            "--output-dir",
+            "{COVER_DIR}/",
+        ],
+        "cargo-llvm-cov": [
+            "cargo",
+            "llvm-cov",
+            "--lcov",
+            "--output-path",
+            "{COVER_DIR}/lcov.info",
+        ],
     },
     "typescript": {
-        "c8": ["npx", "c8", "--reporter=json", "--reports-dir={COVER_DIR}/", "npm", "test"],
-        "nyc": ["npx", "nyc", "--reporter=json", "--report-dir={COVER_DIR}/", "npm", "test"],
+        "c8": [
+            "npx",
+            "c8",
+            "--reporter=json",
+            "--reports-dir={COVER_DIR}/",
+            "npm",
+            "test",
+        ],
+        "nyc": [
+            "npx",
+            "nyc",
+            "--reporter=json",
+            "--report-dir={COVER_DIR}/",
+            "npm",
+            "test",
+        ],
         "jest": ["npx", "jest", "--coverage", "--coverageDirectory={COVER_DIR}/"],
     },
     "ruby": {
@@ -161,7 +234,9 @@ def detect_languages(changed_files):
 
 def filter_changed_files(changed_files, language):
     """Filter changed files to those matching the given language, excluding test files."""
-    lang_extensions = [ext for ext, lang in EXTENSION_LANGUAGE.items() if lang == language]
+    lang_extensions = [
+        ext for ext, lang in EXTENSION_LANGUAGE.items() if lang == language
+    ]
     result = []
     for f in changed_files:
         ext = Path(f).suffix.lower()
@@ -248,7 +323,10 @@ def check_staleness(artifact_path, changed_files):
             if artifact_mtime < commit_time:
                 days_stale = (commit_time - artifact_mtime) / 86400
                 if days_stale >= 1:
-                    return True, f"Coverage data may be stale (predates recent changes by {int(days_stale)} days)"
+                    return (
+                        True,
+                        f"Coverage data may be stale (predates recent changes by {int(days_stale)} days)",
+                    )
                 else:
                     return True, "Coverage data may be stale (predates recent changes)"
     except (subprocess.TimeoutExpired, OSError, ValueError):
@@ -278,9 +356,17 @@ def run_tests(language, tool_name, timeout, cover_dir="/tmp"):
             return True, False, None
         else:
             # Tests failed but may have generated partial coverage
-            return False, True, f"Tests exited with code {result.returncode}; partial coverage may be available"
+            return (
+                False,
+                True,
+                f"Tests exited with code {result.returncode}; partial coverage may be available",
+            )
     except subprocess.TimeoutExpired:
-        return False, True, f"Test suite timed out after {timeout}s; partial coverage may be available"
+        return (
+            False,
+            True,
+            f"Test suite timed out after {timeout}s; partial coverage may be available",
+        )
     except (FileNotFoundError, OSError) as e:
         return False, False, f"Failed to run tests: {e}"
 
@@ -288,6 +374,7 @@ def run_tests(language, tool_name, timeout, cover_dir="/tmp"):
 # ---------------------------------------------------------------------------
 # Coverage parsers
 # ---------------------------------------------------------------------------
+
 
 def parse_go_coverage(artifact_path, changed_files):
     """Parse Go cover.out format. Returns list of coverage entries."""
@@ -326,13 +413,19 @@ def parse_go_coverage(artifact_path, changed_files):
                 matched_file = cf
                 break
         if matched_file and not is_test_file(matched_file):
-            coverage_pct = int((stats["covered"] / stats["total"] * 100)) if stats["total"] > 0 else 0
-            entries.append({
-                "file": matched_file,
-                "line_coverage": coverage_pct,
-                "uncovered_functions": [],
-                "tool": "go tool cover",
-            })
+            coverage_pct = (
+                int((stats["covered"] / stats["total"] * 100))
+                if stats["total"] > 0
+                else 0
+            )
+            entries.append(
+                {
+                    "file": matched_file,
+                    "line_coverage": coverage_pct,
+                    "uncovered_functions": [],
+                    "tool": "go tool cover",
+                }
+            )
 
     return entries
 
@@ -390,13 +483,17 @@ def parse_python_coverage_json(artifact_path, changed_files):
             coverage_pct = int(summary.get("percent_covered", 0))
             # Identify uncovered functions from missing lines
             missing_lines = set(file_info.get("missing_lines", []))
-            uncovered_funcs = _extract_uncovered_functions_python(matched_file, missing_lines)
-            entries.append({
-                "file": matched_file,
-                "line_coverage": coverage_pct,
-                "uncovered_functions": uncovered_funcs,
-                "tool": "coverage.py",
-            })
+            uncovered_funcs = _extract_uncovered_functions_python(
+                matched_file, missing_lines
+            )
+            entries.append(
+                {
+                    "file": matched_file,
+                    "line_coverage": coverage_pct,
+                    "uncovered_functions": uncovered_funcs,
+                    "tool": "coverage.py",
+                }
+            )
 
     return entries
 
@@ -404,6 +501,7 @@ def parse_python_coverage_json(artifact_path, changed_files):
 def parse_python_coverage_db(changed_files):
     """Parse Python .coverage database using coverage json export. Returns list of coverage entries."""
     import tempfile as _tempfile
+
     export_fd, export_path = _tempfile.mkstemp(suffix=".json", prefix="codereview-cov-")
     os.close(export_fd)
     try:
@@ -465,7 +563,11 @@ def parse_rust_tarpaulin(artifact_path, changed_files):
             continue
 
         if matched_file not in file_stats:
-            file_stats[matched_file] = {"total": 0, "covered": 0, "uncovered_funcs": set()}
+            file_stats[matched_file] = {
+                "total": 0,
+                "covered": 0,
+                "uncovered_funcs": set(),
+            }
 
         traces = entry.get("traces", [])
         for trace in traces:
@@ -478,13 +580,17 @@ def parse_rust_tarpaulin(artifact_path, changed_files):
                     file_stats[matched_file]["uncovered_funcs"].add(fn)
 
     for filepath, stats in file_stats.items():
-        coverage_pct = int((stats["covered"] / stats["total"] * 100)) if stats["total"] > 0 else 0
-        entries.append({
-            "file": filepath,
-            "line_coverage": coverage_pct,
-            "uncovered_functions": sorted(stats["uncovered_funcs"]),
-            "tool": "cargo-tarpaulin",
-        })
+        coverage_pct = (
+            int((stats["covered"] / stats["total"] * 100)) if stats["total"] > 0 else 0
+        )
+        entries.append(
+            {
+                "file": filepath,
+                "line_coverage": coverage_pct,
+                "uncovered_functions": sorted(stats["uncovered_funcs"]),
+                "tool": "cargo-tarpaulin",
+            }
+        )
 
     return entries
 
@@ -508,7 +614,11 @@ def parse_lcov(artifact_path, changed_files):
                     current_file = line[3:]
                     current_matched = None
                     for cf in changed_set:
-                        if current_file.endswith(cf) or cf.endswith(current_file) or current_file == cf:
+                        if (
+                            current_file.endswith(cf)
+                            or cf.endswith(current_file)
+                            or current_file == cf
+                        ):
                             current_matched = cf
                             break
                     total_lines = 0
@@ -529,13 +639,19 @@ def parse_lcov(artifact_path, changed_files):
                         uncovered_funcs.append(parts[1])
                 elif line == "end_of_record":
                     if current_matched and not is_test_file(current_matched):
-                        coverage_pct = int((covered_lines / total_lines * 100)) if total_lines > 0 else 0
-                        entries.append({
-                            "file": current_matched,
-                            "line_coverage": coverage_pct,
-                            "uncovered_functions": uncovered_funcs,
-                            "tool": "lcov",
-                        })
+                        coverage_pct = (
+                            int((covered_lines / total_lines * 100))
+                            if total_lines > 0
+                            else 0
+                        )
+                        entries.append(
+                            {
+                                "file": current_matched,
+                                "line_coverage": coverage_pct,
+                                "uncovered_functions": uncovered_funcs,
+                                "tool": "lcov",
+                            }
+                        )
     except (OSError, ValueError):
         pass
 
@@ -581,12 +697,14 @@ def parse_istanbul_json(artifact_path, changed_files):
                 if name and name != "(anonymous)":
                     uncovered_funcs.append(name)
 
-        entries.append({
-            "file": matched_file,
-            "line_coverage": coverage_pct,
-            "uncovered_functions": uncovered_funcs,
-            "tool": "istanbul",
-        })
+        entries.append(
+            {
+                "file": matched_file,
+                "line_coverage": coverage_pct,
+                "uncovered_functions": uncovered_funcs,
+                "tool": "istanbul",
+            }
+        )
 
     return entries
 
@@ -647,21 +765,27 @@ def parse_simplecov_json(artifact_path, changed_files):
                 continue
 
             # file_info can be {"lines": [...]} or just [...]
-            lines = file_info.get("lines", file_info) if isinstance(file_info, dict) else file_info
+            lines = (
+                file_info.get("lines", file_info)
+                if isinstance(file_info, dict)
+                else file_info
+            )
             if not isinstance(lines, list):
                 continue
 
-            executable = [l for l in lines if l is not None]
-            covered = [l for l in executable if l > 0]
+            executable = [v for v in lines if v is not None]
+            covered = [v for v in executable if v > 0]
             total = len(executable)
             coverage_pct = int((len(covered) / total * 100)) if total > 0 else 0
 
-            entries.append({
-                "file": matched_file,
-                "line_coverage": coverage_pct,
-                "uncovered_functions": [],
-                "tool": "simplecov",
-            })
+            entries.append(
+                {
+                    "file": matched_file,
+                    "line_coverage": coverage_pct,
+                    "uncovered_functions": [],
+                    "tool": "simplecov",
+                }
+            )
 
     return entries
 
@@ -674,6 +798,7 @@ def parse_jacoco_xml(artifact_path, changed_files):
             </sourcefile></package></report>
     """
     import xml.etree.ElementTree as ET
+
     entries = []
     try:
         tree = ET.parse(artifact_path)
@@ -703,12 +828,14 @@ def parse_jacoco_xml(artifact_path, changed_files):
                     missed = _safe_int(counter.get("missed", 0))
                     total = covered + missed
                     coverage_pct = int((covered / total * 100)) if total > 0 else 0
-                    entries.append({
-                        "file": matched_file,
-                        "line_coverage": coverage_pct,
-                        "uncovered_functions": [],
-                        "tool": "jacoco",
-                    })
+                    entries.append(
+                        {
+                            "file": matched_file,
+                            "line_coverage": coverage_pct,
+                            "uncovered_functions": [],
+                            "tool": "jacoco",
+                        }
+                    )
                     break
 
     return entries
@@ -717,6 +844,7 @@ def parse_jacoco_xml(artifact_path, changed_files):
 # ---------------------------------------------------------------------------
 # Per-language coverage collection
 # ---------------------------------------------------------------------------
+
 
 def collect_coverage_for_language(language, changed_files, run_tests_flag, timeout):
     """Collect coverage data for a single language.
@@ -730,22 +858,38 @@ def collect_coverage_for_language(language, changed_files, run_tests_flag, timeo
     # Per-invocation temp directory for coverage artifacts
     cover_dir = _tempfile.mkdtemp(prefix="codereview-cover-")
     try:
-        return _collect_coverage_impl(language, changed_files, run_tests_flag, timeout, lang_files, tool_key, cover_dir)
+        return _collect_coverage_impl(
+            language,
+            changed_files,
+            run_tests_flag,
+            timeout,
+            lang_files,
+            tool_key,
+            cover_dir,
+        )
     finally:
         _shutil.rmtree(cover_dir, ignore_errors=True)
 
 
-def _collect_coverage_impl(language, changed_files, run_tests_flag, timeout, lang_files, tool_key, cover_dir):
+def _collect_coverage_impl(
+    language, changed_files, run_tests_flag, timeout, lang_files, tool_key, cover_dir
+):
     """Inner implementation for collect_coverage_for_language."""
     warnings = []
 
     if not lang_files:
-        return [], {tool_key: {
-            "status": "skipped",
-            "version": None,
-            "finding_count": 0,
-            "note": f"No non-test {language} files in changed files",
-        }}, []
+        return (
+            [],
+            {
+                tool_key: {
+                    "status": "skipped",
+                    "version": None,
+                    "finding_count": 0,
+                    "note": f"No non-test {language} files in changed files",
+                }
+            },
+            [],
+        )
 
     # Step 1: Check for existing coverage artifacts
     artifact_path = find_existing_artifact(language)
@@ -755,21 +899,33 @@ def _collect_coverage_impl(language, changed_files, run_tests_flag, timeout, lan
     if artifact_path is None and run_tests_flag:
         tool_name, tool_version, tool_key = detect_tool(language)
         if tool_name is None:
-            return [], {tool_key: {
-                "status": "not_installed",
-                "version": None,
-                "finding_count": 0,
-                "note": f"No coverage tool found for {language}",
-            }}, []
+            return (
+                [],
+                {
+                    tool_key: {
+                        "status": "not_installed",
+                        "version": None,
+                        "finding_count": 0,
+                        "note": f"No coverage tool found for {language}",
+                    }
+                },
+                [],
+            )
 
         success, partial, note = run_tests(language, tool_name, timeout, cover_dir)
         if not success and not partial:
-            return [], {tool_key: {
-                "status": "failed",
-                "version": tool_version,
-                "finding_count": 0,
-                "note": note,
-            }}, []
+            return (
+                [],
+                {
+                    tool_key: {
+                        "status": "failed",
+                        "version": tool_version,
+                        "finding_count": 0,
+                        "note": note,
+                    }
+                },
+                [],
+            )
 
         # Re-check for artifacts after running tests (check cover_dir first)
         artifact_path = find_existing_artifact(language, cover_dir=cover_dir)
@@ -777,12 +933,19 @@ def _collect_coverage_impl(language, changed_files, run_tests_flag, timeout, lan
 
         if artifact_path is None:
             status = "partial" if partial else "failed"
-            return [], {tool_key: {
-                "status": status,
-                "version": tool_version,
-                "finding_count": 0,
-                "note": note or "Tests ran but no coverage artifact was generated",
-            }}, []
+            return (
+                [],
+                {
+                    tool_key: {
+                        "status": status,
+                        "version": tool_version,
+                        "finding_count": 0,
+                        "note": note
+                        or "Tests ran but no coverage artifact was generated",
+                    }
+                },
+                [],
+            )
 
         if partial:
             warnings.append(note)
@@ -790,12 +953,18 @@ def _collect_coverage_impl(language, changed_files, run_tests_flag, timeout, lan
     elif artifact_path is None:
         # No existing data and --run-tests not set
         tool_name, tool_version, tool_key = detect_tool(language)
-        return [], {tool_key: {
-            "status": "skipped",
-            "version": tool_version,
-            "finding_count": 0,
-            "note": "No existing coverage data found. Set coverage.run_tests: true to generate.",
-        }}, []
+        return (
+            [],
+            {
+                tool_key: {
+                    "status": "skipped",
+                    "version": tool_version,
+                    "finding_count": 0,
+                    "note": "No existing coverage data found. Set coverage.run_tests: true to generate.",
+                }
+            },
+            [],
+        )
 
     # Step 3: Check staleness (skip if we just generated it)
     if not artifact_from_tests:
@@ -816,12 +985,18 @@ def _collect_coverage_impl(language, changed_files, run_tests_flag, timeout, lan
         else:
             status = "ran"
 
-    return entries, {tool_key: {
-        "status": status,
-        "version": tool_version,
-        "finding_count": len(entries),
-        "note": None,
-    }}, warnings
+    return (
+        entries,
+        {
+            tool_key: {
+                "status": status,
+                "version": tool_version,
+                "finding_count": len(entries),
+                "note": None,
+            }
+        },
+        warnings,
+    )
 
 
 def _parse_coverage(language, artifact_path, changed_files):
@@ -881,6 +1056,7 @@ def _parse_coverage(language, artifact_path, changed_files):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Collect test coverage data for changed files.",
@@ -936,7 +1112,10 @@ def main():
 
     for lang in languages:
         entries, status, warnings = collect_coverage_for_language(
-            lang, changed_files, args.run_tests, args.timeout,
+            lang,
+            changed_files,
+            args.run_tests,
+            args.timeout,
         )
         all_coverage.extend(entries)
         all_tool_status.update(status)

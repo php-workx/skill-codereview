@@ -1,4 +1,5 @@
 import json
+import os
 from argparse import Namespace
 import subprocess
 import sys
@@ -8,26 +9,42 @@ from pathlib import Path
 from unittest import mock
 
 from scripts.orchestrate import (
+    CONFIG_ALLOWLIST,
     DEFAULT_CONFIG,
     DiffResult,
     PromptBudgetExceeded,
     PromptContext,
     SubprocessError,
+    _CROSS_FILE_DEFAULT_CATEGORIES,
+    _CROSS_FILE_ROUTING,
     _cleanup_stale_session,
     _apply_spec_scope,
     _chunk_diff,
     _count_changed_lines_for_file,
+    _filter_cross_file_for_expert,
+    _skip_cross_file_planning,
     assemble_expert_panel,
     assemble_explorer_prompt,
     assemble_report_envelope,
+    build_cross_file_context,
+    build_launch_packet,
     build_parser,
     check_token_budget,
+    drop_least_relevant_checklist,
     extract_diff,
     finalize,
     load_config,
+    load_domain_checklists,
+    load_path_instructions,
+    load_review_md_directives,
+    load_review_md_skip_patterns,
     post_explorers,
     prepare,
     select_mode,
+    truncate_cross_file_top3_high_risk,
+    truncate_review_md_always_check_only,
+    truncate_to_changed_hunks_only,
+    truncate_spec_to_5k,
     triage_files,
 )
 
@@ -36,6 +53,20 @@ REPO_ROOT = TESTS_DIR.parent
 
 
 class OrchestratePlumbingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Clear GIT_DIR/GIT_WORK_TREE so temp repo tests use their own git context
+        self._saved_git_env = {}
+        for key in ("GIT_DIR", "GIT_WORK_TREE"):
+            if key in os.environ:
+                self._saved_git_env[key] = os.environ.pop(key)
+
+    def tearDown(self) -> None:
+        # First pop keys that may have been set during the test
+        for key in ("GIT_DIR", "GIT_WORK_TREE"):
+            os.environ.pop(key, None)
+        # Then restore original values
+        os.environ.update(self._saved_git_env)
+
     def test_help_lists_expected_subcommands(self) -> None:
         result = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "orchestrate.py"), "--help"],
@@ -102,6 +133,13 @@ class OrchestratePlumbingTests(unittest.TestCase):
         self.assertEqual(config["confidence_floor"], 0.65)
         self.assertEqual(config["large_diff"], DEFAULT_CONFIG["large_diff"])
         self.assertEqual(config["ignore_paths"], ["vendor/"])
+
+    def test_load_config_rejects_invalid_minimum_severity(self) -> None:
+        fake_yaml = mock.Mock()
+        fake_yaml.safe_load.return_value = {"minimum_severity": "ultra"}
+        with mock.patch("scripts.orchestrate.yaml", fake_yaml):
+            with self.assertRaises(ValueError):
+                load_config(TESTS_DIR / "fixtures" / "orchestrate" / "codereview.yaml")
 
     def test_assemble_expert_panel_always_includes_core_experts(self) -> None:
         diff_result = DiffResult(
@@ -311,11 +349,11 @@ class OrchestratePlumbingTests(unittest.TestCase):
         self.assertEqual(result.changed_files, ["tracked.txt"])
         self.assertIn("+two", result.diff_text)
 
-    def test_extract_diff_staged_mode_falls_back_to_commit_when_empty(self) -> None:
+    def test_extract_diff_worktree_mode_falls_back_to_commit_when_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = self._init_repo_with_feature_commit(Path(tmpdir))
 
-            result = extract_diff(repo_root=repo, mode="staged")
+            result = extract_diff(repo_root=repo, mode="worktree")
 
         self.assertEqual(result.changed_files, ["tracked.txt"])
         self.assertIn("+two", result.diff_text)
@@ -464,7 +502,12 @@ class OrchestratePlumbingTests(unittest.TestCase):
 
             context_responses = {
                 "discover-project.py": {"language": "python"},
-                "complexity.sh": {"hotspots": [{"file": "tracked.txt", "score": "C"}]},
+                "code_intel.py:complexity": {
+                    "hotspots": [{"file": "tracked.txt", "score": "C"}],
+                    "analyzer": "regex-only",
+                    "tool_status": {},
+                },
+                "code_intel.py:functions": {"functions": []},
                 "git-risk.sh": {"tiers": [{"file": "tracked.txt", "tier": "high"}]},
                 "run-scans.sh": {"findings": [{"tool": "semgrep"}]},
                 "coverage-collect.py": {
@@ -475,12 +518,15 @@ class OrchestratePlumbingTests(unittest.TestCase):
             def fake_run(command, *args, **kwargs):
                 from pathlib import Path
 
-                name = next(
+                script_name = next(
                     (Path(p).name for p in command if p.endswith((".py", ".sh"))),
                     None,
                 )
-                if name and name in context_responses:
-                    return context_responses[name]
+                if script_name == "code_intel.py":
+                    sub = command[-1] if len(command) > 2 else "complexity"
+                    script_name = f"code_intel.py:{sub}"
+                if script_name and script_name in context_responses:
+                    return context_responses[script_name]
                 return {}
 
             with (
@@ -555,6 +601,48 @@ class OrchestratePlumbingTests(unittest.TestCase):
             launch = json.loads((session_dir / "launch.json").read_text())
             self.assertEqual(launch["status"], "timeout")
             self.assertIn("Global timeout exceeded", launch["error"])
+
+    def test_prepare_budget_exceeded_writes_error_launch_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir) / "session"
+            args = Namespace(
+                session_dir=session_dir,
+                no_config=True,
+                spec=None,
+                spec_scope=None,
+                base="main",
+                mode="base",
+                timeout=5,
+            )
+
+            diff_result = DiffResult(
+                mode="base",
+                base_ref="main",
+                merge_base="abc123",
+                changed_files=["tracked.txt"],
+                diff_text="@@\n+two\n",
+            )
+
+            with (
+                mock.patch(
+                    "scripts.orchestrate.extract_diff", return_value=diff_result
+                ),
+                mock.patch(
+                    "scripts.orchestrate.run_subprocess_json",
+                    side_effect=PromptBudgetExceeded(
+                        "Prompt exceeds 70000 token budget"
+                    ),
+                ),
+                mock.patch(
+                    "scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT
+                ),
+            ):
+                result = prepare(args)
+
+            self.assertEqual(result, 1)
+            launch = json.loads((session_dir / "launch.json").read_text())
+            self.assertEqual(launch["status"], "budget_exceeded")
+            self.assertIn("70000 token budget", launch["error"])
 
     def test_post_explorers_writes_deduped_judge_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -729,6 +817,104 @@ class OrchestratePlumbingTests(unittest.TestCase):
             self.assertTrue(any(review_dir.glob("*.json")))
             self.assertTrue(any(review_dir.glob("*.md")))
 
+    def test_finalize_survives_marker_oserror(self) -> None:
+        """finalize() returns 0 even when _write_last_review_marker raises OSError."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            session_dir = repo_root / "session"
+            session_dir.mkdir(parents=True)
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
+            (session_dir / "changed-files.txt").write_text(
+                "scripts/orchestrate.py\n", encoding="utf-8"
+            )
+            judge_output = json.loads(
+                (
+                    TESTS_DIR / "fixtures" / "orchestrate" / "mock-judge-output.json"
+                ).read_text(encoding="utf-8")
+            )
+            judge_output_path = session_dir / "judge.json"
+            judge_output_path.write_text(json.dumps(judge_output), encoding="utf-8")
+
+            launch_packet = {
+                "review_id": "review-123",
+                "session_dir": str(session_dir),
+                "scope": "branch",
+                "base_ref": "main",
+                "head_ref": "feature",
+                "mode": "standard",
+                "_config": {"confidence_floor": 0.65},
+                "tool_status": {
+                    "semgrep": {"status": "ran", "finding_count": 1, "note": None}
+                },
+                "diff_result": {"changed_files": ["scripts/orchestrate.py"]},
+                "scan_results": {"findings": []},
+            }
+            (session_dir / "launch.json").write_text(
+                json.dumps(launch_packet), encoding="utf-8"
+            )
+
+            enriched = {
+                "findings": [
+                    {
+                        "id": "security-allowlist-01",
+                        "source": "ai",
+                        "pass": "security",
+                        "severity": "high",
+                        "confidence": 0.93,
+                        "file": "scripts/orchestrate.py",
+                        "line": 89,
+                        "summary": "Subprocess command is assembled from untrusted input",
+                        "failure_mode": "A crafted review task could execute arbitrary commands.",
+                        "fix": "Require allowlisted commands before dispatch.",
+                        "action_tier": "must_fix",
+                    }
+                ],
+                "tier_summary": {"must_fix": 1, "should_fix": 0, "consider": 0},
+                "dropped": {"below_confidence_floor": 0},
+            }
+            lifecycle = {
+                "findings": enriched["findings"],
+                "suppressed_findings": [],
+                "lifecycle_summary": {
+                    "new": 1,
+                    "recurring": 0,
+                    "rejected": 0,
+                    "deferred": 0,
+                    "deferred_resurfaced": 0,
+                },
+            }
+
+            with (
+                mock.patch(
+                    "scripts.orchestrate.detect_repo_root", return_value=repo_root
+                ),
+                mock.patch(
+                    "scripts.orchestrate.run_subprocess_json",
+                    side_effect=[enriched, lifecycle],
+                ),
+                mock.patch(
+                    "scripts.orchestrate.subprocess.run",
+                    return_value=subprocess.CompletedProcess(["bash"], 0, "", ""),
+                ),
+                mock.patch(
+                    "scripts.orchestrate._write_last_review_marker",
+                    side_effect=PermissionError("read-only filesystem"),
+                ),
+                mock.patch("scripts.orchestrate.progress") as mock_progress,
+            ):
+                result = finalize(Namespace(session_dir=session_dir, judge_output=None))
+
+            self.assertEqual(result, 0)
+            # Verify the error was reported via progress
+            progress_events = [c.args[0] for c in mock_progress.call_args_list]
+            self.assertIn("last_review_marker_failed", progress_events)
+
+    @staticmethod
+    def _git_env() -> dict[str, str]:
+        return {
+            k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")
+        }
+
     @staticmethod
     def _run(command: list[str], cwd: Path) -> None:
         subprocess.run(
@@ -737,6 +923,7 @@ class OrchestratePlumbingTests(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=OrchestratePlumbingTests._git_env(),
         )
 
     @staticmethod
@@ -747,6 +934,7 @@ class OrchestratePlumbingTests(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=OrchestratePlumbingTests._git_env(),
         )
         return result.stdout
 
@@ -788,6 +976,174 @@ class OrchestratePlumbingTests(unittest.TestCase):
 
         with self.assertRaises(PromptBudgetExceeded):
             check_token_budget(context, "correctness", prompt_budget_tokens=10)
+
+    def test_prompt_context_new_fields_default_empty(self) -> None:
+        """New context enrichment fields default to empty string."""
+        context = PromptContext(
+            global_contract="c",
+            pass_prompt="p",
+            diff="d",
+            changed_files="f",
+            complexity="cx",
+            git_risk="r",
+            scan_results="s",
+            callers="cl",
+            language_standards="ls",
+            review_instructions="ri",
+            spec="sp",
+        )
+        self.assertEqual(context.prescan_signals, "")
+        self.assertEqual(context.domain_checklists, "")
+        self.assertEqual(context.cross_file_context, "")
+        self.assertEqual(context.review_md_directives, "")
+        self.assertEqual(context.path_instructions, "")
+        self.assertEqual(context.functions_summary, "")
+        self.assertEqual(context.graph_summary, "")
+
+    def test_prompt_context_render_includes_new_sections(self) -> None:
+        """New fields render with correct section headers when non-empty."""
+        context = PromptContext(
+            global_contract="contract",
+            pass_prompt="focus",
+            diff="diff",
+            changed_files="f.py",
+            complexity="",
+            git_risk="",
+            scan_results="",
+            callers="",
+            language_standards="",
+            review_instructions="",
+            spec="",
+            prescan_signals="CRITICAL: 1 secret",
+            domain_checklists="## SQL Safety\n- check params",
+            cross_file_context="views.py calls login()",
+            review_md_directives="always check auth",
+            path_instructions="src/auth: focus on bypass",
+            functions_summary="| f.py | login | user | bool |",
+            graph_summary="changed: login -> callers: views.py",
+        )
+        rendered = context.render()
+        self.assertIn("### Prescan Signals\nCRITICAL: 1 secret", rendered)
+        self.assertIn("### Domain-Specific Checklists\n## SQL Safety", rendered)
+        self.assertIn("### Cross-File Context\nviews.py calls login()", rendered)
+        self.assertIn(
+            "<review-directives>\nalways check auth\n</review-directives>", rendered
+        )
+        self.assertIn(
+            "<path-instructions>\nsrc/auth: focus on bypass\n</path-instructions>",
+            rendered,
+        )
+        self.assertIn("### Function Definitions\n| f.py | login", rendered)
+        self.assertIn("### Dependency Graph\nchanged: login -> callers", rendered)
+
+    def test_prompt_context_render_omits_empty_new_sections(self) -> None:
+        """Empty new fields don't produce section headers in render output."""
+        context = PromptContext(
+            global_contract="contract",
+            pass_prompt="focus",
+            diff="diff",
+            changed_files="f.py",
+            complexity="",
+            git_risk="",
+            scan_results="",
+            callers="",
+            language_standards="",
+            review_instructions="",
+            spec="",
+        )
+        rendered = context.render()
+        self.assertNotIn("Prescan Signals", rendered)
+        self.assertNotIn("Domain-Specific Checklists", rendered)
+        self.assertNotIn("Cross-File Context", rendered)
+        self.assertNotIn("Repo-Level Review Directives", rendered)
+        self.assertNotIn("Path-Specific Instructions", rendered)
+        self.assertNotIn("Function Definitions", rendered)
+        self.assertNotIn("Dependency Graph", rendered)
+
+    def test_budget_cascade_worst_case_survives(self) -> None:
+        """Synthetic prompt exceeding 70k tokens passes cascade without crash."""
+        big = "x " * 20_000
+        context = PromptContext(
+            global_contract="contract " * 500,
+            pass_prompt="focus " * 500,
+            diff="@@\n+" + "line\n+" * 30_000,
+            changed_files="a.py\nb.py",
+            complexity="hotspot " * 500,
+            git_risk="risk " * 500,
+            scan_results="finding " * 500,
+            callers="caller " * 500,
+            language_standards="standard " * 500,
+            review_instructions="instruction " * 500,
+            spec="spec " * 5_000,
+            prescan_signals=big,
+            domain_checklists=big,
+            cross_file_context=big,
+            review_md_directives=big,
+            path_instructions=big,
+            functions_summary=big,
+            graph_summary=big,
+        )
+        self.assertGreater(context.estimate_tokens(), 70_000)
+        rendered = check_token_budget(
+            context, "correctness", prompt_budget_tokens=70_000
+        )
+        self.assertLessEqual(len(rendered) // 4, 70_000)
+
+    def test_budget_cascade_sheds_in_priority_order(self) -> None:
+        """Truncation cascade sheds lowest-value context first."""
+        context = PromptContext(
+            global_contract="contract",
+            pass_prompt="focus",
+            diff="+" + "d" * 200,
+            changed_files="f.py",
+            complexity="",
+            git_risk="risk " * 50,
+            scan_results="scan " * 50,
+            callers="",
+            language_standards="std " * 50,
+            review_instructions="",
+            spec="",
+            graph_summary="graph " * 50,
+            functions_summary="func " * 50,
+        )
+        check_token_budget(context, "correctness", prompt_budget_tokens=200)
+        # Language standards shed first (priority P10)
+        self.assertEqual(context.language_standards, "")
+        # Scan results summarized next (priority P9)
+        self.assertIn("scan summary:", context.scan_results)
+
+    def test_truncate_to_changed_hunks_handles_format_diff(self) -> None:
+        """truncate_to_changed_hunks_only detects format-diff syntax."""
+        format_diff = (
+            "## File: src/auth/login.py\n"
+            "\n"
+            "@@ def validate_session (line 42)\n"
+            "__new hunk__\n"
+            "42  session = cache.get(token)\n"
+            "43 +if session and not session.expired:\n"
+            "44 +    session.refresh()\n"
+            "45 +    return session\n"
+            "46  return None\n"
+            "__old hunk__\n"
+            " session = cache.get(token)\n"
+            "-if session:\n"
+            "-    return session\n"
+            " return None\n"
+        )
+        result = truncate_to_changed_hunks_only(format_diff)
+        self.assertIn("## File: src/auth/login.py", result)
+        self.assertIn("__new hunk__", result)
+        self.assertIn("+if session and not session.expired:", result)
+        self.assertIn("-if session:", result)
+
+    def test_truncate_spec_to_5k(self) -> None:
+        """truncate_spec_to_5k truncates large specs and leaves small ones alone."""
+        short = "spec content"
+        self.assertEqual(truncate_spec_to_5k(short), short)
+        long_spec = "x" * 25_000
+        result = truncate_spec_to_5k(long_spec)
+        self.assertIn("[spec truncated for budget]", result)
+        self.assertLess(len(result), 25_000)
 
     def test_chunk_diff_filters_to_requested_files(self) -> None:
         """_chunk_diff returns only hunks for files in chunk_files."""
@@ -1006,6 +1362,808 @@ class SuggestMissingTestsTests(unittest.TestCase):
         )
         rendered = ctx.render()
         self.assertNotIn("Do NOT suggest adding new tests", rendered)
+
+
+class DomainChecklistTests(unittest.TestCase):
+    """Tests for domain-specific checklist detection and loading."""
+
+    def test_sql_pattern_triggers_sql_checklist(self) -> None:
+        diff = "+    cursor.execute(SELECT * FROM users WHERE id = ?)"
+        result = load_domain_checklists(diff)
+        self.assertIn("SQL Safety", result)
+        self.assertIn("parameterized queries", result)
+
+    def test_orm_pattern_triggers_sql_checklist(self) -> None:
+        diff = "+from sqlalchemy import Column, Integer"
+        result = load_domain_checklists(diff)
+        self.assertIn("SQL Safety", result)
+
+    def test_llm_pattern_triggers_llm_checklist(self) -> None:
+        diff = "+import openai\n+client = openai.Client()"
+        result = load_domain_checklists(diff)
+        self.assertIn("LLM Trust", result)
+        self.assertIn("API keys", result)
+
+    def test_anthropic_pattern_triggers_llm_checklist(self) -> None:
+        diff = "+from anthropic import Anthropic"
+        result = load_domain_checklists(diff)
+        self.assertIn("LLM Trust", result)
+
+    def test_concurrency_pattern_triggers_concurrency_checklist(self) -> None:
+        diff = "+async def fetch_data():\n+    await asyncio.gather(*tasks)"
+        result = load_domain_checklists(diff)
+        self.assertIn("Concurrency", result)
+        self.assertIn("deadlock", result.lower())
+
+    def test_goroutine_pattern_triggers_concurrency_checklist(self) -> None:
+        diff = "+go func() {\n+    mu.Lock()\n+}"
+        result = load_domain_checklists(diff)
+        self.assertIn("Concurrency", result)
+
+    def test_multiple_checklists_load_simultaneously(self) -> None:
+        diff = (
+            "+cursor.execute(SELECT * FROM users)\n"
+            "+import openai\n"
+            "+async def handler():\n"
+        )
+        result = load_domain_checklists(diff)
+        self.assertIn("SQL Safety", result)
+        self.assertIn("LLM Trust", result)
+        self.assertIn("Concurrency", result)
+
+    def test_no_checklist_when_no_patterns_match(self) -> None:
+        diff = "+x = 1 + 2\n+print(x)\n"
+        result = load_domain_checklists(diff)
+        self.assertEqual(result, "")
+
+    def test_checklist_includes_header(self) -> None:
+        diff = "+from sqlalchemy import create_engine"
+        result = load_domain_checklists(diff)
+        self.assertIn("## Domain-Specific Checklists (auto-detected)", result)
+        self.assertIn("triggered by:", result)
+
+    def test_drop_least_relevant_checklist_empty_input(self) -> None:
+        self.assertEqual(drop_least_relevant_checklist(""), "")
+
+    def test_drop_least_relevant_checklist_single_section(self) -> None:
+        text = "### SQL Safety\n\n- [ ] Item 1\n"
+        result = drop_least_relevant_checklist(text)
+        self.assertEqual(result, text)
+
+    def test_drop_least_relevant_checklist_drops_last_section(self) -> None:
+        text = (
+            "### SQL Safety\n\n- [ ] Item 1\n\n"
+            "### Concurrency\n\n- [ ] Item 2\n\n"
+            "### LLM Trust\n\n- [ ] Item 3\n"
+        )
+        result = drop_least_relevant_checklist(text)
+        self.assertIn("SQL Safety", result)
+        self.assertIn("Concurrency", result)
+        self.assertNotIn("LLM Trust", result)
+
+
+class ReviewMdDirectivesTests(unittest.TestCase):
+    """Tests for structured REVIEW.md parsing (sc-drzb)."""
+
+    _FULL_REVIEW_MD = (
+        "# Code Review Guidelines\n\n"
+        "## Always check\n"
+        "- New API endpoints have corresponding integration tests\n"
+        "- Database migrations are backward-compatible\n\n"
+        "## Style\n"
+        "- Prefer early returns over nested conditionals\n"
+        "- Use structured logging (key=value)\n\n"
+        "## Skip\n"
+        "- Generated files under src/gen/\n"
+        "- Vendored dependencies\n"
+    )
+
+    def test_parse_all_three_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "REVIEW.md").write_text(self._FULL_REVIEW_MD, encoding="utf-8")
+            result = load_review_md_directives(repo)
+
+        self.assertIn("### Mandatory Checks", result)
+        self.assertIn(
+            "- New API endpoints have corresponding integration tests", result
+        )
+        self.assertIn("- Database migrations are backward-compatible", result)
+        self.assertIn("### Style Preferences", result)
+        self.assertIn("- Prefer early returns over nested conditionals", result)
+        self.assertIn("- Use structured logging (key=value)", result)
+
+    def test_only_always_check_section(self) -> None:
+        content = "# Guidelines\n\n## Always check\n- All tests pass\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "REVIEW.md").write_text(content, encoding="utf-8")
+            result = load_review_md_directives(repo)
+
+        self.assertIn("### Mandatory Checks", result)
+        self.assertIn("- All tests pass", result)
+        self.assertNotIn("### Style Preferences", result)
+
+    def test_missing_review_md_returns_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = load_review_md_directives(Path(tmpdir))
+        self.assertEqual(result, "")
+
+    def test_no_recognized_sections_returns_empty(self) -> None:
+        content = "# Code Review Guidelines\n\n## Some Other Section\n- Random item\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "REVIEW.md").write_text(content, encoding="utf-8")
+            result = load_review_md_directives(repo)
+        self.assertEqual(result, "")
+
+    def test_thirty_item_cap_per_section(self) -> None:
+        items = "\n".join(f"- Item {i}" for i in range(35))
+        content = f"## Always check\n{items}\n\n## Style\n{items}\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "REVIEW.md").write_text(content, encoding="utf-8")
+            with mock.patch("scripts.orchestrate.progress") as mock_progress:
+                result = load_review_md_directives(repo)
+
+        # Should cap at 30 items per section
+        self.assertEqual(result.count("- Item"), 60)
+        # Should have warned twice (once per section)
+        cap_calls = [
+            c for c in mock_progress.call_args_list if c[0][0] == "review_md_cap"
+        ]
+        self.assertEqual(len(cap_calls), 2)
+
+    def test_truncation_keeps_mandatory_drops_style(self) -> None:
+        directives = (
+            "### Mandatory Checks\n"
+            "- Check A\n"
+            "- Check B\n\n"
+            "### Style Preferences\n"
+            "- Style A\n"
+        )
+        result = truncate_review_md_always_check_only(directives)
+        self.assertIn("### Mandatory Checks", result)
+        self.assertIn("- Check A", result)
+        self.assertIn("- Check B", result)
+        self.assertNotIn("### Style Preferences", result)
+        self.assertNotIn("- Style A", result)
+
+    def test_truncation_empty_input(self) -> None:
+        self.assertEqual(truncate_review_md_always_check_only(""), "")
+
+    def test_truncation_no_mandatory_section(self) -> None:
+        text = "### Style Preferences\n- Style A\n"
+        self.assertEqual(truncate_review_md_always_check_only(text), "")
+
+    def test_skip_pattern_extraction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "REVIEW.md").write_text(self._FULL_REVIEW_MD, encoding="utf-8")
+            result = load_review_md_skip_patterns(repo)
+
+        self.assertEqual(
+            result,
+            [
+                "Generated files under src/gen/",
+                "Vendored dependencies",
+            ],
+        )
+
+    def test_skip_patterns_missing_review_md(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = load_review_md_skip_patterns(Path(tmpdir))
+        self.assertEqual(result, [])
+
+    def test_skip_patterns_no_skip_section(self) -> None:
+        content = "## Always check\n- Item\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "REVIEW.md").write_text(content, encoding="utf-8")
+            result = load_review_md_skip_patterns(repo)
+        self.assertEqual(result, [])
+
+
+class PathInstructionsTests(unittest.TestCase):
+    """Tests for load_path_instructions()."""
+
+    def test_single_pattern_match(self) -> None:
+        config = {
+            "path_instructions": [
+                {"path": "src/auth/*", "instructions": "Focus on auth bypass."},
+            ]
+        }
+        result = load_path_instructions(["src/auth/login.py"], config)
+        self.assertIn("src/auth/*", result)
+        self.assertIn("Focus on auth bypass.", result)
+
+    def test_multiple_patterns_match_same_file(self) -> None:
+        config = {
+            "path_instructions": [
+                {"path": "src/*.py", "instructions": "Check types."},
+                {"path": "src/auth*", "instructions": "Check auth."},
+            ]
+        }
+        result = load_path_instructions(["src/auth.py"], config)
+        self.assertIn("Check types.", result)
+        self.assertIn("Check auth.", result)
+
+    def test_no_patterns_match(self) -> None:
+        config = {
+            "path_instructions": [
+                {"path": "migrations/**", "instructions": "Check migrations."},
+            ]
+        }
+        result = load_path_instructions(["src/app.py"], config)
+        self.assertEqual(result, "")
+
+    def test_missing_path_instructions_in_config(self) -> None:
+        result = load_path_instructions(["src/app.py"], {})
+        self.assertEqual(result, "")
+
+    def test_empty_changed_files(self) -> None:
+        config = {
+            "path_instructions": [
+                {"path": "src/*", "instructions": "Review carefully."},
+            ]
+        }
+        result = load_path_instructions([], config)
+        self.assertEqual(result, "")
+
+
+class CrossFilePlanningTests(unittest.TestCase):
+    """Tests for cross-file context planner (sc-xpjx)."""
+
+    def _make_diff(self, files: list[str]) -> DiffResult:
+        return DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base="abc123",
+            changed_files=files,
+            diff_text="fake diff",
+        )
+
+    # --- _skip_cross_file_planning ---
+
+    def test_skip_test_only_diffs(self) -> None:
+        dr = self._make_diff(["tests/test_foo.py", "src/bar_test.go"])
+        self.assertTrue(_skip_cross_file_planning(dr))
+
+    def test_skip_docs_only_diffs(self) -> None:
+        dr = self._make_diff(["README.md", "docs/guide.txt", "CHANGELOG.rst"])
+        self.assertTrue(_skip_cross_file_planning(dr))
+
+    def test_no_skip_normal_diffs(self) -> None:
+        dr = self._make_diff(["src/app.py", "lib/utils.ts"])
+        self.assertFalse(_skip_cross_file_planning(dr))
+
+    def test_no_skip_mixed_test_and_impl(self) -> None:
+        dr = self._make_diff(["src/app.py", "tests/test_app.py"])
+        self.assertFalse(_skip_cross_file_planning(dr))
+
+    def test_skip_empty_changed_files(self) -> None:
+        dr = self._make_diff([])
+        self.assertTrue(_skip_cross_file_planning(dr))
+
+    # --- truncate_cross_file_top3_high_risk ---
+
+    def test_truncate_keeps_first_3_sections(self) -> None:
+        text = (
+            "Preamble line\n"
+            "#### Section A — high risk\ndetails A\n"
+            "#### Section B — high risk\ndetails B\n"
+            "#### Section C — medium risk\ndetails C\n"
+            "#### Section D — low risk\ndetails D\n"
+        )
+        result = truncate_cross_file_top3_high_risk(text)
+        self.assertIn("Section A", result)
+        self.assertIn("Section B", result)
+        self.assertIn("Section C", result)
+        self.assertNotIn("Section D", result)
+        self.assertIn("Preamble", result)
+
+    def test_truncate_empty_input(self) -> None:
+        self.assertEqual(truncate_cross_file_top3_high_risk(""), "")
+
+    def test_truncate_fewer_than_3_sections(self) -> None:
+        text = "#### Only one\ndetails\n"
+        result = truncate_cross_file_top3_high_risk(text)
+        self.assertIn("Only one", result)
+
+    # --- build_cross_file_context ---
+
+    def test_disabled_in_config_returns_empty(self) -> None:
+        config = {**DEFAULT_CONFIG, "cross_file_planner": {"enabled": False}}
+        result = build_cross_file_context(
+            diff_summary="some diff",
+            graph_data=None,
+            functions_data={"functions": [{"name": "foo", "file": "a.py"}]},
+            config=config,
+        )
+        self.assertEqual(result, "")
+
+    def test_empty_functions_data_returns_empty(self) -> None:
+        result = build_cross_file_context(
+            diff_summary="some diff",
+            graph_data=None,
+            functions_data=None,
+            config=DEFAULT_CONFIG,
+        )
+        self.assertEqual(result, "")
+
+    def test_empty_functions_list_returns_empty(self) -> None:
+        result = build_cross_file_context(
+            diff_summary="some diff",
+            graph_data=None,
+            functions_data={"functions": []},
+            config=DEFAULT_CONFIG,
+        )
+        self.assertEqual(result, "")
+
+    @mock.patch("scripts.orchestrate.run_subprocess_json")
+    @mock.patch("scripts.orchestrate.detect_repo_root")
+    def test_calls_planner_script(self, mock_root, mock_run) -> None:
+        mock_root.return_value = Path("/tmp/repo")
+        mock_run.return_value = {
+            "sections": [
+                {
+                    "category": "consumers",
+                    "header": "create_token — callers of create_token() changed in auth.py",
+                    "matches": ["api/handler.py", "tests/test_auth.py"],
+                    "risk_level": "high",
+                },
+            ],
+            "stats": {
+                "queries_planned": 1,
+                "queries_executed": 1,
+                "total_matches": 2,
+                "llm_used": False,
+            },
+        }
+        functions_data = {"functions": [{"name": "create_token", "file": "auth.py"}]}
+        result = build_cross_file_context(
+            diff_summary="some diff",
+            graph_data=None,
+            functions_data=functions_data,
+            config=DEFAULT_CONFIG,
+        )
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args
+        # Verify the script path ends with cross_file_planner.py
+        cmd = call_args[0][0]
+        self.assertTrue(cmd[1].endswith("cross_file_planner.py"))
+        # Verify input_text contains the functions_data
+        input_json = json.loads(call_args[1]["input_text"])
+        self.assertEqual(input_json["functions_data"], functions_data)
+        self.assertEqual(input_json["diff_summary"], "some diff")
+        self.assertIsNotNone(result)
+
+    @mock.patch("scripts.orchestrate.run_subprocess_json")
+    @mock.patch("scripts.orchestrate.detect_repo_root")
+    def test_formats_sections_with_category_tags(self, mock_root, mock_run) -> None:
+        mock_root.return_value = Path("/tmp/repo")
+        mock_run.return_value = {
+            "sections": [
+                {
+                    "category": "consumers",
+                    "header": "create_token — callers of create_token() changed in auth.py",
+                    "matches": ["api/handler.py"],
+                    "risk_level": "high",
+                },
+                {
+                    "category": "test_impl",
+                    "header": "verify_user — tests related to verify_user()",
+                    "matches": ["tests/test_auth.py"],
+                    "risk_level": "medium",
+                },
+            ],
+            "stats": {
+                "queries_planned": 2,
+                "queries_executed": 2,
+                "total_matches": 2,
+                "llm_used": False,
+            },
+        }
+        result = build_cross_file_context(
+            diff_summary="some diff",
+            graph_data=None,
+            functions_data={"functions": [{"name": "create_token", "file": "auth.py"}]},
+            config=DEFAULT_CONFIG,
+        )
+        self.assertIn("#### [consumers]", result)
+        self.assertIn("#### [test_impl]", result)
+        self.assertIn("_Risk: high_", result)
+        self.assertIn("_Risk: medium_", result)
+        self.assertIn("- api/handler.py", result)
+        self.assertIn("- tests/test_auth.py", result)
+
+    @mock.patch("scripts.orchestrate.run_subprocess_json")
+    @mock.patch("scripts.orchestrate.detect_repo_root")
+    def test_handles_planner_failure(self, mock_root, mock_run) -> None:
+        mock_root.return_value = Path("/tmp/repo")
+        mock_run.side_effect = RuntimeError("planner crashed")
+        result = build_cross_file_context(
+            diff_summary="some diff",
+            graph_data=None,
+            functions_data={"functions": [{"name": "foo", "file": "a.py"}]},
+            config=DEFAULT_CONFIG,
+        )
+        self.assertEqual(result, "")
+
+    @mock.patch("scripts.orchestrate.run_subprocess_json")
+    @mock.patch("scripts.orchestrate.detect_repo_root")
+    def test_empty_sections_returns_empty(self, mock_root, mock_run) -> None:
+        mock_root.return_value = Path("/tmp/repo")
+        mock_run.return_value = {"sections": [], "stats": {}}
+        result = build_cross_file_context(
+            diff_summary="some diff",
+            graph_data=None,
+            functions_data={"functions": [{"name": "foo", "file": "a.py"}]},
+            config=DEFAULT_CONFIG,
+        )
+        self.assertEqual(result, "")
+
+
+class CrossFileRoutingTests(unittest.TestCase):
+    """Tests for per-explorer cross-file context routing (sc-f4if)."""
+
+    _SAMPLE_CONTEXT = (
+        "#### [symmetric] parse_config — symmetric callers in lib/config.py\n"
+        "_Risk: high_\n"
+        "- lib/config.py\n"
+        "\n"
+        "#### [consumers] create_token — callers of create_token() changed in auth.py\n"
+        "_Risk: high_\n"
+        "- api/handler.py\n"
+        "\n"
+        "#### [test_impl] create_token — tests related to create_token()\n"
+        "_Risk: medium_\n"
+        "- tests/test_auth.py\n"
+        "\n"
+        "#### [configuration] DB_URL — config references\n"
+        "_Risk: low_\n"
+        "- settings.py\n"
+        "\n"
+        "#### [upstream] base_class — upstream dependency\n"
+        "_Risk: medium_\n"
+        "- core/base.py\n"
+    )
+
+    def test_filter_cross_file_correctness_gets_all(self) -> None:
+        result = _filter_cross_file_for_expert(self._SAMPLE_CONTEXT, "correctness")
+        self.assertIn("[symmetric]", result)
+        self.assertIn("[consumers]", result)
+        self.assertIn("[test_impl]", result)
+        self.assertIn("[configuration]", result)
+        self.assertIn("[upstream]", result)
+
+    def test_filter_cross_file_security_gets_subset(self) -> None:
+        result = _filter_cross_file_for_expert(self._SAMPLE_CONTEXT, "security-config")
+        self.assertIn("[symmetric]", result)
+        self.assertIn("[consumers]", result)
+        self.assertNotIn("[test_impl]", result)
+        self.assertNotIn("[configuration]", result)
+        self.assertNotIn("[upstream]", result)
+
+    def test_filter_cross_file_test_adequacy_gets_test_impl(self) -> None:
+        result = _filter_cross_file_for_expert(self._SAMPLE_CONTEXT, "test-adequacy")
+        self.assertIn("[test_impl]", result)
+        self.assertNotIn("[symmetric]", result)
+        self.assertNotIn("[consumers]", result)
+        self.assertNotIn("[configuration]", result)
+        self.assertNotIn("[upstream]", result)
+
+    def test_filter_cross_file_unknown_expert_gets_consumers(self) -> None:
+        result = _filter_cross_file_for_expert(
+            self._SAMPLE_CONTEXT, "some-unknown-expert"
+        )
+        self.assertIn("[consumers]", result)
+        self.assertNotIn("[symmetric]", result)
+        self.assertNotIn("[test_impl]", result)
+        self.assertNotIn("[configuration]", result)
+        self.assertNotIn("[upstream]", result)
+
+    def test_filter_cross_file_empty_input(self) -> None:
+        self.assertEqual(_filter_cross_file_for_expert("", "correctness"), "")
+
+    def test_filter_preserves_non_categorized_preamble(self) -> None:
+        context = (
+            "Cross-file context overview\n"
+            "\n"
+            "#### [consumers] foo — callers\n"
+            "_Risk: high_\n"
+            "- bar.py\n"
+        )
+        result = _filter_cross_file_for_expert(context, "test-adequacy")
+        # Non-categorized preamble is kept for all experts
+        self.assertIn("Cross-file context overview", result)
+        # But consumers section should be excluded for test-adequacy
+        self.assertNotIn("[consumers]", result)
+
+    def test_assemble_explorer_prompt_filters_cross_file(self) -> None:
+        diff_result = DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base="abc123",
+            changed_files=["auth.py"],
+            diff_text="@@\n+token = create_token()\n",
+        )
+        ctx = assemble_explorer_prompt(
+            expert_name="test-adequacy",
+            diff_result=diff_result,
+            global_contract="contract",
+            complexity="{}",
+            git_risk="{}",
+            scan_results="{}",
+            callers="",
+            language_standards="",
+            review_instructions="",
+            spec="",
+            cross_file_context=self._SAMPLE_CONTEXT,
+            config={"suggest_missing_tests": True},
+        )
+        # test-adequacy should only see test_impl sections
+        self.assertIn("[test_impl]", ctx.cross_file_context)
+        self.assertNotIn("[consumers]", ctx.cross_file_context)
+        self.assertNotIn("[symmetric]", ctx.cross_file_context)
+        self.assertNotIn("[upstream]", ctx.cross_file_context)
+
+    def test_routing_table_covers_known_categories(self) -> None:
+        """Verify the routing table and defaults use valid categories."""
+        valid_categories = {
+            "symmetric",
+            "consumers",
+            "test_impl",
+            "configuration",
+            "upstream",
+        }
+        for expert, cats in _CROSS_FILE_ROUTING.items():
+            self.assertTrue(
+                cats.issubset(valid_categories),
+                f"{expert} has invalid categories: {cats - valid_categories}",
+            )
+        self.assertTrue(_CROSS_FILE_DEFAULT_CATEGORIES.issubset(valid_categories))
+
+
+class ExpertPanelStructuralDetectionTests(unittest.TestCase):
+    """Tests for structural expert selection via functions_data."""
+
+    def _minimal_diff(self, diff_text: str = "@@\n+print('ok')\n") -> DiffResult:
+        return DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base="abc123",
+            changed_files=["src/app.py"],
+            diff_text=diff_text,
+        )
+
+    def test_expert_panel_uses_structural_data(self) -> None:
+        """When functions_data has concurrent patterns, concurrency expert is activated."""
+        functions_data = {
+            "functions": [
+                {
+                    "file": "src/worker.py",
+                    "name": "run_worker",
+                    "params": ["task_queue", "lock"],
+                    "returns": "None",
+                    "line_start": 10,
+                    "line_end": 25,
+                    "exported": False,
+                    "language": "python",
+                },
+            ]
+        }
+        panel = assemble_expert_panel(
+            self._minimal_diff(),
+            config={},
+            spec_content=None,
+            functions_data=functions_data,
+        )
+        names = [e["name"] for e in panel]
+        self.assertIn("concurrency", names)
+        # Verify activation reason is structural, not pattern_match
+        concurrency_expert = [e for e in panel if e["name"] == "concurrency"][0]
+        self.assertEqual(
+            concurrency_expert["activation_reason"],
+            "structural_function_signature",
+        )
+
+    def test_expert_panel_falls_back_without_data(self) -> None:
+        """When functions_data is None, existing diff-text matching works as before."""
+        diff_text = "@@\n+async def handle():\n+    await do_work()\n"
+        panel = assemble_expert_panel(
+            self._minimal_diff(diff_text),
+            config={},
+            spec_content=None,
+            functions_data=None,
+        )
+        names = [e["name"] for e in panel]
+        self.assertIn("concurrency", names)
+        concurrency_expert = [e for e in panel if e["name"] == "concurrency"][0]
+        self.assertEqual(concurrency_expert["activation_reason"], "pattern_match")
+
+    def test_expert_panel_structural_avoids_false_positives(self) -> None:
+        """A diff with 'async' in a comment but no actual async functions should NOT
+        activate concurrency expert when structural data is available."""
+        # The diff text contains "async" in a comment — would trigger regex
+        diff_text = "@@\n+# TODO: consider making this async later\n+x = 1\n"
+        # But the structural data shows no concurrency-related signatures
+        functions_data = {
+            "functions": [
+                {
+                    "file": "src/app.py",
+                    "name": "compute",
+                    "params": ["x", "y"],
+                    "returns": "int",
+                    "line_start": 1,
+                    "line_end": 5,
+                    "exported": False,
+                    "language": "python",
+                },
+            ]
+        }
+        panel = assemble_expert_panel(
+            self._minimal_diff(diff_text),
+            config={},
+            spec_content=None,
+            functions_data=functions_data,
+        )
+        names = [e["name"] for e in panel]
+        self.assertNotIn("concurrency", names)
+
+    def test_expert_panel_structural_api_detection(self) -> None:
+        """API expert activates when function names and params indicate HTTP handlers."""
+        functions_data = {
+            "functions": [
+                {
+                    "file": "src/views.py",
+                    "name": "get_user_handler",
+                    "params": ["request", "user_id"],
+                    "returns": "Response",
+                    "line_start": 10,
+                    "line_end": 20,
+                    "exported": True,
+                    "language": "python",
+                },
+            ]
+        }
+        panel = assemble_expert_panel(
+            self._minimal_diff(),
+            config={},
+            spec_content=None,
+            functions_data=functions_data,
+        )
+        names = [e["name"] for e in panel]
+        self.assertIn("api-contract", names)
+
+    def test_expert_panel_structural_empty_functions_falls_through(self) -> None:
+        """When functions_data has empty functions list, structurally-decided experts
+        are suppressed (not activated via regex either)."""
+        # Diff text contains "async" which would match regex for concurrency
+        diff_text = "@@\n+# async helper\n"
+        functions_data = {"functions": []}
+        panel = assemble_expert_panel(
+            self._minimal_diff(diff_text),
+            config={},
+            spec_content=None,
+            functions_data=functions_data,
+        )
+        names = [e["name"] for e in panel]
+        # Structural detection found nothing, and regex is suppressed for these experts
+        self.assertNotIn("concurrency", names)
+
+
+class LastReviewMarkerTests(unittest.TestCase):
+    """Tests for _write_last_review_marker."""
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.cache_dir = self.tmpdir / ".agents/codereview"
+
+    def tearDown(self) -> None:
+        import shutil
+
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_writes_marker_with_expected_fields(self) -> None:
+        from scripts.orchestrate import _write_last_review_marker
+
+        report = {"verdict": "PASS"}
+        launch_packet = {
+            "base_ref": "abc123",
+            "scope": "branch",
+            "head_ref": "HEAD",
+            "changed_files": ["a.py", "b.py"],
+        }
+        with mock.patch(
+            "scripts.orchestrate.run_subprocess_text", return_value="deadbeef123\n"
+        ):
+            _write_last_review_marker(self.tmpdir, report, launch_packet)
+
+        marker_path = self.cache_dir / "last-review.json"
+        self.assertTrue(marker_path.exists())
+        marker = json.loads(marker_path.read_text())
+        self.assertEqual(marker["head_sha"], "deadbeef123")
+        self.assertEqual(marker["base_ref"], "abc123")
+        self.assertEqual(marker["scope"], "branch")
+        self.assertEqual(marker["file_count"], 2)
+        self.assertEqual(marker["verdict"], "PASS")
+        self.assertIn("timestamp", marker)
+
+    def test_fallback_head_ref_on_git_failure(self) -> None:
+        from scripts.orchestrate import _write_last_review_marker
+
+        report = {"verdict": "FIX_REQUIRED"}
+        launch_packet = {
+            "base_ref": "",
+            "scope": "worktree",
+            "head_ref": "INDEX",
+            "changed_files": [],
+        }
+        with mock.patch(
+            "scripts.orchestrate.run_subprocess_text",
+            side_effect=Exception("git failed"),
+        ):
+            _write_last_review_marker(self.tmpdir, report, launch_packet)
+
+        marker = json.loads((self.cache_dir / "last-review.json").read_text())
+        self.assertEqual(marker["head_sha"], "INDEX")
+
+    def test_overwrites_previous_marker(self) -> None:
+        from scripts.orchestrate import _write_last_review_marker
+
+        self.cache_dir.mkdir(parents=True)
+        (self.cache_dir / "last-review.json").write_text('{"old": true}')
+
+        report = {"verdict": "PASS"}
+        launch_packet = {
+            "base_ref": "main",
+            "scope": "branch",
+            "head_ref": "HEAD",
+            "changed_files": ["x.py"],
+        }
+        with mock.patch(
+            "scripts.orchestrate.run_subprocess_text", return_value="newsha\n"
+        ):
+            _write_last_review_marker(self.tmpdir, report, launch_packet)
+
+        marker = json.loads((self.cache_dir / "last-review.json").read_text())
+        self.assertNotIn("old", marker)
+        self.assertEqual(marker["head_sha"], "newsha")
+
+
+class ConfigAllowlistTests(unittest.TestCase):
+    def test_allowlist_contains_minimum_severity(self) -> None:
+        self.assertIn("minimum_severity", CONFIG_ALLOWLIST)
+
+    def test_allowlist_contains_suggest_missing_tests(self) -> None:
+        self.assertIn("suggest_missing_tests", CONFIG_ALLOWLIST)
+
+
+class BuildLaunchPacketTests(unittest.TestCase):
+    def test_post_wave_task_present_and_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir)
+            diff = DiffResult(
+                mode="base",
+                base_ref="main",
+                merge_base="abc123",
+                changed_files=["a.py"],
+                diff_text="--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new",
+                head_ref="HEAD",
+            )
+            packet = build_launch_packet(
+                session_dir=session_dir,
+                diff_result=diff,
+                review_mode="standard",
+                waves=[],
+                judge={},
+                scan_results={},
+                spec_file=None,
+                config=DEFAULT_CONFIG,
+            )
+            self.assertIn("post_wave_task", packet)
+            self.assertIsNone(packet["post_wave_task"])
 
 
 if __name__ == "__main__":
