@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,16 @@ REPO_ROOT = TESTS_DIR.parent
 
 
 class OrchestratePrepareTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Clear GIT_DIR/GIT_WORK_TREE so temp repo tests use their own git context
+        self._saved_git_env = {}
+        for key in ("GIT_DIR", "GIT_WORK_TREE"):
+            if key in os.environ:
+                self._saved_git_env[key] = os.environ.pop(key)
+
+    def tearDown(self) -> None:
+        os.environ.update(self._saved_git_env)
+
     def test_extract_diff_base_mode_returns_changed_files_and_diff_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = self._init_repo(Path(tmpdir))
@@ -697,12 +708,16 @@ class OrchestratePrepareTests(unittest.TestCase):
 
     @staticmethod
     def _run(command: list[str], cwd: Path) -> None:
+        env = {
+            k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")
+        }
         subprocess.run(
             command,
             cwd=cwd,
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
 
 

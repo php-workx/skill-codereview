@@ -1339,22 +1339,36 @@ class TestGraphCoChange(unittest.TestCase):
     """Tests for co-change frequency analysis in cmd_graph (step 4)."""
 
     @staticmethod
-    def _create_temp_git_repo() -> str:
+    def _git_env() -> dict[str, str]:
+        return {
+            k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")
+        }
+
+    @classmethod
+    def _create_temp_git_repo(cls) -> str:
         tmpdir = tempfile.mkdtemp()
-        subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True)
+        env = cls._git_env()
+        subprocess.run(["git", "init"], cwd=tmpdir, capture_output=True, env=env)
         subprocess.run(
             ["git", "config", "user.email", "test@test.com"],
             cwd=tmpdir,
             capture_output=True,
+            env=env,
         )
         subprocess.run(
             ["git", "config", "user.name", "Test"],
             cwd=tmpdir,
             capture_output=True,
+            env=env,
         )
         return tmpdir
 
     def setUp(self) -> None:
+        # Clear GIT_DIR/GIT_WORK_TREE so temp repo tests use their own git context
+        self._saved_git_env: dict[str, str] = {}
+        for key in ("GIT_DIR", "GIT_WORK_TREE"):
+            if key in os.environ:
+                self._saved_git_env[key] = os.environ.pop(key)
         self.tmpdir = self._create_temp_git_repo()
         self.file_a = os.path.join(self.tmpdir, "alpha.py")
         self.file_b = os.path.join(self.tmpdir, "beta.py")
@@ -1363,29 +1377,38 @@ class TestGraphCoChange(unittest.TestCase):
         import shutil
 
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        os.environ.update(self._saved_git_env)
 
     def _commit_files(self, files: list[str], message: str) -> None:
         """Write a line to each file and commit them together."""
+        env = self._git_env()
         for fpath in files:
             with open(fpath, "a") as f:
                 f.write(f"# {message}\n")
-        subprocess.run(["git", "add", "."], cwd=self.tmpdir, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=self.tmpdir, capture_output=True, env=env
+        )
         subprocess.run(
             ["git", "commit", "-m", message],
             cwd=self.tmpdir,
             capture_output=True,
+            env=env,
         )
 
     def test_graph_co_change_edges(self) -> None:
         """Two files committed together 3+ times produce a co_change edge."""
+        env = self._git_env()
         # Write initial function so nodes get extracted
         Path(self.file_a).write_text("def process_data(x):\n    return x\n")
         Path(self.file_b).write_text("def helper(y):\n    return y\n")
-        subprocess.run(["git", "add", "."], cwd=self.tmpdir, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=self.tmpdir, capture_output=True, env=env
+        )
         subprocess.run(
             ["git", "commit", "-m", "initial"],
             cwd=self.tmpdir,
             capture_output=True,
+            env=env,
         )
 
         # Commit both files together 3 more times
@@ -1414,13 +1437,17 @@ class TestGraphCoChange(unittest.TestCase):
 
     def test_graph_co_change_frequency_threshold(self) -> None:
         """Files changed together only twice should NOT produce a co_change edge."""
+        env = self._git_env()
         Path(self.file_a).write_text("def process_data(x):\n    return x\n")
         Path(self.file_b).write_text("def helper(y):\n    return y\n")
-        subprocess.run(["git", "add", "."], cwd=self.tmpdir, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=self.tmpdir, capture_output=True, env=env
+        )
         subprocess.run(
             ["git", "commit", "-m", "initial"],
             cwd=self.tmpdir,
             capture_output=True,
+            env=env,
         )
 
         # Only 2 co-changes (below threshold of 3)
@@ -1445,14 +1472,18 @@ class TestGraphCoChange(unittest.TestCase):
             fpath = os.path.join(self.tmpdir, f"extra_{i}.py")
             extra_files.append(fpath)
 
+        env = self._git_env()
         Path(self.file_a).write_text("def process_data(x):\n    return x\n")
         for fpath in extra_files:
             Path(fpath).write_text(f"# file {fpath}\n")
-        subprocess.run(["git", "add", "."], cwd=self.tmpdir, capture_output=True)
+        subprocess.run(
+            ["git", "add", "."], cwd=self.tmpdir, capture_output=True, env=env
+        )
         subprocess.run(
             ["git", "commit", "-m", "initial"],
             cwd=self.tmpdir,
             capture_output=True,
+            env=env,
         )
 
         # Commit all files together CO_CHANGE_MIN_FREQUENCY times
