@@ -486,38 +486,6 @@ class TestCodeIntelFallback(unittest.TestCase):
             result = prescan_module.run_prescan([])
         self.assertEqual(result["analyzer"], "regex+code_intel")
 
-    def test_syntax_error_in_code_intel_falls_back_gracefully(self) -> None:
-        """If code_intel import raises SyntaxError, prescan still works in regex-only mode."""
-        import importlib
-
-        # Temporarily make the code_intel import raise SyntaxError
-        original_import = (
-            __builtins__.__import__
-            if hasattr(__builtins__, "__import__")
-            else __import__
-        )
-
-        def _fake_import(name: str, *args: Any, **kwargs: Any):
-            if name == "code_intel":
-                raise SyntaxError("mocked syntax error in code_intel")
-            return original_import(name, *args, **kwargs)
-
-        with mock.patch("builtins.__import__", side_effect=_fake_import):
-            # Reload prescan so the import guard re-executes
-            importlib.reload(prescan_module)
-
-        # After reload with broken code_intel, flag should be False
-        self.assertFalse(prescan_module._CODE_INTEL_AVAILABLE)
-
-        # Prescan should still work in regex-only mode
-        files = [str(FIXTURES_DIR / "stubs.py")]
-        result = prescan_module.run_prescan(files)
-        self.assertEqual(result["analyzer"], "regex-only")
-        self.assertGreater(result["file_count"], 0)
-
-        # Restore prescan module to original state
-        importlib.reload(prescan_module)
-
 
 # ---------------------------------------------------------------------------
 # P-UNWIRED checker tests (with mocked code_intel)

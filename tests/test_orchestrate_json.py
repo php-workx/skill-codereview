@@ -174,13 +174,17 @@ class DedupExactTests(unittest.TestCase):
 
 class ParseExplorerOutputTests(unittest.TestCase):
     def test_list(self) -> None:
-        findings, reqs = parse_explorer_output([{"summary": "x"}], "correctness")
+        findings, reqs, certification, completeness_gate = parse_explorer_output(
+            [{"summary": "x"}], "correctness"
+        )
 
         self.assertEqual(reqs, [])
+        self.assertIsNone(certification)
+        self.assertIsNone(completeness_gate)
         self.assertEqual(findings, [{"summary": "x", "pass": "correctness"}])
 
     def test_dict_with_requirements(self) -> None:
-        findings, reqs = parse_explorer_output(
+        findings, reqs, certification, completeness_gate = parse_explorer_output(
             {
                 "pass": "security",
                 "findings": [{"summary": "y"}],
@@ -191,26 +195,90 @@ class ParseExplorerOutputTests(unittest.TestCase):
 
         self.assertEqual(findings, [{"summary": "y", "pass": "security"}])
         self.assertEqual(reqs, [{"id": "r1"}])
+        self.assertIsNone(certification)
+        self.assertIsNone(completeness_gate)
 
     def test_wrong_shape(self) -> None:
-        findings, reqs = parse_explorer_output("oops", "correctness")
+        findings, reqs, certification, completeness_gate = parse_explorer_output(
+            "oops", "correctness"
+        )
 
         self.assertIsNone(findings)
         self.assertEqual(reqs, [])
+        self.assertIsNone(certification)
+        self.assertIsNone(completeness_gate)
 
     def test_list_with_non_dict_items(self) -> None:
         raw = [{"summary": "real"}, None, 42, "stray"]
-        findings, _reqs = parse_explorer_output(raw, "correctness")
+        findings, _reqs, _cert, _gate = parse_explorer_output(raw, "correctness")
 
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0]["summary"], "real")
 
     def test_dict_findings_with_non_dict_items(self) -> None:
         raw = {"findings": [{"summary": "ok"}, None], "requirements": []}
-        findings, _reqs = parse_explorer_output(raw, "correctness")
+        findings, _reqs, _cert, _gate = parse_explorer_output(raw, "correctness")
 
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0]["summary"], "ok")
+
+    def test_dict_with_certification(self) -> None:
+        cert_data = {
+            "status": "clean",
+            "files_checked": ["a.py"],
+            "checks_performed": ["Checked callers"],
+            "tools_used": ["Grep: callers of a()"],
+        }
+        raw = {
+            "findings": [{"summary": "z"}],
+            "certification": cert_data,
+        }
+        findings, reqs, certification, completeness_gate = parse_explorer_output(
+            raw, "correctness"
+        )
+
+        self.assertEqual(findings, [{"summary": "z", "pass": "correctness"}])
+        self.assertEqual(reqs, [])
+        self.assertIn("files_checked", certification)
+        self.assertEqual(certification["files_checked"], ["a.py"])
+        self.assertIsNone(completeness_gate)
+
+    def test_dict_with_completeness_gate(self) -> None:
+        gate_data = {"passed": True, "coverage": 0.95, "gaps": []}
+        raw = {
+            "findings": [],
+            "completeness_gate": gate_data,
+        }
+        findings, reqs, certification, completeness_gate = parse_explorer_output(
+            raw, "correctness"
+        )
+
+        self.assertEqual(findings, [])
+        self.assertEqual(reqs, [])
+        self.assertIsNone(certification)
+        self.assertEqual(completeness_gate, gate_data)
+
+    def test_dict_with_unknown_key_emits_warning(self) -> None:
+        import io
+        import sys
+
+        raw = {"findings": [{"summary": "w"}], "unknown_field": "surprise"}
+        captured = io.StringIO()
+        old_stderr = sys.stderr
+        sys.stderr = captured
+        try:
+            findings, reqs, certification, completeness_gate = parse_explorer_output(
+                raw, "correctness"
+            )
+        finally:
+            sys.stderr = old_stderr
+
+        output = captured.getvalue()
+        self.assertIn("unknown_field", output)
+        self.assertIn("parse_explorer_output_unexpected_keys", output)
+        self.assertEqual(findings, [{"summary": "w", "pass": "correctness"}])
+        self.assertIsNone(certification)
+        self.assertIsNone(completeness_gate)
 
 
 class TruncateAtSectionBoundaryTests(unittest.TestCase):

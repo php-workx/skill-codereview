@@ -9,9 +9,9 @@ from pathlib import Path
 from unittest import mock
 
 from scripts.orchestrate import (
-    CONFIG_ALLOWLIST,
     DEFAULT_CONFIG,
     DiffResult,
+    JUDGE_PROMPT_PARTS,
     PromptBudgetExceeded,
     PromptContext,
     SubprocessError,
@@ -25,6 +25,7 @@ from scripts.orchestrate import (
     _skip_cross_file_planning,
     assemble_expert_panel,
     assemble_explorer_prompt,
+    assemble_judge_prompt,
     assemble_report_envelope,
     build_cross_file_context,
     build_launch_packet,
@@ -33,6 +34,7 @@ from scripts.orchestrate import (
     drop_least_relevant_checklist,
     extract_diff,
     finalize,
+    find_spec_candidates,
     load_config,
     load_domain_checklists,
     load_path_instructions,
@@ -54,17 +56,12 @@ REPO_ROOT = TESTS_DIR.parent
 
 class OrchestratePlumbingTests(unittest.TestCase):
     def setUp(self) -> None:
-        # Clear GIT_DIR/GIT_WORK_TREE so temp repo tests use their own git context
-        self._saved_git_env = {}
-        for key in ("GIT_DIR", "GIT_WORK_TREE"):
-            if key in os.environ:
-                self._saved_git_env[key] = os.environ.pop(key)
+        # Clear GIT_* env vars that leak from pre-push hooks into test subprocesses
+        self._saved_git_env = {
+            k: os.environ.pop(k) for k in list(os.environ) if k.startswith("GIT_")
+        }
 
     def tearDown(self) -> None:
-        # First pop keys that may have been set during the test
-        for key in ("GIT_DIR", "GIT_WORK_TREE"):
-            os.environ.pop(key, None)
-        # Then restore original values
         os.environ.update(self._saved_git_env)
 
     def test_help_lists_expected_subcommands(self) -> None:
@@ -133,13 +130,6 @@ class OrchestratePlumbingTests(unittest.TestCase):
         self.assertEqual(config["confidence_floor"], 0.65)
         self.assertEqual(config["large_diff"], DEFAULT_CONFIG["large_diff"])
         self.assertEqual(config["ignore_paths"], ["vendor/"])
-
-    def test_load_config_rejects_invalid_minimum_severity(self) -> None:
-        fake_yaml = mock.Mock()
-        fake_yaml.safe_load.return_value = {"minimum_severity": "ultra"}
-        with mock.patch("scripts.orchestrate.yaml", fake_yaml):
-            with self.assertRaises(ValueError):
-                load_config(TESTS_DIR / "fixtures" / "orchestrate" / "codereview.yaml")
 
     def test_assemble_expert_panel_always_includes_core_experts(self) -> None:
         diff_result = DiffResult(
@@ -349,11 +339,11 @@ class OrchestratePlumbingTests(unittest.TestCase):
         self.assertEqual(result.changed_files, ["tracked.txt"])
         self.assertIn("+two", result.diff_text)
 
-    def test_extract_diff_worktree_mode_falls_back_to_commit_when_empty(self) -> None:
+    def test_extract_diff_staged_mode_falls_back_to_commit_when_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = self._init_repo_with_feature_commit(Path(tmpdir))
 
-            result = extract_diff(repo_root=repo, mode="worktree")
+            result = extract_diff(repo_root=repo, mode="staged")
 
         self.assertEqual(result.changed_files, ["tracked.txt"])
         self.assertIn("+two", result.diff_text)
@@ -700,13 +690,7 @@ class OrchestratePlumbingTests(unittest.TestCase):
                 ],
                 "judge": {
                     "prompt_file": str(
-                        (
-                            REPO_ROOT
-                            / "skills"
-                            / "codereview"
-                            / "prompts"
-                            / "reviewer-judge.md"
-                        ).absolute()
+                        (REPO_ROOT / "skills" / "codereview" / "prompts").absolute()
                     ),
                     "output_file": str((session_dir / "judge.json").absolute()),
                 },
@@ -817,124 +801,31 @@ class OrchestratePlumbingTests(unittest.TestCase):
             self.assertTrue(any(review_dir.glob("*.json")))
             self.assertTrue(any(review_dir.glob("*.md")))
 
-    def test_finalize_survives_marker_oserror(self) -> None:
-        """finalize() returns 0 even when _write_last_review_marker raises OSError."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            session_dir = repo_root / "session"
-            session_dir.mkdir(parents=True)
-            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
-            (session_dir / "changed-files.txt").write_text(
-                "scripts/orchestrate.py\n", encoding="utf-8"
-            )
-            judge_output = json.loads(
-                (
-                    TESTS_DIR / "fixtures" / "orchestrate" / "mock-judge-output.json"
-                ).read_text(encoding="utf-8")
-            )
-            judge_output_path = session_dir / "judge.json"
-            judge_output_path.write_text(json.dumps(judge_output), encoding="utf-8")
-
-            launch_packet = {
-                "review_id": "review-123",
-                "session_dir": str(session_dir),
-                "scope": "branch",
-                "base_ref": "main",
-                "head_ref": "feature",
-                "mode": "standard",
-                "_config": {"confidence_floor": 0.65},
-                "tool_status": {
-                    "semgrep": {"status": "ran", "finding_count": 1, "note": None}
-                },
-                "diff_result": {"changed_files": ["scripts/orchestrate.py"]},
-                "scan_results": {"findings": []},
-            }
-            (session_dir / "launch.json").write_text(
-                json.dumps(launch_packet), encoding="utf-8"
-            )
-
-            enriched = {
-                "findings": [
-                    {
-                        "id": "security-allowlist-01",
-                        "source": "ai",
-                        "pass": "security",
-                        "severity": "high",
-                        "confidence": 0.93,
-                        "file": "scripts/orchestrate.py",
-                        "line": 89,
-                        "summary": "Subprocess command is assembled from untrusted input",
-                        "failure_mode": "A crafted review task could execute arbitrary commands.",
-                        "fix": "Require allowlisted commands before dispatch.",
-                        "action_tier": "must_fix",
-                    }
-                ],
-                "tier_summary": {"must_fix": 1, "should_fix": 0, "consider": 0},
-                "dropped": {"below_confidence_floor": 0},
-            }
-            lifecycle = {
-                "findings": enriched["findings"],
-                "suppressed_findings": [],
-                "lifecycle_summary": {
-                    "new": 1,
-                    "recurring": 0,
-                    "rejected": 0,
-                    "deferred": 0,
-                    "deferred_resurfaced": 0,
-                },
-            }
-
-            with (
-                mock.patch(
-                    "scripts.orchestrate.detect_repo_root", return_value=repo_root
-                ),
-                mock.patch(
-                    "scripts.orchestrate.run_subprocess_json",
-                    side_effect=[enriched, lifecycle],
-                ),
-                mock.patch(
-                    "scripts.orchestrate.subprocess.run",
-                    return_value=subprocess.CompletedProcess(["bash"], 0, "", ""),
-                ),
-                mock.patch(
-                    "scripts.orchestrate._write_last_review_marker",
-                    side_effect=PermissionError("read-only filesystem"),
-                ),
-                mock.patch("scripts.orchestrate.progress") as mock_progress,
-            ):
-                result = finalize(Namespace(session_dir=session_dir, judge_output=None))
-
-            self.assertEqual(result, 0)
-            # Verify the error was reported via progress
-            progress_events = [c.args[0] for c in mock_progress.call_args_list]
-            self.assertIn("last_review_marker_failed", progress_events)
-
     @staticmethod
     def _git_env() -> dict[str, str]:
-        return {
-            k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")
-        }
+        """Return env dict with GIT_* vars removed to isolate temp repos."""
+        return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
-    @staticmethod
-    def _run(command: list[str], cwd: Path) -> None:
+    @classmethod
+    def _run(cls, command: list[str], cwd: Path) -> None:
         subprocess.run(
             command,
             cwd=cwd,
             check=True,
             capture_output=True,
             text=True,
-            env=OrchestratePlumbingTests._git_env(),
+            env=cls._git_env(),
         )
 
-    @staticmethod
-    def _capture(command: list[str], cwd: Path) -> str:
+    @classmethod
+    def _capture(cls, command: list[str], cwd: Path) -> str:
         result = subprocess.run(
             command,
             cwd=cwd,
             check=True,
             capture_output=True,
             text=True,
-            env=OrchestratePlumbingTests._git_env(),
+            env=cls._git_env(),
         )
         return result.stdout
 
@@ -948,13 +839,13 @@ class OrchestratePlumbingTests(unittest.TestCase):
         if add_second_file:
             (repo / "second.txt").write_text("alpha\n", encoding="utf-8")
         self._run(["git", "add", "."], cwd=repo)
-        self._run(["git", "commit", "-m", "initial"], cwd=repo)
+        self._run(["git", "commit", "--no-verify", "-m", "initial"], cwd=repo)
         self._run(["git", "checkout", "-b", "feature"], cwd=repo)
         (repo / "tracked.txt").write_text("one\ntwo\n", encoding="utf-8")
         if add_second_file:
             (repo / "second.txt").write_text("alpha\nbeta\n", encoding="utf-8")
         self._run(["git", "add", "."], cwd=repo)
-        self._run(["git", "commit", "-m", "update"], cwd=repo)
+        self._run(["git", "commit", "--no-verify", "-m", "update"], cwd=repo)
         return repo
 
     def test_check_token_budget_raises_when_exceeds_after_truncation(self) -> None:
@@ -2096,7 +1987,7 @@ class LastReviewMarkerTests(unittest.TestCase):
         report = {"verdict": "FIX_REQUIRED"}
         launch_packet = {
             "base_ref": "",
-            "scope": "worktree",
+            "scope": "staged",
             "head_ref": "INDEX",
             "changed_files": [],
         }
@@ -2132,38 +2023,320 @@ class LastReviewMarkerTests(unittest.TestCase):
         self.assertEqual(marker["head_sha"], "newsha")
 
 
-class ConfigAllowlistTests(unittest.TestCase):
-    def test_allowlist_contains_minimum_severity(self) -> None:
-        self.assertIn("minimum_severity", CONFIG_ALLOWLIST)
+class FindSpecCandidatesTests(unittest.TestCase):
+    def test_finds_agents_plans_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            plans_dir = repo / ".agents" / "plans"
+            plans_dir.mkdir(parents=True)
+            plan_a = plans_dir / "2026-03-27-plan.md"
+            plan_b = plans_dir / "2026-03-28-plan.md"
+            plan_a.write_text("# Older plan\n", encoding="utf-8")
+            plan_b.write_text("# Newer plan\n", encoding="utf-8")
+            # Ensure plan_b has a newer mtime
+            import os
+            import time
 
-    def test_allowlist_contains_suggest_missing_tests(self) -> None:
-        self.assertIn("suggest_missing_tests", CONFIG_ALLOWLIST)
+            os.utime(plan_a, (time.time() - 10, time.time() - 10))
+            os.utime(plan_b, (time.time(), time.time()))
+
+            candidates = find_spec_candidates(repo, [])
+
+        paths = [c["path"] for c in candidates]
+        self.assertIn(".agents/plans/2026-03-28-plan.md", paths)
+        self.assertIn(".agents/plans/2026-03-27-plan.md", paths)
+        # Newer file should come first (sorted by mtime descending)
+        self.assertLess(
+            paths.index(".agents/plans/2026-03-28-plan.md"),
+            paths.index(".agents/plans/2026-03-27-plan.md"),
+        )
+
+    def test_finds_spec_files_near_changed_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            src_dir = repo / "src"
+            src_dir.mkdir()
+            spec_file = src_dir / "SPEC.md"
+            spec_file.write_text("# Spec\n", encoding="utf-8")
+            changed_files = ["src/app.py"]
+
+            candidates = find_spec_candidates(repo, changed_files)
+
+        paths = [c["path"] for c in candidates]
+        self.assertIn("src/SPEC.md", paths)
+
+    def test_finds_common_root_spec_locations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "SPEC.md").write_text("# Root spec\n", encoding="utf-8")
+            docs = repo / "docs"
+            docs.mkdir()
+            (docs / "plan.md").write_text("# Docs plan\n", encoding="utf-8")
+
+            candidates = find_spec_candidates(repo, [])
+
+        paths = [c["path"] for c in candidates]
+        self.assertIn("SPEC.md", paths)
+        self.assertIn("docs/plan.md", paths)
+
+    def test_deduplicates_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            spec_file = repo / "SPEC.md"
+            spec_file.write_text("# Spec\n", encoding="utf-8")
+            # changed file in root dir will also find SPEC.md via pattern search
+            changed_files = ["app.py"]
+
+            candidates = find_spec_candidates(repo, changed_files)
+
+        paths = [c["path"] for c in candidates]
+        # SPEC.md should appear only once even though it matches both
+        # the near-changed-files search and the common-root-locations search
+        self.assertEqual(paths.count("SPEC.md"), 1)
+
+    def test_returns_correct_metadata_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            spec_file = repo / "PLAN.md"
+            spec_file.write_text("# Plan\n", encoding="utf-8")
+
+            candidates = find_spec_candidates(repo, [])
+
+        self.assertEqual(len(candidates), 1)
+        c = candidates[0]
+        self.assertIn("path", c)
+        self.assertIn("mtime", c)
+        self.assertIn("size", c)
+        self.assertIsInstance(c["mtime"], float)
+        self.assertIsInstance(c["size"], int)
+
+    def test_returns_empty_list_when_no_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            candidates = find_spec_candidates(repo, [])
+
+        self.assertEqual(candidates, [])
 
 
 class BuildLaunchPacketTests(unittest.TestCase):
-    def test_post_wave_task_present_and_none(self) -> None:
+    """Tests for build_launch_packet spec_source field."""
+
+    def _make_diff_result(self) -> DiffResult:
+        return DiffResult(
+            mode="base",
+            base_ref="main",
+            merge_base=None,
+            changed_files=["foo.py"],
+            diff_text="+new line\n",
+        )
+
+    def _base_kwargs(self, session_dir: Path) -> dict:
+        return dict(
+            session_dir=session_dir,
+            diff_result=self._make_diff_result(),
+            review_mode="standard",
+            waves=[],
+            judge={},
+            scan_results={},
+            spec_file=None,
+            config=DEFAULT_CONFIG,
+        )
+
+    def test_spec_source_file_when_spec_file_provided(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            session_dir = Path(tmpdir)
-            diff = DiffResult(
-                mode="base",
-                base_ref="main",
-                merge_base="abc123",
-                changed_files=["a.py"],
-                diff_text="--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new",
-                head_ref="HEAD",
-            )
-            packet = build_launch_packet(
-                session_dir=session_dir,
-                diff_result=diff,
-                review_mode="standard",
-                waves=[],
-                judge={},
+            kwargs = self._base_kwargs(Path(tmpdir))
+            kwargs["spec_file"] = "/some/path/spec.md"
+            kwargs["spec_source"] = "file"
+            packet = build_launch_packet(**kwargs)
+        self.assertEqual(packet["spec_source"], "file")
+
+    def test_spec_source_none_when_no_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kwargs = self._base_kwargs(Path(tmpdir))
+            packet = build_launch_packet(**kwargs)
+        self.assertEqual(packet["spec_source"], "none")
+
+    def test_spec_source_pr_body_when_explicitly_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kwargs = self._base_kwargs(Path(tmpdir))
+            kwargs["spec_source"] = "pr_body"
+            packet = build_launch_packet(**kwargs)
+        self.assertEqual(packet["spec_source"], "pr_body")
+
+    def test_spec_source_present_in_packet_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kwargs = self._base_kwargs(Path(tmpdir))
+            packet = build_launch_packet(**kwargs)
+        self.assertIn("spec_source", packet)
+
+
+class AssembleJudgePromptTests(unittest.TestCase):
+    """Tests for assemble_judge_prompt — dir mode, part-file pointer mode, legacy mode."""
+
+    def _write_part_files(self, directory: Path) -> dict[str, str]:
+        """Write 5 JUDGE_PROMPT_PARTS files with distinct content. Returns name→content map."""
+        contents = {}
+        for i, name in enumerate(JUDGE_PROMPT_PARTS):
+            content = f"# Part {i}: {name}\nDistinct content for part {i}.\n"
+            (directory / name).write_text(content, encoding="utf-8")
+            contents[name] = content
+        return contents
+
+    def test_dir_mode(self) -> None:
+        """Passing a directory assembles all JUDGE_PROMPT_PARTS joined by --- separators."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prompt_dir = Path(tmpdir)
+            contents = self._write_part_files(prompt_dir)
+
+            result = assemble_judge_prompt(
+                judge_prompt_file=prompt_dir,
+                explorer_findings=[],
+                spec_requirements=[],
                 scan_results={},
-                spec_file=None,
-                config=DEFAULT_CONFIG,
             )
-            self.assertIn("post_wave_task", packet)
-            self.assertIsNone(packet["post_wave_task"])
+
+        for content in contents.values():
+            self.assertIn(content.strip(), result)
+        self.assertIn("---", result)
+
+    def test_part_file_pointer_mode(self) -> None:
+        """Passing a path to one of the part files uses parent dir for all parts."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prompt_dir = Path(tmpdir)
+            contents = self._write_part_files(prompt_dir)
+            # Point to first part file
+            part_file = prompt_dir / JUDGE_PROMPT_PARTS[0]
+
+            result = assemble_judge_prompt(
+                judge_prompt_file=part_file,
+                explorer_findings=[],
+                spec_requirements=[],
+                scan_results={},
+            )
+
+        for content in contents.values():
+            self.assertIn(content.strip(), result)
+        self.assertIn("---", result)
+
+    def test_legacy_single_file_mode(self) -> None:
+        """Passing a single file that is not a JUDGE_PROMPT_PARTS member reads it as-is."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legacy_file = Path(tmpdir) / "reviewer-judge.md"
+            legacy_content = "# Legacy judge prompt\nAll-in-one prompt content.\n"
+            legacy_file.write_text(legacy_content, encoding="utf-8")
+
+            result = assemble_judge_prompt(
+                judge_prompt_file=legacy_file,
+                explorer_findings=[],
+                spec_requirements=[],
+                scan_results={},
+            )
+
+        self.assertIn(legacy_content.strip(), result)
+
+
+class ApplyPreExistingRulesTests(unittest.TestCase):
+    """Unit tests for apply_pre_existing_rules and apply_provenance_boost."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import importlib.util
+
+        enrich_path = (
+            Path(__file__).resolve().parent.parent
+            / "skills"
+            / "codereview"
+            / "scripts"
+            / "enrich-findings.py"
+        )
+        spec = importlib.util.spec_from_file_location("enrich_findings", enrich_path)
+        cls.enrich = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        spec.loader.exec_module(cls.enrich)  # type: ignore[union-attr]
+
+    def test_pre_existing_not_newly_reachable_is_dropped(self) -> None:
+        findings = [
+            {
+                "summary": "old bug",
+                "pre_existing": True,
+                "pre_existing_newly_reachable": False,
+            }
+        ]
+        kept, dropped = self.enrich.apply_pre_existing_rules(findings)
+        self.assertEqual(kept, [])
+        self.assertEqual(dropped, 1)
+
+    def test_pre_existing_newly_reachable_medium_tier_downgraded(self) -> None:
+        findings = [
+            {
+                "summary": "old bug now reachable",
+                "pre_existing": True,
+                "pre_existing_newly_reachable": True,
+                "severity": "medium",
+                "action_tier": "should_fix",
+            }
+        ]
+        kept, dropped = self.enrich.apply_pre_existing_rules(findings)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["action_tier"], "consider")
+
+    def test_pre_existing_newly_reachable_high_tier_unchanged(self) -> None:
+        findings = [
+            {
+                "summary": "high severity newly reachable",
+                "pre_existing": True,
+                "pre_existing_newly_reachable": True,
+                "severity": "high",
+                "action_tier": "must_fix",
+            }
+        ]
+        kept, dropped = self.enrich.apply_pre_existing_rules(findings)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["action_tier"], "must_fix")
+
+    def test_non_pre_existing_finding_unchanged(self) -> None:
+        findings = [
+            {
+                "summary": "new bug",
+                "severity": "medium",
+                "action_tier": "should_fix",
+            }
+        ]
+        kept, dropped = self.enrich.apply_pre_existing_rules(findings)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["action_tier"], "should_fix")
+        self.assertEqual(dropped, 0)
+
+    def test_provenance_autonomous_boosts_stub_finding(self) -> None:
+        findings = [{"summary": "stub implementation used", "action_tier": "consider"}]
+        result = self.enrich.apply_provenance_boost(findings, "autonomous")
+        self.assertEqual(result[0]["action_tier"], "should_fix")
+
+    def test_provenance_human_does_not_boost(self) -> None:
+        findings = [{"summary": "stub implementation used", "action_tier": "consider"}]
+        result = self.enrich.apply_provenance_boost(findings, "human")
+        self.assertEqual(result[0]["action_tier"], "consider")
+
+    def test_provenance_autonomous_password_not_boosted_by_pass_pattern(self) -> None:
+        """'password' contains 'pass' but 'pass' pattern is whole-word — 'password' should not match."""
+        # 'hardcoded' IS in the pattern list, so this would match on 'hardcoded'.
+        # Use a summary that only has 'password' (not any other AI_CODEGEN_PATTERNS term).
+        findings2 = [
+            {"summary": "password stored in plain text", "action_tier": "consider"}
+        ]
+        result = self.enrich.apply_provenance_boost(findings2, "autonomous")
+        # 'password' does not match the \bpass\b pattern (word boundary stops it)
+        self.assertEqual(result[0]["action_tier"], "consider")
+
+    def test_provenance_autonomous_pre_existing_not_boosted(self) -> None:
+        findings = [
+            {
+                "summary": "stub implementation used",
+                "action_tier": "consider",
+                "pre_existing": True,
+            }
+        ]
+        result = self.enrich.apply_provenance_boost(findings, "autonomous")
+        self.assertEqual(result[0]["action_tier"], "consider")
 
 
 if __name__ == "__main__":

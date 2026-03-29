@@ -16,7 +16,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -343,9 +342,6 @@ class PatternMatch:
 
 # --- Helpers ---
 
-# Stable internal API — imported by prescan.py
-# Do not rename without updating prescan.py imports
-
 
 def _detect_language(file_path: str) -> str | None:
     """Map file extension to language name."""
@@ -645,8 +641,6 @@ def _extract_imports(fpath: str, content: str, lang: str) -> list[ImportInfo]:
     return results
 
 
-# Stable internal API — imported by prescan.py
-# Do not rename without updating prescan.py imports
 def cmd_imports(files: list[str]) -> dict[str, Any]:
     all_imports: list[dict[str, Any]] = []
     for fpath in files:
@@ -663,8 +657,6 @@ def cmd_imports(files: list[str]) -> dict[str, Any]:
 # --- Subcommand: exports ---
 
 
-# Stable internal API — imported by prescan.py
-# Do not rename without updating prescan.py imports
 def _extract_exports(fpath: str, content: str, lang: str) -> list[ExportInfo]:
     results: list[ExportInfo] = []
     for pattern, kind in _EXPORT_RE.get(lang, []):
@@ -842,15 +834,8 @@ def cmd_setup(args: argparse.Namespace) -> dict[str, Any]:
         missing_full = sum(
             1 for d in deps_list if not d["installed"] and d["tier"] == "full"
         )
-        # Group missing deps by installer for actionable output
-        missing_by_installer: dict[str, list[str]] = {}
-        for d in deps_list:
-            if not d["installed"]:
-                inst = d["installer"]
-                missing_by_installer.setdefault(inst, []).append(d["name"])
         return {
             "dependencies": deps_list,
-            "python_env": _detect_python_env(),
             "summary": {
                 "installed": sum(1 for d in deps_list if d["installed"]),
                 "total": len(deps_list),
@@ -858,7 +843,6 @@ def cmd_setup(args: argparse.Namespace) -> dict[str, Any]:
                     "minimal": missing_minimal,
                     "full": missing_full + missing_minimal,
                 },
-                "missing_by_installer": missing_by_installer,
             },
         }
     if getattr(args, "install", False):
@@ -1037,12 +1021,34 @@ CO_CHANGE_MAX_COMMITS = 100
 def _detect_semantic_backend() -> str | None:
     """Detect available semantic search backend. Returns None if nothing available."""
     try:
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.enable_load_extension(True)
+            conn.load_extension("vec0")
+        except (AttributeError, OSError):
+            conn.close()
+            return None
+        conn.close()
+    except Exception:
+        return None
+
+    try:
         import model2vec  # noqa: F401
 
         return "model2vec"
-    except Exception as exc:
-        print(f"warning: semantic backend detection failed: {exc}", file=sys.stderr)
-        return None
+    except ImportError:
+        pass
+
+    try:
+        import onnxruntime  # noqa: F401
+
+        return "onnx-minilm"
+    except ImportError:
+        pass
+
+    return None
 
 
 def _build_semantic_edges(
@@ -1085,7 +1091,6 @@ def _build_semantic_edges(
         if backend == "model2vec":
             import model2vec  # type: ignore[import-untyped]
 
-            # TODO: pass cache_dir when model2vec API supports it
             model = model2vec.StaticModel.from_pretrained("minishlab/potion-base-8M")
             texts = list(function_texts.values())
             ids = list(function_texts.keys())
@@ -1097,87 +1102,42 @@ def _build_semantic_edges(
 
     index_time = int((time.monotonic() - start_time) * 1000)
 
-    # Find top 5 similar for each changed function
+    # Find top 5 similar for each changed function (pure Python math)
     changed_ids = {n["id"] for n in nodes if n.get("modified_in_diff")}
     semantic_edges: list[dict] = []
-    sem_start = time.monotonic()
 
-    # Try numpy vectorized path (model2vec returns numpy arrays) (sc-znde)
-    _use_numpy = False
-    try:
-        import numpy as np
+    import math as _math
 
-        # Verify embeddings is a numpy array (model2vec returns ndarray)
-        if hasattr(embeddings, "shape") and hasattr(embeddings, "__matmul__"):
-            _use_numpy = True
-    except ImportError:
-        pass
+    def _cosine_sim(a: list[float], b: list[float]) -> float:
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = _math.sqrt(sum(x * x for x in a))
+        norm_b = _math.sqrt(sum(x * x for x in b))
+        denom = norm_a * norm_b
+        return dot / denom if denom > 0 else 0.0
 
-    if _use_numpy:
-        import numpy as np
-
-        emb = np.asarray(embeddings, dtype=np.float64)
-        norms = np.linalg.norm(emb, axis=1, keepdims=True)
-        norms[norms == 0] = 1  # avoid division by zero
-        normalized = emb / norms
-
-        for i, src_id in enumerate(ids):
-            if time.monotonic() - sem_start > 10:
-                break  # time guard: bail if semantic takes > 10s
-            if src_id not in changed_ids:
+    for i, src_id in enumerate(ids):
+        if src_id not in changed_ids:
+            continue
+        src_vec = embeddings[i]
+        scores: list[tuple[str, float]] = []
+        for j, tgt_id in enumerate(ids):
+            if i == j:
                 continue
-            # dot product of normalized vectors = cosine similarity
-            sims = normalized @ normalized[i]
-            sims[i] = -1.0  # exclude self
-            # Get top 5 indices
-            top_indices = np.argsort(sims)[-5:][::-1]
-            for j in top_indices:
-                score = float(sims[j])
-                if score > 0.5:
-                    semantic_edges.append(
-                        {
-                            "from": src_id,
-                            "to": ids[j],
-                            "type": "semantic_similarity",
-                            "score": round(score, 3),
-                        }
-                    )
-    else:
-        # Fallback: pure Python math for non-numpy embeddings
-        import math as _math
+            tgt_vec = embeddings[j]
+            sim = _cosine_sim(src_vec, tgt_vec)
+            scores.append((tgt_id, sim))
 
-        def _cosine_sim(a: list[float], b: list[float]) -> float:
-            dot = sum(x * y for x, y in zip(a, b))
-            norm_a = _math.sqrt(sum(x * x for x in a))
-            norm_b = _math.sqrt(sum(x * x for x in b))
-            denom = norm_a * norm_b
-            return dot / denom if denom > 0 else 0.0
-
-        for i, src_id in enumerate(ids):
-            if time.monotonic() - sem_start > 10:
-                break  # time guard: bail if semantic takes > 10s
-            if src_id not in changed_ids:
-                continue
-            src_vec = embeddings[i]
-            scores: list[tuple[str, float]] = []
-            for j, tgt_id in enumerate(ids):
-                if i == j:
-                    continue
-                tgt_vec = embeddings[j]
-                sim = _cosine_sim(src_vec, tgt_vec)
-                scores.append((tgt_id, sim))
-
-            scores.sort(key=lambda x: x[1], reverse=True)
-            for tgt_id, score in scores[:5]:
-                if score > 0.5:  # minimum similarity threshold
-                    semantic_edges.append(
-                        {
-                            "from": src_id,
-                            "to": tgt_id,
-                            "type": "semantic_similarity",
-                            "score": round(score, 3),
-                        }
-                    )
+        scores.sort(key=lambda x: x[1], reverse=True)
+        for tgt_id, score in scores[:5]:
+            if score > 0.5:  # minimum similarity threshold
+                semantic_edges.append(
+                    {
+                        "from": src_id,
+                        "to": tgt_id,
+                        "type": "semantic_similarity",
+                        "score": round(score, 3),
+                    }
+                )
 
     stats = {
         "enabled": True,
@@ -1208,27 +1168,14 @@ def _load_graph_cache(cache_path: Path) -> dict | None:
 
 def _save_graph_cache(cache_path: Path, graph: dict, file_mtimes: dict) -> None:
     """Persist graph data and file modification times to the cache."""
-    try:
-        cache_data = {
-            "graph": graph,
-            "file_mtimes": file_mtimes,
-            "version": 1,
-        }
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(dir=str(cache_path.parent), suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(cache_data, f, indent=2)
-            os.replace(tmp_path, str(cache_path))
-        except BaseException:
-            # Clean up temp file on any write/rename failure
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-    except OSError as exc:
-        print(f"warning: failed to save graph cache: {exc}", file=sys.stderr)
+    cache_data = {
+        "graph": graph,
+        "file_mtimes": file_mtimes,
+        "version": 1,
+    }
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache_path, "w") as f:
+        json.dump(cache_data, f, indent=2)
 
 
 def cmd_graph(
@@ -1237,7 +1184,6 @@ def cmd_graph(
     semantic: bool = False,
     repo_root: str | None = None,
     cache_dir: str | None = None,
-    embedding_model: str | None = None,
 ) -> dict[str, Any]:
     """Build a dependency graph from changed files.
 
@@ -1247,8 +1193,6 @@ def cmd_graph(
         semantic: Whether to use semantic search (not yet implemented).
         repo_root: Root directory for repo-wide grep. Defaults to cwd.
         cache_dir: Directory for incremental indexing cache. If None, no caching.
-        embedding_model: Embedding model to use for semantic edges (model2vec or onnx).
-            Accepted but not yet used — reserved for future model routing.
     """
     # --- Cache: collect current file modification times ---
     file_mtimes: dict[str, float] = {}
@@ -1331,10 +1275,6 @@ def cmd_graph(
     caller_nodes: list[dict[str, Any]] = []
     caller_edges: list[dict[str, Any]] = []
 
-    # O(1) dedup sets for node membership checks (sc-v1ad)
-    seen_ids: set[str] = {n["id"] for n in nodes}
-    seen_files: set[str] = {n["file"] for n in nodes}
-
     for func_node in changed_functions:
         if time.monotonic() - graph_start > TOTAL_GRAPH_TIMEOUT:
             break
@@ -1392,9 +1332,12 @@ def cmd_graph(
             if caller_file in changed_files_set:
                 continue  # already in the graph from the first pass
 
-            # Add caller node if not already present (O(1) set lookup)
+            # Add caller node if not already present
             node_id = caller_file
-            if node_id not in seen_ids and caller_file not in seen_files:
+            if not any(
+                n["id"] == node_id or n["file"] == caller_file
+                for n in nodes + caller_nodes
+            ):
                 caller_nodes.append(
                     {
                         "id": node_id,
@@ -1405,8 +1348,6 @@ def cmd_graph(
                         "hop_distance": 1,
                     }
                 )
-                seen_ids.add(node_id)
-                seen_files.add(caller_file)
 
             # Try to find the specific calling function in caller_file
             caller_content = _read_file_safe(caller_file)
@@ -1423,7 +1364,9 @@ def cmd_graph(
                         )
                         if re.search(pattern, func_body):
                             fn_node_id = f"{caller_file}::{cf.name}"
-                            if fn_node_id not in seen_ids:
+                            if not any(
+                                n["id"] == fn_node_id for n in nodes + caller_nodes
+                            ):
                                 caller_nodes.append(
                                     {
                                         "id": fn_node_id,
@@ -1434,7 +1377,6 @@ def cmd_graph(
                                         "hop_distance": 1,
                                     }
                                 )
-                                seen_ids.add(fn_node_id)
                             caller_edges.append(
                                 {
                                     "from": fn_node_id,
@@ -1485,9 +1427,6 @@ def cmd_graph(
                 if file_part not in changed_files_set:
                     depth1_callers.add(file_part)
 
-        # O(1) dedup set for depth-2 nodes, hoisted outside inner loop (sc-v1ad)
-        depth2_seen_ids: set[str] = {n["id"] for n in nodes}
-
         for caller_file in depth1_callers:
             if time.monotonic() - graph_start > TOTAL_GRAPH_TIMEOUT:
                 break
@@ -1509,22 +1448,9 @@ def cmd_graph(
                     continue
 
                 pattern = rf"\b{re.escape(cf.name)}\s*\("
-                grep_cmd_d2 = ["grep", "-rnl", "-E", pattern]
-                for ext in EXTENSION_MAP:
-                    grep_cmd_d2.append(f"--include=*{ext}")
-                grep_cmd_d2.extend(
-                    [
-                        "--exclude-dir=.git",
-                        "--exclude-dir=node_modules",
-                        "--exclude-dir=.venv",
-                        "--exclude-dir=__pycache__",
-                        "--exclude-dir=vendor",
-                        ".",
-                    ]
-                )
                 try:
                     grep_result = subprocess.run(
-                        grep_cmd_d2,
+                        ["grep", "-rnl", "-E", pattern, "."],
                         capture_output=True,
                         text=True,
                         timeout=PER_GREP_TIMEOUT,
@@ -1549,8 +1475,9 @@ def cmd_graph(
                     continue
 
                 for abs_mf in matching_files:
+                    existing_ids = {n["id"] for n in nodes + depth2_nodes}
                     node_id = abs_mf
-                    if node_id not in depth2_seen_ids:
+                    if node_id not in existing_ids:
                         depth2_nodes.append(
                             {
                                 "id": node_id,
@@ -1561,7 +1488,6 @@ def cmd_graph(
                                 "hop_distance": 2,
                             }
                         )
-                        depth2_seen_ids.add(node_id)
                     depth2_edges.append(
                         {
                             "from": abs_mf,
@@ -1584,8 +1510,6 @@ def cmd_graph(
     co_change_edges: list[dict[str, Any]] = []
 
     for fpath in files:
-        if time.monotonic() - graph_start > TOTAL_GRAPH_TIMEOUT:
-            break
         try:
             # Get commits that touched this file in the last 6 months
             log_result = subprocess.run(
@@ -1615,8 +1539,6 @@ def cmd_graph(
             # For each commit, find other files changed in the same commit
             co_change_counts: dict[str, int] = {}
             for commit_sha in commits:
-                if time.monotonic() - graph_start > TOTAL_GRAPH_TIMEOUT:
-                    break
                 try:
                     files_result = subprocess.run(
                         [
@@ -1776,20 +1698,13 @@ def cmd_format_diff(diff_text: str, expand_context: bool = False) -> str:
         source_lines: list[str] | None = None
         if expand_context:
             source_path = Path(file_path)
-            # Boundary check: reject paths that escape the repo root
-            try:
-                resolved = (Path.cwd() / source_path).resolve()
-                if not resolved.is_relative_to(Path.cwd().resolve()):
-                    source_lines = None  # skip expansion for out-of-repo paths
-                elif resolved.exists():
-                    try:
-                        source_lines = resolved.read_text(
-                            encoding="utf-8", errors="replace"
-                        ).splitlines()
-                    except (OSError, UnicodeDecodeError):
-                        source_lines = None
-            except (OSError, ValueError):
-                source_lines = None
+            if source_path.exists():
+                try:
+                    source_lines = source_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    ).splitlines()
+                except (OSError, UnicodeDecodeError):
+                    source_lines = None
 
         # Find all hunks
         hunk_re = re.compile(
@@ -1851,7 +1766,7 @@ def cmd_format_diff(diff_text: str, expand_context: bool = False) -> str:
 
                 # After-context: expand up to _EXPAND_AFTER_LINES past hunk end
                 hunk_end = new_start + sum(1 for ln in lines if not ln.startswith("-"))
-                after_start = hunk_end - 1  # convert 1-based line to 0-based index
+                after_start = hunk_end
                 after_end = min(after_start + _EXPAND_AFTER_LINES, len(source_lines))
                 if after_start < len(source_lines):
                     context_after_lines = source_lines[after_start:after_end]
@@ -1890,11 +1805,6 @@ def main() -> None:
         dest="cache_dir",
         default=None,
         help="Directory for incremental indexing cache",
-    )
-    gp.add_argument(
-        "--embedding-model",
-        choices=["model2vec", "onnx"],
-        default=None,
     )
     fp = sub.add_parser("format-diff")
     fp.add_argument("--expand-context", action="store_true")
@@ -1936,7 +1846,6 @@ def main() -> None:
                 semantic=args.semantic,
                 repo_root=getattr(args, "repo_root", None),
                 cache_dir=getattr(args, "cache_dir", None),
-                embedding_model=getattr(args, "embedding_model", None),
             ),
         }
         handler = dispatch.get(args.command)

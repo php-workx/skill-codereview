@@ -14,27 +14,29 @@ The launch packet should capture the review scope, diff metadata, wave plan, jud
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Step 2: Context Gathering (parallel)                         │
-│  - Diff extraction + format-diff (LLM-optimized before/after) │
-│  - code_intel.py: complexity, functions, graph (callers,      │
-│    co-change, depth-2), imports/exports                       │
-│  - prescan.py: 8 pattern checkers (P-SEC through P-STUB)     │
-│  - Deterministic scans: ruff, semgrep, trivy, shellcheck,    │
-│    gitleaks, ast-grep (per-language file filtering)           │
-│  - Cross-file planner: LLM search for related code outside   │
-│    diff (callers, symmetric ops, test/impl, config deps)     │
-│  - REVIEW.md directives, domain checklists, path instructions │
-│  - Spec/plan loading, coverage data, git risk scoring         │
-│  → Produces enriched PromptContext (12 context sources)       │
+│  Step 2: Context Gathering                                    │
+│  - Diff analysis, callers/callees, dead code check            │
+│  - Complexity analysis (radon/gocyclo)                        │
+│  - Spec/plan loading                                          │
+│  → Produces context packet                                    │
 └──────────────────────────────────────────────────────────────┘
                               │
 ┌──────────────────────────────────────────────────────────────┐
-│  Step 3: Adaptive Pass Selection                              │
-│  - Structural detection from code_intel function signatures   │
-│  - Regex fallback when code_intel unavailable                 │
-│  - Core passes always run (correctness, security, tests)      │
-│  - Extended passes auto-activate when relevant                │
-│  - Per-explorer cross-file context routing by category        │
+│  Step 3: Deterministic Scans                                  │
+│  semgrep, trivy, osv-scanner, shellcheck, pre-commit,         │
+│  sonarqube (via skill-sonarqube, if installed)                 │
+│  → Produces deterministic findings                            │
+└──────────────────────────────────────────────────────────────┘
+                              │
+┌──────────────────────────────────────────────────────────────┐
+│  Step 3.5: Adaptive Pass Selection                            │
+│  - Evaluate skip signals for extended passes                  │
+│  - Skip concurrency pass if no concurrency primitives         │
+│  - Skip api-contract pass if no public API changes            │
+│  - Skip error-handling pass if test/docs/config only          │
+│  - Skip spec-verification pass if no spec loaded              │
+│  - Core passes (correctness, security, reliability, tests)    │
+│    are never skipped                                          │
 └──────────────────────────────────────────────────────────────┘
                               │
     ┌────────┬────────┬───────┼───────┬────────┬────────┬────────┐
@@ -53,7 +55,7 @@ The launch packet should capture the review scope, diff metadata, wave plan, jud
     └─────────┴─────────┴────┬────┴─────────┴─────────┴─────────┴─────────┘
                              ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  Review Judge — Named Expert Panel (reviewer-judge.md)         │
+│  Review Judge — Named Expert Panel (reviewer-judge-*.md)       │
 │  Expert 1: Gatekeeper — pre-filter triage (auto-discard       │
 │     phantom knowledge, speculative, framework-guaranteed,     │
 │     outside scope, style-only, duplicate of deterministic)    │
@@ -66,16 +68,9 @@ The launch packet should capture the review scope, diff metadata, wave plan, jud
 └──────────────────────────────────────────────────────────────┘
                               │
 ┌──────────────────────────────────────────────────────────────┐
-│  Step 5: Enrich findings (enrich-findings.py)                 │
-│  - Merge AI + deterministic findings                          │
-│  - Confidence floor filter, minimum severity filter           │
-│  - Code-intel severity boost (caller count)                   │
-│  - Evidence check (downgrade AI high/critical without         │
-│    failure_mode)                                              │
-│  - Action tier assignment (must_fix/should_fix/consider)      │
-│  Step 6: Lifecycle tracking (fingerprint, suppress, defer)    │
-│  Step 7: Format report + save artifacts (.md + .json)         │
-│  Step 8: Write last-review marker for scope tracking          │
+│  Step 5: Classify into tiers                                  │
+│  Step 6: Format report with Next Steps                        │
+│  Step 7: Save artifacts (.md + .json)                         │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -154,6 +149,14 @@ The launch packet should capture the review scope, diff metadata, wave plan, jud
 | LLM-driven cross-file planner (F12) | Pure graph analysis misses non-obvious relationships (a config change that affects a distant handler, a type alias used across modules). An LLM planner using Haiku tier catches these semantic connections at low cost. Results are mechanically enforced — the orchestrator injects planner output into explorer prompts rather than relying on explorers to discover cross-file relationships independently. (deterministic fallback — LLM planner integration planned) | Context enrichment: cross-file analysis |
 | REVIEW.md alongside `.codereview.yaml` (F13) | Config YAML controls pipeline behavior (passes, thresholds, model routing); REVIEW.md provides human-authored review directives in prose. Keeping them separate preserves each file's single responsibility. Markdown format maximizes discoverability — teams already write CONTRIBUTING.md and CODEOWNERS, so REVIEW.md fits naturally. | Context enrichment: repo-level directives |
 | fnmatch path instructions (F15) | Uses `fnmatch` glob patterns (e.g., `src/api/**`) consistent with the existing `ignore_paths` config, avoiding a second pattern syntax. Per-path granularity (not per-directory) allows instructions to target specific file patterns like `*_test.go` or `migrations/*.sql` without requiring directory-level grouping. | Context enrichment: path-based instructions |
+| Phantom knowledge self-check (F10) | Absolutist framing ("DO NOT make claims") risks suppressing legitimate findings about code behind opaque abstractions (DI containers, macro-heavy crates, dynamic dispatch). The softened approach — mark as assumed, lower confidence, let the judge decide — preserves findings for adversarial review while flagging their evidentiary basis. Four self-check questions are positioned after Phase 4 (Confidence Calibration) so they're fresh when the explorer starts output generation. | Wharton/USC persona research, Huang et al. 2023 self-correction limitations, pre-mortem adversarial QA review |
+| Test pyramid vocabulary (L0-L5, BF1-BF8) | "Add a test" is not actionable — developers need to know *what kind* of test to write. L-levels map to the standard test pyramid; BF-levels identify specific bug-finding techniques (property, snapshot, chaos, regression, backward-compat). Combined, they turn test-gap findings from vague suggestions into specific testing recipes. | Test-adequacy explorer gap analysis, research on structured test vocabulary |
+| Per-file certification (F5) | Explorers returning bare `[]` provide no signal — can't distinguish "checked thoroughly, clean" from "skimmed and missed issues". Certification forces explicit accounting. Phase 1 validates file coverage only; tool call validation deferred until agent-to-orchestrator tool call passing is designed. | AgentOps deep audit protocol, pre-mortem pm-001 |
+| Contract completeness gate (F6) | Per-requirement tracing catches what code missed implementing. The completeness gate catches what the spec forgot to specify — missing states, unhandled errors, contradictions, untestable requirements. Opt-in for formal specs only; severity low/consider so it never blocks merge. | AgentOps council 4-item contract gate |
+| Explorer findings summary table (F7) | Summary table prepended to judge prompt gives a triage overview (per-pass finding counts, high/critical signals). Inline JSON preserved as primary data source. File-based batching (writing explorer results to disk, judge reads via Read tool) deferred to next iteration — summary table is the Phase 1 deliverable. | AgentOps council output pattern, context window management |
+| Mental execution integrated into phases (F11) | A standalone preamble suffers from positional amnesia — by token 40k+ the instructions are forgotten. Integrating into Phases 3, 4, and 6 where the analysis naturally belongs keeps the instructions adjacent to the investigation context. Also avoids contradicting the confidence calibration table's 0.70-0.84 tier with absolutist "trace EXACT path or don't report" framing. | Pre-mortem systems architecture review, positional amnesia research |
+| Pre-existing bug classification (F8) | Reviewers don't want to fix old bugs in a feature PR — but a dormant bug that the PR activates is critical context. The `pre_existing` + `pre_existing_newly_reachable` flags let explorers classify and the enrichment pipeline filter: non-reachable pre-existing bugs are dropped, reachable ones are retained with tier downgrade for medium/low severity. | Claude Octopus pre_existing_newly_reachable field |
+| Provenance-aware review rigor (F9) | AI-generated code has distinct failure modes (over-abstraction, placeholder logic, unwired helpers) that human code rarely exhibits. Rather than always checking for these patterns (which would increase false positives on human code), the `--provenance` flag enables targeted investigation. The enrichment pipeline boosts AI-codegen risk findings from `consider` to `should_fix` when provenance indicates AI generation. | Claude Octopus provenance tracking, Codex autonomous agent output patterns |
 
 ---
 

@@ -31,7 +31,6 @@ def main() -> None:
 
     # Try LLM planning
     queries = _try_llm_planning(diff_summary, graph_data, model, prompt_path)
-    llm_used = queries is not None
 
     # Fallback to deterministic if LLM failed
     if queries is None:
@@ -44,7 +43,7 @@ def main() -> None:
     results = _enforce_budget(results, queries)
 
     # Format output
-    output = _format_output(queries, results, llm_used=llm_used)
+    output = _format_output(queries, results)
     json.dump(output, sys.stdout, indent=2)
 
 
@@ -89,15 +88,12 @@ def _try_llm_planning(
             if hasattr(block, "text"):
                 text += block.text
 
-        # Parse JSON from response -- look for array or object with "queries" key
-        json_match = re.search(r"[\[{].*[\]}]", text, re.DOTALL)
+        # Parse JSON from response -- look for a JSON array
+        json_match = re.search(r"\[.*\]", text, re.DOTALL)
         if not json_match:
             return None
 
         raw_queries = json.loads(json_match.group())
-        # Accept both {"queries": [...]} and bare [...]
-        if isinstance(raw_queries, dict):
-            raw_queries = raw_queries.get("queries", [])
         if not isinstance(raw_queries, list):
             return None
 
@@ -106,15 +102,12 @@ def _try_llm_planning(
         for q in raw_queries[:MAX_QUERIES]:
             if not isinstance(q, dict) or "pattern" not in q:
                 continue
-            pattern = str(q["pattern"]).strip()
-            if not pattern:
-                continue
             category = q.get("category", "consumers")
             if category not in VALID_CATEGORIES:
                 category = "consumers"
             queries.append(
                 {
-                    "pattern": pattern,
+                    "pattern": str(q["pattern"]),
                     "rationale": str(q.get("rationale", "")),
                     "risk_level": str(q.get("risk_level", "medium")),
                     "category": category,
@@ -211,7 +204,7 @@ def _execute_queries(queries: list[dict[str, Any]]) -> dict[str, Any]:
             cmd = ["grep", "-rnl", "-E"] + exclude_args
             if q.get("file_glob"):
                 cmd.extend(["--include", q["file_glob"]])
-            cmd.extend(["-e", pattern, "."])
+            cmd.extend([pattern, "."])
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -221,7 +214,7 @@ def _execute_queries(queries: list[dict[str, Any]]) -> dict[str, Any]:
                 check=False,
             )
             matches = [
-                line.removeprefix("./")
+                line.lstrip("./")
                 for line in proc.stdout.strip().split("\n")
                 if line.strip()
             ][:MAX_RESULTS_PER_QUERY]
@@ -260,10 +253,7 @@ def _enforce_budget(
 
 
 def _format_output(
-    queries: list[dict[str, Any]],
-    results: dict[str, Any],
-    *,
-    llm_used: bool = False,
+    queries: list[dict[str, Any]], results: dict[str, Any]
 ) -> dict[str, Any]:
     """Format final output with sections tagged by category."""
     sections: list[dict[str, Any]] = []
@@ -287,7 +277,7 @@ def _format_output(
             "queries_planned": len(queries),
             "queries_executed": len(results),
             "total_matches": sum(len(s["matches"]) for s in sections),
-            "llm_used": llm_used,
+            "llm_used": False,  # Will be True when LLM actually succeeds
         },
     }
 

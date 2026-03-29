@@ -44,9 +44,7 @@ class PostExplorersPhaseTests(unittest.TestCase):
             session_dir.mkdir()
             (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
 
-            judge_prompt_file = (
-                REPO_ROOT / "skills" / "codereview" / "prompts" / "reviewer-judge.md"
-            )
+            judge_prompt_file = REPO_ROOT / "skills" / "codereview" / "prompts"
             launch_packet = {
                 "session_dir": str(session_dir),
                 "waves": [
@@ -181,6 +179,10 @@ class PostExplorersPhaseTests(unittest.TestCase):
             self.assertEqual(judge_input["findings"][0]["confidence"], 0.92)
             self.assertIn("pass", judge_input["findings"][0])
             self.assertTrue((session_dir / "judge-prompt.md").exists())
+            judge_prompt = (session_dir / "judge-prompt.md").read_text(encoding="utf-8")
+            self.assertIn("Expert 0.5", judge_prompt)  # from judge-main
+            self.assertIn("Gatekeeper", judge_prompt)  # from judge-gatekeeper
+            self.assertIn("| Explorer |", judge_prompt)  # summary table
 
     def test_post_explorers_respects_non_default_confidence_floor(self) -> None:
         """Verify that a non-default confidence_floor in _config actually filters findings."""
@@ -189,9 +191,7 @@ class PostExplorersPhaseTests(unittest.TestCase):
             session_dir.mkdir()
             (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
 
-            judge_prompt_file = (
-                REPO_ROOT / "skills" / "codereview" / "prompts" / "reviewer-judge.md"
-            )
+            judge_prompt_file = REPO_ROOT / "skills" / "codereview" / "prompts"
             launch_packet = {
                 "session_dir": str(session_dir),
                 "waves": [
@@ -271,9 +271,7 @@ class PostExplorersPhaseTests(unittest.TestCase):
             session_dir.mkdir()
             (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
 
-            judge_prompt_file = (
-                REPO_ROOT / "skills" / "codereview" / "prompts" / "reviewer-judge.md"
-            )
+            judge_prompt_file = REPO_ROOT / "skills" / "codereview" / "prompts"
 
             # Create 51 findings with distinct confidence values (0.50 .. 1.00 step 0.01)
             findings_51 = [
@@ -332,6 +330,103 @@ class PostExplorersPhaseTests(unittest.TestCase):
             self.assertIn(1.00, confidences)
             # Verify sorted descending (highest first)
             self.assertEqual(confidences, sorted(confidences, reverse=True))
+
+    def _make_post_explorers_launch_packet(self, session_dir: Path) -> dict:
+        """Helper: minimal launch packet for post_explorers tests."""
+        judge_prompt_file = REPO_ROOT / "skills" / "codereview" / "prompts"
+        return {
+            "session_dir": str(session_dir),
+            "waves": [
+                {
+                    "wave": 1,
+                    "tasks": [
+                        {
+                            "name": "security",
+                            "output_file": str(
+                                (session_dir / "explorer-security.json").absolute()
+                            ),
+                        },
+                    ],
+                }
+            ],
+            "judge": {
+                "prompt_file": str(judge_prompt_file.absolute()),
+                "output_file": str((session_dir / "judge.json").absolute()),
+            },
+            "scan_results": {"tool_status": {}},
+            "_config": {"confidence_floor": 0.65},
+        }
+
+    def test_post_explorers_emits_certification_warning_for_empty_files_checked(
+        self,
+    ) -> None:
+        """certification_warnings appears when files_checked is empty."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir) / "session"
+            session_dir.mkdir()
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
+
+            explorer_output = {
+                "certification": {
+                    "status": "clean",
+                    "files_checked": [],
+                    "checks_performed": [],
+                    "tools_used": [],
+                },
+                "findings": [],
+            }
+            (session_dir / "explorer-security.json").write_text(
+                json.dumps(explorer_output), encoding="utf-8"
+            )
+            launch_packet = self._make_post_explorers_launch_packet(session_dir)
+            (session_dir / "launch.json").write_text(
+                json.dumps(launch_packet), encoding="utf-8"
+            )
+
+            result = post_explorers(Namespace(session_dir=session_dir))
+
+            self.assertEqual(result, 0)
+            judge_input = json.loads(
+                (session_dir / "judge-input.json").read_text(encoding="utf-8")
+            )
+            self.assertIn("certification_warnings", judge_input)
+            self.assertTrue(
+                any("files_checked" in w for w in judge_input["certification_warnings"])
+            )
+
+    def test_post_explorers_no_certification_warning_when_files_checked_populated(
+        self,
+    ) -> None:
+        """No certification_warnings when files_checked has entries."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir) / "session"
+            session_dir.mkdir()
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
+
+            explorer_output = {
+                "certification": {
+                    "status": "clean",
+                    "files_checked": ["src/app.py"],
+                    "checks_performed": ["Checked callers"],
+                    "tools_used": ["Grep: callers of login()"],
+                },
+                "findings": [],
+            }
+            (session_dir / "explorer-security.json").write_text(
+                json.dumps(explorer_output), encoding="utf-8"
+            )
+            launch_packet = self._make_post_explorers_launch_packet(session_dir)
+            (session_dir / "launch.json").write_text(
+                json.dumps(launch_packet), encoding="utf-8"
+            )
+
+            result = post_explorers(Namespace(session_dir=session_dir))
+
+            self.assertEqual(result, 0)
+            judge_input = json.loads(
+                (session_dir / "judge-input.json").read_text(encoding="utf-8")
+            )
+            self.assertNotIn("certification_warnings", judge_input)
 
 
 class DeriveVerdictTests(unittest.TestCase):

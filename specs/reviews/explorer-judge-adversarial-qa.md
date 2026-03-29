@@ -15,7 +15,7 @@
 
 The self-check is 30 lines of "ask yourself these 4 questions before every finding." This is the classic "think about this before answering" pattern. The model reads the self-check at token position ~800 of the global contract. By the time it is deep into Phase 2 investigation (token position 40k+), the self-check has been diluted by 40k tokens of code, grep results, and intermediate reasoning. The model will not stop mid-reasoning to re-derive the 4 questions from memory.
 
-Research on LLM self-correction (Huang et al. 2023, "Large Language Models Cannot Self-Correct Reasoning Yet") demonstrates that self-checks without new information generation degrade to no-ops. The proposed self-check generates no new information -- it asks the model to re-evaluate claims it already made, using the same context it already has.
+Research on LLM self-correction (Huang et al. 2023, "Large Language Models Cannot Self-Correct Reasoning Without External Feedback") demonstrates that self-checks without new information generation degrade to no-ops. The proposed self-check generates no new information -- it asks the model to re-evaluate claims it already made, using the same context it already has.
 
 **Specific failure modes:**
 
@@ -223,7 +223,7 @@ For each feature, here are the metrics that would prove success and prove failur
 |--------|-----------|-----------|
 | Success | Phantom-knowledge FP rate drops >30% on OWASP+Martian benchmarks | YES -- requires manual annotation of "phantom" vs. "evidence-backed" findings, which is laborious but possible |
 | Failure | TP recall drops >10% on same benchmarks | YES -- automated via ground truth comparison |
-| **Verdict** | **Testable, but requires manual FP annotation pipeline that does not yet exist.** The plan does not describe how to measure phantom knowledge reduction. | -- |
+| **Verdict** | **Testable, but requires manual FP annotation pipeline that does not yet exist.** The plan does not describe how to measure phantom knowledge reduction. |
 
 ### F11: Mental Execution Framing
 
@@ -231,7 +231,7 @@ For each feature, here are the metrics that would prove success and prove failur
 |--------|-----------|-----------|
 | Success | Average finding confidence increases AND recall holds | YES -- confidence is a numeric field, recall is measurable against ground truth |
 | Failure | Finding count drops >25% without precision gain | YES -- automated |
-| **Verdict** | **Testable.** But the plan does not propose running the benchmark before and after. Without a committed before/after evaluation, this is a "ship and hope" change. | -- |
+| **Verdict** | **Testable.** But the plan does not propose running the benchmark before and after. Without a committed before/after evaluation, this is a "ship and hope" change. |
 
 ### F4: Test Pyramid Vocabulary
 
@@ -239,7 +239,7 @@ For each feature, here are the metrics that would prove success and prove failur
 |--------|-----------|-----------|
 | Success | >80% of test-adequacy findings include `test_level` and `bug_finding_level` fields | YES -- schema validation |
 | Failure | Test-adequacy findings decrease in count or quality | PARTIALLY -- quality is subjective; count is measurable |
-| **Verdict** | **Testable for compliance, not for quality.** The model may fill in `test_level: "L1"` and `bug_finding_level: "BF4"` on every finding without meaningful differentiation. Need a rubric for whether the classifications are accurate. | -- |
+| **Verdict** | **Testable for compliance, not for quality.** The model may fill in `test_level: "L1"` and `bug_finding_level: "BF4"` on every finding without meaningful differentiation. Need a rubric for whether the classifications are accurate. |
 
 ### F5: Per-File Certification
 
@@ -247,7 +247,7 @@ For each feature, here are the metrics that would prove success and prove failur
 |--------|-----------|-----------|
 | Success | Missed-bug rate on "certified clean" areas drops >50% | REQUIRES adversarial dataset of diffs with known bugs in specific focus areas |
 | Failure | Token overhead >15% without quality improvement | YES -- token counting is automated |
-| **Verdict** | **Not testable without a purpose-built adversarial dataset.** The plan does not describe how to build one. | -- |
+| **Verdict** | **Not testable without a purpose-built adversarial dataset.** The plan does not describe how to build one. |
 
 ### F6: Contract Completeness Gate
 
@@ -255,7 +255,7 @@ For each feature, here are the metrics that would prove success and prove failur
 |--------|-----------|-----------|
 | Success | Gate findings correlate with implementation bugs >50% of the time | REQUIRES manual analysis of finding pairs |
 | Failure | >70% of gate findings are on informal specs | YES -- but requires tagging specs as formal/informal |
-| **Verdict** | **Barely testable.** Success metric requires cross-referencing spec findings with code findings, which needs human judgment. | -- |
+| **Verdict** | **Barely testable.** Success metric requires cross-referencing spec findings with code findings, which needs human judgment. |
 
 ### F7: Output File Batching
 
@@ -263,7 +263,7 @@ For each feature, here are the metrics that would prove success and prove failur
 |--------|-----------|-----------|
 | Success | Judge can process 50+ findings without quality degradation | YES -- compare F1 on large-diff reviews, batched vs. inline |
 | Failure | Judge cross-explorer synthesis quality drops | PARTIALLY -- requires manual review of dedup/grouping quality |
-| **Verdict** | **Testable for the core claim** (handles large reviews). Quality impact is harder to measure. | -- |
+| **Verdict** | **Testable for the core claim** (handles large reviews). Quality impact is harder to measure. |
 
 ### F8: Pre-Existing Bug Classification
 
@@ -271,7 +271,7 @@ For each feature, here are the metrics that would prove success and prove failur
 |--------|-----------|-----------|
 | Success | Pre-existing bugs correctly classified >80% of the time | REQUIRES dataset of diffs with known pre-existing bugs |
 | Failure | Model sets `pre_existing: true` on bugs the diff introduced | YES -- automated check against diff boundaries |
-| **Verdict** | **Partially testable.** Failure metric is automatable. Success metric needs a curated dataset. | -- |
+| **Verdict** | **Partially testable.** Failure metric is automatable. Success metric needs a curated dataset. |
 
 ### F9: Provenance-Aware Review Rigor
 
@@ -279,7 +279,7 @@ For each feature, here are the metrics that would prove success and prove failur
 |--------|-----------|-----------|
 | Success | On autonomous-generated code, additional AI-codegen-specific findings are surfaced | REQUIRES dataset of AI-generated diffs with known AI-codegen patterns |
 | Failure | On human-authored code with `--provenance autonomous`, false positive rate increases from pattern over-matching | YES -- run existing benchmarks with provenance flag and compare FP rates |
-| **Verdict** | **Testable for failure mode, hard to test for success.** Need an AI-generated code benchmark. | -- |
+| **Verdict** | **Testable for failure mode, hard to test for success.** Need an AI-generated code benchmark. |
 
 ---
 

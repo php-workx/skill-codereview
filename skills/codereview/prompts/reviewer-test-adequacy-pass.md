@@ -98,6 +98,39 @@ When reporting test gaps, include a `test_category_needed` field as an enum arra
 }
 ```
 
+### Phase 7 — Test Pyramid Classification
+
+For each test gap identified in Phases 1-5, classify using the pyramid vocabulary below. This enriches findings with actionable guidance about *what level* of test is needed, not just *that* a test is missing.
+
+#### Test Pyramid Levels (L0-L5)
+
+| Level | Name | What It Catches | Example |
+|-------|------|----------------|---------|
+| L0 | Contract/Spec | Spec boundary violations | Schema validation, API contract tests |
+| L1 | Unit | Logic bugs in isolated functions | `test_calculate_discount()` |
+| L2 | Integration | Module interaction bugs | DB + service layer together |
+| L3 | Component | Subsystem-level failures | Auth service end-to-end |
+| L4 | Smoke | Critical path regressions | Login → dashboard flow |
+| L5 | E2E | Full system behavior | Browser test of complete user journey |
+
+#### Bug-Finding Levels (BF1-BF8)
+
+| Level | Name | What It Finds | When Needed |
+|-------|------|--------------|-------------|
+| BF1 | Property | Edge cases from randomized inputs | Data transformations, parsers |
+| BF2 | Golden/Snapshot | Output drift | Serializers, formatters, template renderers |
+| BF4 | Chaos/Negative | Unhandled failures | External API calls, DB operations, file I/O |
+| BF6 | Regression | Reintroduced bugs | Any area with a history of fixes |
+| BF8 | Backward compat | Breaking changes | Public APIs, serialization formats |
+
+#### Gap Analysis
+
+For each undertested function or code path identified in earlier phases:
+1. **Existing level**: What is the highest test pyramid level already covering this code? (Use Phase 6 classification)
+2. **Needed level**: Based on the function's role and risk, which pyramid level *should* cover it? Include the rationale in `gap_reason`.
+3. **Bug-finding dimension**: Would a specific BF-level test catch bugs that pyramid tests miss? (e.g., a parser needs BF1 property tests; a serializer needs BF2 snapshot tests)
+4. Populate `test_level`, `bug_finding_level`, and `gap_reason` fields in your finding output.
+
 ---
 
 ## Calibration Examples
@@ -135,6 +168,44 @@ When reporting test gaps, include a `test_category_needed` field as an enum arra
 }
 ```
 **Why medium confidence:** The missing test is confirmed, but the rate-limiting code is straightforward enough that the risk of a bug is moderate.
+
+### True Positive — Pyramid Gap (BF2 Snapshot Test)
+```json
+{
+  "pass": "testing",
+  "severity": "medium",
+  "confidence": 0.80,
+  "file": "src/export/json_formatter.py",
+  "line": 15,
+  "summary": "JSON export function has unit tests but no snapshot test — output format drift won't be caught",
+  "evidence": "Lines 15-42: format_export_json() builds a nested JSON structure with 12 fields including computed timestamps and formatted amounts. test_json_formatter.py has 3 unit tests checking individual fields but no golden-file comparison of the full output. A field reordering or format change (e.g., ISO date to Unix timestamp) would pass all unit tests.",
+  "failure_mode": "Downstream consumers parsing the JSON export by position or exact format break silently when field ordering or formatting changes.",
+  "fix": "Add a BF2 snapshot test: serialize a known input, compare full output against a golden file. Update the golden file explicitly when format changes are intentional.",
+  "test_level": "L1",
+  "bug_finding_level": "BF2",
+  "gap_reason": "Unit tests verify individual fields but not the aggregate output shape — snapshot testing catches format drift that field-level assertions miss"
+}
+```
+**Why this is strong:** Existing test coverage is acknowledged (unit tests exist), but the specific gap (no aggregate output verification) is identified with a concrete failure scenario. The pyramid classification makes the gap actionable.
+
+### True Positive — Pyramid Gap (BF4 Chaos Test)
+```json
+{
+  "pass": "testing",
+  "severity": "high",
+  "confidence": 0.85,
+  "file": "src/orders/cancel_order.py",
+  "line": 30,
+  "summary": "Order cancellation has no negative/chaos test — payment refund failure leaves order in inconsistent state",
+  "evidence": "Lines 30-52: cancel_order() calls payment_gateway.refund() then db.update_status('cancelled'). test_cancel_order.py has 2 tests: successful cancellation and already-cancelled order. No test mocks payment_gateway.refund() to raise RefundError. If refund fails at line 35, the function continues to line 40 and marks the order as cancelled without a refund.",
+  "failure_mode": "Customer's order is marked cancelled but payment is not refunded. The inconsistency is silent — no error raised, no retry scheduled.",
+  "fix": "Add BF4 chaos test: mock refund() to raise RefundError, assert order status is NOT set to cancelled (or assert a retry/compensation is scheduled).",
+  "test_level": "L2",
+  "bug_finding_level": "BF4",
+  "gap_reason": "Integration between payment gateway and order state needs chaos testing — failure of the external call mid-operation creates inconsistent state that unit tests with happy-path mocks never trigger"
+}
+```
+**Why this is strong:** The chaos dimension (BF4) identifies a specific failure mode that standard test categories miss — the test isn't just "missing", it's missing a specific *kind* of adversarial scenario.
 
 ### False Positive — Do NOT Report
 **Scenario:** A new helper function `format_display_name(first, last)` that concatenates two strings has no dedicated test.

@@ -223,6 +223,50 @@ Validation criteria for the codereview skill. Not needed at runtime — use for 
 | `REVIEW.md` partially populated | Valid sections are loaded; empty or malformed sections are skipped. |
 | `REVIEW.md` combined with `.codereview.yaml` | Both are loaded independently. Config YAML controls pipeline behavior; REVIEW.md provides review prose directives. No conflict — complementary sources. |
 
+## F5: Per-File Certification
+
+| Scenario | Input | Expected | Pass Criteria |
+|----------|-------|----------|---------------|
+| Explorer certifies clean | Explorer returns `{certification: {status: "clean", files_checked: [...], ...}, findings: []}` | Judge Expert 0.5 reviews certification, no warnings | Certification accepted without warning |
+| Explorer returns bare `[]` | Explorer returns `[]` (no certification) | Judge notes "investigation depth unknown" | Degraded but non-blocking |
+| Explorer certifies but judge finds issue | Explorer certifies clean, but judge's own investigation finds a bug | Judge reports the bug, notes certification gap in verdict_reason | Finding reported, certification mismatch noted |
+
+## F6: Contract Completeness Gate
+
+| Scenario | Input | Expected | Pass Criteria |
+|----------|-------|----------|---------------|
+| Gate all PASS | Spec with complete state transitions, error handling, consistency | `completeness_gate.overall: "PASS"`, no gap findings | Zero gap findings emitted |
+| Gate with GAP | Spec missing error recovery state | `completeness_gate.overall: "GAP"`, gap finding with `pass: "spec_verification"`, `severity: "medium"` | Gap finding exists, capped at 2 per review |
+| No spec provided | Review without --spec | Spec-verification explorer doesn't run, no gate | No completeness_gate in output |
+| Vague spec | Brief acceptance criteria | Most gate items N/A | No gap findings for N/A items |
+
+## F7: Explorer Findings Summary Table
+
+| Scenario | Input | Expected | Pass Criteria |
+|----------|-------|----------|---------------|
+| Standard review | 4 explorers, 12 findings | Judge prompt includes summary table with per-pass counts | Table has `| Explorer | Findings | Signals |` header |
+| Zero findings from one explorer | Reliability explorer returns 0 findings | Summary table shows 0 for that row | Row present with count 0 |
+| Large review | 50+ findings across 8 explorers | Summary table present, inline JSON also present | Both summary and details in judge prompt |
+
+## F8: Pre-Existing Bug Classification
+
+| Scenario | Input | Expected | Pass Criteria |
+|----------|-------|----------|---------------|
+| Pre-existing, newly reachable, high | `pre_existing: true, newly_reachable: true, severity: "high"` | Tier unchanged (must_fix) | Enrichment preserves tier |
+| Pre-existing, newly reachable, medium | `pre_existing: true, newly_reachable: true, severity: "medium"` | Tier downgraded (should_fix -> consider) | Enrichment downgrades |
+| Pre-existing, not reachable | `pre_existing: true, newly_reachable: false` | Dropped from output | Finding absent from enriched output |
+| Explorer unsure | Flags omitted | Treated as introduced (default false) | Normal processing, no special handling |
+
+## F9: Provenance-Aware Review Rigor
+
+| Scenario | Input | Expected | Pass Criteria |
+|----------|-------|----------|---------------|
+| Autonomous provenance | `--provenance autonomous` | AI-codegen patterns checked, matching consider findings boosted to should_fix | Enriched output has boosted tier |
+| Human provenance | `--provenance human` | Standard review, no boost | No findings promoted by provenance |
+| AI-assisted provenance | `--provenance ai-assisted` | Elevated checks, matching findings boosted | Same boost behavior as autonomous |
+| Default (unknown) | No --provenance flag | Standard review, equivalent to human | No provenance-related behavior |
+| Substring false positive | Finding summary contains "password" | NOT boosted (word-boundary matching) | "password" does not match `\bpass\b` |
+
 ## Validation Script
 
 ```bash

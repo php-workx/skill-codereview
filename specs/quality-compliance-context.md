@@ -8,7 +8,7 @@
 
 ## Problem
 
-After the verification architecture improves finding precision, several quality-of-life and compliance features are needed: the review report needs a copy-pasteable summary, findings need finer-grained scoring, the context gathering phase needs a sufficiency check, documentation context should be available to explorers, local planning artifacts should inform compliance checks, and malformed model output should be auto-repaired.
+After the verification architecture improves finding precision, several quality-of-life and compliance features are needed: the review report needs a copy-pasteable summary, findings need finer-grained scoring, the context gathering phase needs a sufficiency check, documentation context should be available to explorers, local planning artifacts should be auto-detected for compliance checks, and malformed model output should be auto-repaired.
 
 ## Features Overview
 
@@ -30,25 +30,21 @@ After the verification architecture improves finding precision, several quality-
 
 ### Logic
 
-```text
+```
 If --spec provided:
   Run spec-verification explorer FIRST (before others)
   Read spec_requirements from output
 
   If >50% of "must" requirements are "not_implemented":
-    Add prominent "Incomplete Implementation" banner to report
-    Warning: "Spec verification found major implementation gaps.
-             Review proceeds, but findings may be superseded by
-             unfinished work."
-    Run remaining explorers normally (do NOT skip)
-    Include spec results + banner in judge input
+    Skip remaining explorers
+    Report: "Spec verification found major implementation gaps.
+             Detailed code review deferred until implementation catches up."
+    Verdict: FAIL (spec gaps)
 
   Else:
     Run remaining explorers normally
     Include spec results in judge input
 ```
-
-**Rationale:** Hard-gating (skipping explorers) was removed because it prevents discovering real bugs in the code that _is_ implemented. The banner ensures visibility without suppressing useful feedback. Use `--force-review` to suppress the banner entirely.
 
 ### Activation
 
@@ -64,7 +60,7 @@ Modify Step 4a to support sequential spec-first execution when `--spec` is activ
 
 ### Interaction with Feature 9
 
-Explicit plan context from F9 (`--ticket`, `--bead`, `--plan`) serves as the spec source when no `--spec` is provided. `--spec` takes precedence if explicitly given. Same gating threshold applies to ticket-derived requirements.
+Auto-detected plan context (F9) serves as the spec source when no `--spec` is provided. `--spec` takes precedence if explicitly given. Same gating threshold applies to ticket-derived requirements.
 
 ---
 
@@ -108,7 +104,7 @@ Explicit plan context from F9 (`--ticket`, `--bead`, `--plan`) serves as the spe
 
 ### Architecture
 
-```text
+```
 Step 2m: Cross-File Context Planning (context enrichment F12)
     ├── Phase 1: Planner generates queries from diff
     ├── Phase 2: Execute queries via Grep
@@ -193,7 +189,7 @@ Inspired by Kodus-AI's doc pipeline: package discovery → LLM generates doc que
 
 ### Architecture
 
-```text
+```
 Step 2n: Documentation Context (NEW)
     ├── Phase 1: Discover packages
     │   ├── Read manifests (package.json, requirements.txt, go.mod, etc.)
@@ -278,14 +274,14 @@ Inspired by PR-Agent's self-reflection scoring with calibrated bands and explici
 ```yaml
 scoring:
   min_score: 0      # drop findings below this (0 = keep all)
-  show_scores: false # scores used for internal ranking, not shown in report by default
+  show_scores: true
 ```
 
 ---
 
 ## Feature 9: Ticket & Task Verification
 
-**Goal:** Accept explicit references to local planning artifacts (tk tickets, bd beads, plan files) that describe what the current branch should implement. Verify implementation against them.
+**Goal:** Auto-detect local planning artifacts (tk tickets, bd beads, plan files) that describe what the current branch should implement. Verify implementation against them.
 
 ### Planning Artifact Sources
 
@@ -295,16 +291,16 @@ scoring:
 | `bd` beads | `.beads/issues.jsonl` | `.beads/` dir exists | `bd show <id>` | id, status, deps, description |
 | Plan files | `docs/plan-*.md` | glob | Read directly | Features with goals, files, acceptance criteria |
 
-### Detection Logic (Explicit Only)
+### Auto-Detection Logic
 
 New script: `scripts/detect-plan-context.sh`
 
-Plan context is sourced exclusively via explicit flags. No auto-detection from branch names or commit messages — heuristic matching produces too many false positives and creates confusion about which ticket is being verified.
-
-Accepted flags:
-- `--ticket <id>` — look up ticket via `tk show <id>` (requires `.tickets/` directory)
-- `--bead <id>` — look up bead via `bd show <id>` (requires `.beads/` directory)
-- `--plan <file>[#N]` — read plan file directly, optionally scoped to feature N
+1. Parse commit messages on current branch for ticket/bead IDs (regex: `/\b[a-z]{2,4}-[a-z0-9]{4}\b/`)
+2. Parse branch name for IDs (`feat/att-0ogy-claim-store` → `att-0ogy`)
+3. If IDs found + `.tickets/` exists: `tk query` for matched IDs (include parent + deps)
+4. If IDs found + `.beads/` exists: `bd show` for matched IDs
+5. If no IDs but `docs/plan-*.md` exists: heuristic match branch name against feature titles
+6. Accept explicit overrides: `--ticket <id>`, `--bead <id>`, `--plan <file>[#N]`
 
 ### Detection Output Schema
 
@@ -379,15 +375,16 @@ When no tickets/beads are found but a plan file matches, the `source` is `"plan"
 - **Step 2 (gather context):** Plan context included in context packet for all explorers.
 - **Step 3.5 (expert selection):** Spec-verification pass auto-enabled when plan context detected (no `--spec` flag needed).
 - **Step 4a (explorers):** The spec-verification explorer receives full plan context and produces `spec_requirements` + `scope_analysis`. Other explorers receive a one-line summary ("This branch implements ticket att-0ogy: Add ClaimableStore interface...") for awareness but don't perform compliance checks.
-- **Feature 2 (spec-gated):** Explicit plan context (`--ticket`, `--bead`, `--plan`) serves as spec source when no `--spec`. `--spec` takes precedence if explicitly provided. The skill distinguishes source: `source: "ticket:att-0ogy"` vs `source: "spec:docs/spec.md"`.
+- **Feature 2 (spec-gated):** Auto-detected plan context serves as spec source when no `--spec`. `--spec` takes precedence if explicitly provided. The skill distinguishes source: `source: "ticket:att-0ogy"` vs `source: "spec:docs/spec.md"`.
 - **Judge:** Receives plan context, includes compliance summary in verdict reasoning.
 
 ### Activation
 
-Activated only via explicit flags (`--ticket <id>`, `--bead <id>`, `--plan <file>`). No auto-detection. Configurable:
+On by default when `.tickets/` or `.beads/` exist. Disable via `/codereview --no-plan-context`. Configurable:
 ```yaml
 plan_context:
-  source: "none"       # tk | bd | plan | none (explicit flags override this)
+  auto_detect: true
+  source: "auto"       # auto | tk | bd | plan | none
   verify_deps: true
   scope_analysis: true
 ```
@@ -444,48 +441,32 @@ Log repairs: `"Repaired: extracted from code block"` or `"Repaired: fixed 2 trai
 
 ### Wave 1: Quick Wins (F3 + F8 + F10)
 
-No dependencies on other specs. Pure prompt + script changes. Pipeline ordering: F10 (repair) runs first, then F8 (scoring), then F3 (summary).
+No dependencies on other specs. Pure prompt + script changes.
 
-1. F10: Add `repair_json()` to `validate_output.sh`. Track repair rate; warn if >10%.
-2. F3: Add summary block template to `references/report-template.md`, instruct judge. "Not inline PR comments" — a formatted block the user can paste.
-3. F8: Add scoring bands + caps to judge prompt, add `score`/`score_reason` to schema, add `--min-score` to `enrich-findings.py`. Default `show_scores: false` — scores used for internal ranking, not shown in report.
-4. Tests: JSON repair strategies, summary block format, scoring bands, repair rate tracking
+1. F10: Add `repair_json()` to `validate_output.sh`
+2. F3: Add summary block template to `references/report-template.md`, instruct judge
+3. F8: Add scoring bands + caps to judge prompt, add `score`/`score_reason` to schema, add `--min-score` to `enrich-findings.py`
+4. Tests: JSON repair strategies, summary block format, scoring bands
 
 ### Wave 2: Spec Compliance (F2 + F9)
 
-F9 uses F2's spec-gating infrastructure. F9 auto-detection removed; explicit `--ticket`/`--plan` only.
+F9 depends on F2's spec-gating infrastructure.
 
-1. F2: Modify Step 4a in SKILL.md for spec-first execution. Change from hard gate to warning: always run review, add prominent "incomplete implementation" banner when >50% gaps. Add `--force-review` flag.
-2. F9: Write `scripts/detect-plan-context.sh` — explicit `--ticket <id>`, `--bead <id>`, `--plan <file>` flags only. No auto-detection from branch names or commit messages.
-3. F9: Extend `reviewer-spec-verification-pass.md` to consume ticket context with all 4 check categories (completeness, scope, dependencies, status)
-4. F9: Scope analysis uses default ignore list (`*.lock`, config JSON, test fixtures, generated code). Scope warnings are informational only, not findings.
-5. F9: Add `plan_context`, `scope_analysis`, `dependency_status` to findings schema
-6. Tests: spec warning banner (not hard gate), explicit ticket/plan detection, scope analysis with ignore list, dep checks, status checks
+1. F2: Modify Step 4a in SKILL.md for spec-first sequential execution
+2. F9: Write `scripts/detect-plan-context.sh` for ticket/bead/plan detection
+3. F9: Extend `reviewer-spec-verification-pass.md` to consume ticket context
+4. F9: Add `plan_context`, `scope_analysis`, `dependency_status` to findings schema
+5. Tests: spec-gating threshold, ticket detection, scope analysis, dep checks
 
 ### Wave 3: Context Enhancement (F6 + F7)
 
 Depends on context enrichment plan features (cross-file planner, code_intel imports).
 
 1. F6: Write `prompts/reviewer-context-sufficiency.md`
-2. F6: Add Step 2m.5 to SKILL.md (sufficiency check between context collection and assembly). Show user-facing progress: "Context collection: 2 rounds, 15 queries, 2 gaps resolved."
+2. F6: Add Step 2m.5 to SKILL.md (sufficiency check between context collection and assembly)
 3. F7 (baseline): Add package detection to Step 2 (names + versions in context)
 4. F7 (full): Add context7 MCP integration for doc fetching
-5. Tests: sufficiency evaluation, additional query generation, progress output, doc injection
-
-### Wave 4: Finding Persistence (F11)
-
-Depends on Wave 1 (fingerprint needs `score` and `source_expert` fields).
-
-1. Implement `finding_fingerprint()` in `enrich-findings.py`
-2. Create `.codereview/` directory management (create if missing, add to `.gitignore` template)
-3. Implement `findings.jsonl` recording in `finalize()`
-4. Implement `suppressions.jsonl` read/write
-5. Add `orchestrate.py suppress` and `orchestrate.py record-findings` subcommands
-6. Add finding status comparison in `finalize()` (new/recurring/resolved/suppressed)
-7. Add "Finding Status" section to report template
-8. Add SKILL.md instructions for conversational suppression flow
-9. Add `finding_persistence` config keys to `CONFIG_ALLOWLIST`
-10. Tests: fingerprint stability across line shifts, suppression persistence, deferred expiry, resolved detection, conversational flow
+5. Tests: sufficiency evaluation, additional query generation, doc injection
 
 ---
 
@@ -495,73 +476,34 @@ Depends on Wave 1 (fingerprint needs `score` and `source_expert` fields).
 - [ ] F10: Malformed JSON with code block fences → repaired successfully
 - [ ] F10: JSON with trailing commas → repaired
 - [ ] F10: Truncated JSON → closed and marked `truncated: true`
-- [ ] F10: Repair logged to stderr with `repaired: true` in JSON envelope
-- [ ] F10: Repair rate tracked; warning if >10% of reviews need repair
-- [ ] F10: Pipeline ordering: repair runs before scoring and summary generation
+- [ ] F10: Repair logged to stderr
 - [ ] F3: Report contains summary block with verdict, must-fix, should-fix
-- [ ] F3: Summary clearly not inline PR comments — formatted block for pasting
-- [ ] F3: Summary capped at 10 lines with "See full report for N additional findings" overflow
+- [ ] F3: Summary capped at 10 lines
 - [ ] F3: Spec status included when `--spec` was used
-- [ ] F8: Each finding has `score` (0-10) and `score_reason` (internal)
-- [ ] F8: Default `show_scores: false` — scores not shown in report unless opted in
-- [ ] F8: Scores used for ranking within action tiers, tiebreaker: `severity_weight * confidence`
+- [ ] F8: Each finding has `score` (0-10) and `score_reason`
 - [ ] F8: Scoring caps enforced (documentation suggestion ≤ 2)
 - [ ] F8: `--min-score 3` drops findings scoring below 3
 
 ### Wave 2 (Compliance)
-- [ ] F2: >50% must-requirements unimplemented → add prominent "incomplete implementation" banner, still run review (NOT hard gate)
-- [ ] F2: Banner lists which requirements are implemented vs not (actionable output)
-- [ ] F2: `--force-review` flag bypasses the banner logic entirely
-- [ ] F2: Requires ≥3 must-requirements to activate banner logic
-- [ ] F9: `--ticket <id>`, `--bead <id>`, `--plan <file>` flags work for explicit context
-- [ ] F9: No auto-detection from branch names or commit messages
+- [ ] F2: >50% must-requirements not_implemented → skip remaining explorers, FAIL verdict
+- [ ] F2: ≤50% gaps → run all explorers normally
+- [ ] F2: Requires ≥3 must-requirements to gate
+- [ ] F9: Ticket ID detected from branch name
+- [ ] F9: Ticket ID detected from commit messages
+- [ ] F9: `tk query` returns structured ticket data
 - [ ] F9: Completeness check: missing files flagged
-- [ ] F9: Scope check: unexpected files flagged as informational (not findings), with default ignore list
-- [ ] F9: Status check: ticket in wrong status → warning
+- [ ] F9: Scope check: unexpected files flagged
 - [ ] F9: Dependency check: unresolved deps warned
-- [ ] F9: Explicit plan context enables spec-verification pass
+- [ ] F9: Auto-detected plan context enables spec-verification pass
 
 ### Wave 3 (Context)
 - [ ] F6: Sufficient context → no additional queries
 - [ ] F6: Insufficient (query found nothing) → up to 5 additional queries generated
 - [ ] F6: Max 2 rounds (no infinite loop)
-- [ ] F6: User-facing progress output: "Context collection: N rounds, N queries, N gaps resolved"
 - [ ] F7 baseline: Package names + versions in context packet
 - [ ] F7 full: context7 MCP resolves library → doc snippets injected
 
-### Wave 4 (Finding Persistence)
-- [ ] F11: `finding_fingerprint()` produces stable IDs across line shifts (code content-based, not line-number-based)
-- [ ] F11: Same finding with different line number (code shifted) → same fingerprint
-- [ ] F11: Same location with different finding type → different fingerprint
-- [ ] F11: `.codereview/findings.jsonl` records all findings per run
-- [ ] F11: `.codereview/suppressions.jsonl` records dismiss/defer/suppress actions
-- [ ] F11: `orchestrate.py suppress` subcommand works
-- [ ] F11: Report shows finding status: new, recurring, resolved, suppressed
-- [ ] F11: Suppressed findings listed at bottom of report for transparency
-- [ ] F11: Dismissed findings reappear if code at their location changes (fingerprint changes)
-- [ ] F11: Deferred findings reappear after 30 days (configurable expiry)
-- [ ] F11: SKILL.md conversational flow: agent can dismiss/defer findings during conversation
-- [ ] F11: `finding_persistence.enabled: false` disables the feature entirely
-
 ---
-
-## Config Presets
-
-To reduce configuration burden, add a `preset` concept:
-
-```yaml
-# .codereview.yaml
-preset: team    # enables F3 (summary), F8 (scoring), F10 (repair), F11 (persistence)
-                # everything else uses defaults (off or conservative)
-```
-
-| Preset | What it enables | Target user |
-|--------|----------------|-------------|
-| `minimal` | Core review only, no extras | Individual developer, cost-conscious |
-| `team` | F3 (summary), F8 (scoring), F10 (repair), F11 (persistence) | Team with PR workflow |
-| `full` | All features including F6 (sufficiency), F7 (docs), F9 (compliance) | Teams with specs/tickets |
-
-Presets set defaults that individual config keys can override.
 
 ## Files to Create
 
@@ -575,188 +517,15 @@ Presets set defaults that individual config keys can override.
 
 | File | Features |
 |------|----------|
-| `SKILL.md` | F2, F6, F7, F9, F11 |
+| `SKILL.md` | F2, F6, F7, F9 |
 | `prompts/reviewer-judge.md` | F3, F8 |
 | `prompts/reviewer-spec-verification-pass.md` | F9 |
-| `scripts/orchestrate.py` | F11 (suppress, record-findings subcommands, fingerprint, finalize) |
-| `scripts/enrich-findings.py` | F8, F11 (fingerprint field) |
+| `scripts/enrich-findings.py` | F8 |
 | `scripts/validate_output.sh` | F10 |
-| `references/report-template.md` | F3, F11 |
-| `references/findings-schema.json` | F8, F9, F11 |
-| `references/design.md` | F2, F3, F6, F7, F8, F9, F10, F11 |
-| `references/acceptance-criteria.md` | F2, F6, F9, F11 |
-
----
-
-## Feature 11: Finding Persistence & Suppression
-
-**Goal:** Track findings across review runs so that: (1) dismissed/deferred findings don't reappear, (2) the report shows which findings are new vs recurring vs resolved, and (3) the agent and developer can conversationally manage finding lifecycle.
-
-### Why This Matters
-
-Without persistence, every review is a clean slate. A developer who dismissed a false positive yesterday sees it again today. A finding that was fixed between pushes has no "resolved" status — it just silently disappears. The developer has no sense of progress.
-
-### Finding Fingerprint (Content-Based)
-
-Each finding gets a stable identifier that survives code shifts (line numbers change when code is added above). The fingerprint is based on **code content**, not line numbers.
-
-```python
-import hashlib
-
-def finding_fingerprint(finding: dict, repo_root: Path) -> str:
-    """Stable ID for a finding across runs.
-
-    Uses code content near the finding location, NOT line numbers.
-    If you add 10 lines above the finding, the line number changes
-    but the fingerprint stays the same — because the actual code
-    at the finding's location hasn't changed.
-    """
-    file_path = finding["file"]
-    line = finding.get("line", 0)
-
-    # Read ~5 lines of code around the finding location
-    try:
-        full_path = repo_root / file_path
-        lines = full_path.read_text().splitlines()
-        start = max(0, line - 3)
-        end = min(len(lines), line + 2)
-        code_context = " ".join(lines[start:end]).strip()
-    except (FileNotFoundError, IndexError):
-        code_context = ""
-
-    # Normalize whitespace for stability
-    normalized = " ".join(code_context.split())
-
-    components = (
-        f"{file_path}"
-        f":{finding.get('source_expert', finding.get('pass', ''))}"
-        f":{finding.get('severity', '')}"
-        f":{normalized}"
-    )
-    return hashlib.sha256(components.encode()).hexdigest()[:12]
-```
-
-**Why not line numbers:** SonarQube learned this lesson — they hash file path + rule ID + line content. Line numbers are unstable; code content is stable. If the developer adds a blank line above the finding, the fingerprint shouldn't change.
-
-**Why include `source_expert`:** Ties into Spec A's `source_expert` field. Two different experts finding different issues on the same line get different fingerprints.
-
-### Local Storage
-
-```text
-.codereview/
-  findings.jsonl       # history of all findings with fingerprints and timestamps
-  suppressions.jsonl   # user actions: dismissed, deferred, suppressed
-```
-
-**`findings.jsonl`** — appended after each review run:
-```json
-{"fingerprint": "abc123def456", "file": "src/auth.py", "line": 42, "summary": "SQL injection...", "severity": "high", "source_expert": "security-dataflow", "run_date": "2026-03-29", "run_id": "codereview-abc123"}
-```
-
-**`suppressions.jsonl`** — written when the agent or user suppresses a finding:
-```json
-{"fingerprint": "abc123def456", "action": "dismissed", "reason": "false positive, test fixture", "date": "2026-03-29", "dismissed_by": "user"}
-```
-
-Actions:
-- `dismissed` — false positive, don't show again unless the code at that location changes
-- `deferred` — real issue, but not fixing now. Show with "deferred" tag on next run.
-- `suppressed` — acceptable risk, documented. Don't show again regardless.
-
-**Gitignore:** `.codereview/` should be in `.gitignore` by default (finding history is local, not shared). Teams that want shared suppressions can remove it from `.gitignore`.
-
-### Conversational Interaction
-
-The interaction happens in the conversation between the developer and the agent. There is no standalone CLI command. The agent uses `orchestrate.py` subcommands to persist actions.
-
-**Typical flow:**
-
-```text
-Developer: /codereview
-Agent: [runs review, produces report with 8 findings]
-
-Developer: Finding #3 about the missing null check — that's a false positive,
-           the input is validated upstream in middleware.
-Agent: I'll dismiss that finding. It won't appear in future reviews unless
-       the code at that location changes.
-       [calls: orchestrate.py suppress --fingerprint abc123def456
-               --action dismissed --reason "validated by upstream middleware"]
-
-Developer: Finding #7 about the missing test — defer that, we'll add it
-           next sprint.
-Agent: Deferred. It will show as "deferred" in your next review.
-       [calls: orchestrate.py suppress --fingerprint def789ghi012
-               --action deferred --reason "scheduled for next sprint"]
-```
-
-**SKILL.md awareness:** The skill prompt needs instructions for this flow:
-```text
-When the developer discusses a finding and indicates they want to dismiss, defer,
-or suppress it:
-1. Confirm the action and reason with the developer
-2. Call: orchestrate.py suppress --fingerprint <id> --action <dismissed|deferred|suppressed> --reason "<reason>"
-3. Confirm the action was recorded
-```
-
-### orchestrate.py Subcommands
-
-```bash
-# Record a suppression
-orchestrate.py suppress --fingerprint abc123 --action dismissed --reason "false positive"
-
-# Record findings from a completed review (called by finalize())
-orchestrate.py record-findings --session-dir /tmp/codereview-xyz
-
-# Show finding history for a file
-orchestrate.py finding-history --file src/auth.py
-
-# List active suppressions
-orchestrate.py list-suppressions
-```
-
-### Report Integration
-
-The `finalize()` phase computes fingerprints for all current findings and compares against history:
-
-```markdown
-## Finding Status
-
-| Status | Count | Details |
-|--------|-------|---------|
-| New | 3 | First time these issues appear |
-| Recurring | 2 | Found in previous review, still present |
-| Resolved | 1 | Previously found, now fixed (code changed) |
-| Suppressed | 2 | Dismissed/deferred by developer |
-
-**Resolved since last review:**
-- ~~`src/auth.py:42` — SQL injection via string formatting~~ (code changed)
-
-**Suppressed (not shown in findings):**
-- `src/utils/cache.py:23` — Cache invalidation (deferred: "next sprint")
-- `tests/test_auth.py:15` — Hardcoded credential (dismissed: "test fixture")
-```
-
-Suppressed findings are listed at the bottom for transparency but don't appear in the main findings list or the summary block.
-
-### Suppression Expiry
-
-- `dismissed` (false positive): permanent unless code at that location changes. If the code changes, the fingerprint changes, and the finding is treated as new — the dismissal no longer applies.
-- `deferred`: persists for 30 days (configurable). After 30 days, the finding reappears as "deferred — expired, please re-evaluate."
-- `suppressed` (acceptable risk): permanent. Only removed manually.
-
-```yaml
-finding_persistence:
-  enabled: true
-  storage_dir: ".codereview"
-  deferred_expiry_days: 30
-```
-
-### Interaction with Existing Pipeline
-
-- **`finalize()` in orchestrate.py:** After judge output, compute fingerprints. Compare against `.codereview/findings.jsonl` for status (new/recurring/resolved). Filter out suppressed findings. Add finding status to the report.
-- **`enrich-findings.py`:** Add `fingerprint` field to each finding during enrichment.
-- **Report template:** Add "Finding Status" section showing new/recurring/resolved/suppressed counts.
-- **SKILL.md:** Add instructions for conversational suppression flow.
+| `references/report-template.md` | F3 |
+| `references/findings-schema.json` | F8, F9 |
+| `references/design.md` | F2, F3, F6, F7, F8, F9, F10 |
+| `references/acceptance-criteria.md` | F2, F6, F9 |
 
 ---
 
@@ -765,4 +534,4 @@ finding_persistence:
 | Feature | Status | Reason |
 |---------|--------|--------|
 | F4: Multi-model spot-check | Deferred | Needs empirical data on same-family model diversity |
-| Adaptive expert panel (was F11 in earlier drafts) | Superseded by Spec A | Full design in `specs/adaptive-expert-selection.md`. F11 ID now refers to finding persistence only. |
+| F11: Adaptive expert panel | Superseded by Spec A | Full design in `specs/adaptive-expert-selection.md` |

@@ -93,6 +93,15 @@ Fix if convenient, or defer to a follow-up.
 
 <expanded detail for partial/missing requirements — include impl_evidence, test_coverage details, and category_gap_reason for each requirement that is not fully implemented or fully tested>
 
+### Spec Contract Completeness
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| State Transitions | PASS/GAP/N/A | ... |
+| Error/Edge Behavior | PASS/GAP/N/A | ... |
+| Cross-Requirement Consistency | PASS/GAP/N/A | ... |
+| Testability | PASS/GAP/N/A | ... |
+
 ### Spec Gaps (summary)
 
 Requirements not fully addressed by this diff:

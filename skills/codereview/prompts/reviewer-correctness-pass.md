@@ -29,6 +29,8 @@ For each changed conditional or branch:
 3. Only report edge cases that have a plausible trigger path — not theoretical impossibilities.
 4. **Default/empty parameter analysis:** For every function parameter, especially optional ones, ask: "what happens when this is empty, None, an empty set, or omitted?" If the function has a fail-open pattern (e.g., `if not suppressions: return findings, []`), verify the return shape and behavior match what callers expect. Empty inputs that silently change semantics (e.g., `file in changed_files` is always false when `changed_files` is empty, turning a temporary state into a permanent one) are high-value findings.
 5. **Truth table enumeration for classification code:** When the diff contains rule-based classification (if/elif chains, match/case, lookup tables, priority systems, tier assignment), enumerate ALL valid input combinations and verify each maps to the expected output. Pay special attention to values that fall between rule boundaries. Example: severity={critical,high,medium,low} × confidence={0.0-1.0} → tier={must_fix,should_fix,consider}. Check every cell, not just the ones the developer tested.
+6. **Cardinality analysis:** For loops and repeated operations, trace execution with N=1, N=10, N=1000. Does cost scale linearly when it shouldn't? Look for: repeated allocations inside loops (creating a new client/connection per iteration), redundant network calls that could be batched, O(N²) patterns from nested iteration over the same collection.
+7. **Delayed execution analysis:** For callbacks, closures, deferred functions, and lazy evaluations: check loop variable capture (does the closure capture a loop variable by reference?), closure over mutable references (does the closure read state that changes between creation and invocation?), deferred blocks referencing variables modified in the try/catch body. Trace: when is the closure *created* vs when is it *invoked*? If those differ, what changed in between?
 
 ### Phase 4 — State Invariant Check
 If the code mutates shared state (class fields, global variables, database, cache):
@@ -36,6 +38,8 @@ If the code mutates shared state (class fields, global variables, database, cach
 2. Check if the mutation in the diff can violate the invariant.
 3. Grep for other mutation sites of the same state — check if the new code is consistent.
 4. **Multi-run state reasoning:** If the code manages persistent state (files, databases, caches, suppression lists, review artifacts), simulate what happens after N operations. Does state accumulate correctly? Does an append-only structure allow stale entries to shadow newer ones? Does matching/lookup still work correctly when the state has grown from multiple runs? Example: a suppression list that only appends — if the same finding is suppressed twice with different reasons, which entry wins?
+5. **Repeated invocation analysis:** Mentally execute the function twice in sequence. Does state leak between calls? Look for: mutable default arguments (Python `def f(x=[])` — the list persists across calls), module-level caches growing without bounds, class attributes that accumulate across instances, static variables in closures. Trace: call 1 → state S1, call 2 → state S2, call 3 → state S3. Is S2 what the caller expects, or does it contain artifacts from S1?
+6. **Concurrent execution analysis:** For code touching shared state, mentally execute two interleaved call stacks. Look for: read-modify-write without locks (thread A reads, thread B reads, both write — last write wins), shared mutable state accessed from multiple goroutines/threads/tasks, TOCTOU patterns (check-then-act where the check can go stale), channel ordering assumptions that break under load. If the code claims to be thread-safe, verify the claim — check that the lock scope covers the full critical section, not just part of it.
 
 ### Phase 5 — Backward Compatibility
 If a function signature, return type, error behavior, or public API contract changed:
@@ -49,6 +53,7 @@ For each new struct, object, or data structure construction in the diff:
 2. Trace **downstream consumers** — do they assume non-nil? Use **Grep** for accesses like `obj.Field[key]`, `obj.Field.Method()`, or range loops over the field. A nil map read returns zero value (safe), but a nil map write panics. A nil slice is safe for range but not for index access.
 3. Pay special attention to **conditional construction** — if/else branches, skip logic, early returns, error paths — where one branch initializes a field and another doesn't. The skip/error path often constructs a partial object.
 4. Check **evaluation lifecycle**: when code builds data structures consumed by later stages (expression engines, template renderers, configuration builders), verify inputs are fully resolved before consumption. Look for self-referential or circular resolution where a field's value depends on another field that hasn't been populated yet.
+5. **Failure mid-operation analysis:** When a function performs multiple side effects (writes, API calls, state mutations), trace what happens when it fails *between* operations. Look for: partial writes without transaction/rollback (first DB write succeeds, second fails — data is inconsistent), resources acquired but not released on error paths (file opened, processing fails, file handle leaked), state modifications before validation checks (state mutated, then validation fails, but state isn't rolled back), uncommitted transactions on exception paths.
 
 ### Phase 7 — Serialization Boundary Tracing
 When the diff contains code that marshals or unmarshals data (JSON, protobuf, gRPC, RPC, IPC, database rows):
@@ -143,6 +148,44 @@ When a function builds a dict, object, struct, or data record that is consumed b
 ```
 **Why this is strong:** Both sides verified by reading the actual struct definitions. The JSON marshal/unmarshal behavior for array→map returns an UnmarshalTypeError, but the caller discards it — making the practical failure silent. Confidence 0.90 because both types and the error-handling path were confirmed.
 
+### True Positive — Mutable Default (Repeated Invocation)
+```json
+{
+  "pass": "correctness",
+  "severity": "high",
+  "confidence": 0.90,
+  "file": "src/cache/dedup.py",
+  "line": 12,
+  "summary": "Mutable default argument accumulates state across calls — second invocation includes first call's items",
+  "evidence": "Line 12: def process(items, seen={}). The default dict `seen` persists across calls. Call 1 with items=['a','b'] adds 'a','b' to seen. Call 2 with items=['c'] still has 'a','b' in seen, so dedup incorrectly removes items matching previous calls. Read src/cache/dedup.py:12-30 confirmed no `seen.clear()` or `seen=None` guard.",
+  "evidence_source": "Read src/cache/dedup.py:12-30",
+  "failure_mode": "Each call to process() inherits the seen-set from all previous calls. Items that appeared in any previous call are incorrectly treated as duplicates. Severity compounds over time — after N calls, the seen set is the union of all N inputs.",
+  "fix": "Use `seen=None` with `if seen is None: seen = {}` inside the function body.",
+  "tests_to_add": ["Test process() called twice: second call should not see first call's items"]
+}
+```
+**Why this is strong:** The repeated invocation analysis (Phase 4, subsection 5) traces execution across two calls. The evidence cites a specific Read tool call. The failure mode explains compounding severity.
+
+### True Positive — Pre-Existing Newly Reachable (High Confidence)
+```json
+{
+  "pass": "correctness",
+  "severity": "high",
+  "confidence": 0.85,
+  "file": "src/cache/invalidation.py",
+  "line": 67,
+  "summary": "Race condition in cache invalidation — pre-existing but newly reachable from batch_process() endpoint added in this diff",
+  "evidence": "Line 67: cache.delete(key) followed by db.update(key, value) without lock. Read src/cache/invalidation.py:60-80 — this pattern has existed since initial commit. But the new batch_process() endpoint at src/api/batch.py:30 (added in this diff) calls invalidate_cache() with concurrent requests, creating a realistic trigger path that didn't exist before.",
+  "evidence_source": "Read src/cache/invalidation.py:60-80, Grep: callers of invalidate_cache",
+  "failure_mode": "Concurrent batch_process() calls can read stale cache between delete and update. Before this diff, invalidate_cache() was only called from single-threaded admin CLI — no concurrency risk.",
+  "fix": "Wrap cache.delete() + db.update() in a lock or use atomic cache replacement.",
+  "pre_existing": true,
+  "pre_existing_newly_reachable": true,
+  "tests_to_add": ["Test concurrent batch_process() calls don't produce stale cache reads"]
+}
+```
+**Why this is strong:** The bug is pre-existing (unchanged code) but the diff adds a new caller (batch_process) that creates a realistic concurrency trigger. The pre_existing flags correctly classify this as an activation, not a new bug.
+
 ### False Positive — Do NOT Report
 **Scenario:** A function uses `dict['key']` instead of `dict.get('key')`.
 **Investigation:** Grepped all 3 callers. Every caller constructs the dict with `'key'` always present as a required field. The function is private (`_process_item`) and only called from `process_batch()` which builds the dict from validated input.
@@ -170,6 +213,7 @@ Do NOT report:
 - For changed conditionals, check git blame on the original condition — the original author may have left a comment explaining why it was written that way.
 - If the diff removes code, check whether anything depended on the removed behavior.
 - **Identifier uniqueness:** When reviewing ID/key/fingerprint generation, check the entropy. Count the distinguishing bits: 4 hex chars = 16 bits (~256 before collision), 8 hex = 32 bits (~65K), 12 hex = 48 bits (~16M). If the ID is used as a primary key or deduplication key, the collision threshold must exceed the expected dataset size. Also check: do two different inputs that should produce different IDs actually produce different IDs? (e.g., same file + same line + same pass but different summaries).
+- **Nullable `.get()` trap (JSON/dict):** When code uses `dict.get(key, default)` on data parsed from JSON, check if the schema allows `null` for that key. Python's `.get()` returns the default only when the key is **absent** — when the key is present with value `null`, it returns `None`, not the default. Example: `finding.get("evidence", "")` returns `None` (not `""`) when the JSON has `"evidence": null`. This causes `TypeError` on string concatenation. Fix: use `(finding.get("evidence") or "")`.
 - **Parallel instance consistency:** When the code performs the same operation for multiple items (running multiple tools, processing multiple file types, handling multiple event types), verify the operations are consistent where they should be. If 3 of 5 tool invocations scope to changed files but 2 use repo-wide scanning, the inconsistency is likely a bug. If error handling differs across parallel branches, ask whether the difference is intentional. Compare argument patterns side by side rather than reviewing each invocation in isolation.
 - **CLI tool invocation verification:** When the diff invokes CLI tools (especially build tools, coverage tools, linters, package managers), verify the command actually does what the code expects. If you are unsure what a specific subcommand or flag does (e.g., does `c8 report` run tests or only render existing data? does `nyc report` generate coverage or just format it?), use available documentation tools — Context7 MCP, WebSearch, or the tool's `--help` output — to confirm the behavior before assuming correctness. Common gotchas: report-only commands used where run+report is needed, flags that behave differently across tool versions, subcommands that look similar but have distinct semantics (e.g., `git rev-list --count` vs `git rev-parse --is-shallow-repository` for detecting shallow clones).
 

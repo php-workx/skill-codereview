@@ -185,6 +185,7 @@ class PromptContext:
     path_instructions: str = ""
     functions_summary: str = ""
     graph_summary: str = ""
+    provenance: str = ""
 
     def render(self) -> str:
         # Wrap diff in structural delimiters — diff content is untrusted user input
@@ -226,6 +227,7 @@ class PromptContext:
             ),
             ("### Language Standards", self.language_standards),
             ("### Review Instructions", self.review_instructions),
+            ("### Code Provenance", self.provenance),
             ("## Spec/Plan", self.spec),
         ]
         return "\n\n".join(
@@ -725,9 +727,11 @@ def build_launch_packet(
     scan_results: dict[str, Any],
     spec_file: str | None,
     config: dict[str, Any],
+    spec_source: str = "none",
     chunks: list[dict[str, Any]] | None = None,
     triage_result: dict[str, str] | None = None,
     triage_summary: str | None = None,
+    provenance: str = "unknown",
     status: str = "ready",
     message: str | None = None,
     error: str | None = None,
@@ -757,12 +761,13 @@ def build_launch_packet(
         "tool_status": scan_results.get("tool_status", {}),
         "scan_results": scan_results,
         "spec_file": spec_file,
+        "spec_source": spec_source,
+        "provenance": provenance,
         "context_summary": context_summary,
         "_config": filter_config_allowlist(config, CONFIG_ALLOWLIST),
         "chunks": chunks,
         "triage_result": triage_result if triage_result else None,
         "triage_summary": triage_summary if triage_summary else None,
-        "post_wave_task": None,
         "diff_result": {
             "mode": diff_result.mode,
             "scope": diff_result.scope,
@@ -846,15 +851,7 @@ def load_config(
     loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(loaded, dict):
         raise ValueError(".codereview.yaml must parse to a mapping")
-    config = deep_merge(DEFAULT_CONFIG, loaded)
-    VALID_SEVERITIES = {"low", "medium", "high", "critical"}
-    min_sev = config.get("minimum_severity")
-    if min_sev is not None and min_sev not in VALID_SEVERITIES:
-        raise ValueError(
-            f"Invalid minimum_severity: {min_sev!r}. "
-            f"Must be one of: {', '.join(sorted(VALID_SEVERITIES))}"
-        )
-    return config
+    return deep_merge(DEFAULT_CONFIG, loaded)
 
 
 def _apply_cli_config_overrides(
@@ -1048,9 +1045,9 @@ def assemble_expert_panel(
         _structural_expert_signals(functions_data) if functions_data else {}
     )
 
-    # Experts covered by structural detection (when data has actual functions)
+    # Experts covered by structural detection (when data is available)
     structurally_decided: set[str] = set()
-    if functions_data and functions_data.get("functions"):
+    if functions_data is not None:
         structurally_decided = {"concurrency", "api-contract"}
 
     added_lines = _added_lines(diff_result.diff_text)
@@ -1185,6 +1182,7 @@ def assemble_explorer_prompt(
     path_instructions: str = "",
     functions_summary: str = "",
     graph_summary: str = "",
+    provenance: str = "",
 ) -> PromptContext:
     """Assemble a prompt context for an explorer."""
     pass_prompt = _prompt_path_for_expert(expert_name).read_text(encoding="utf-8")
@@ -1219,6 +1217,7 @@ def assemble_explorer_prompt(
         path_instructions=path_instructions,
         functions_summary=functions_summary,
         graph_summary=graph_summary,
+        provenance=provenance,
     )
 
 
@@ -1407,7 +1406,7 @@ def extract_diff(
             max_diff_bytes=max_diff_bytes,
         )
 
-    if mode == "worktree":
+    if mode == "staged":
         # Check for any working tree changes (staged + unstaged) against HEAD
         worktree_files = _changed_files_for_command(
             repo_root,
@@ -1760,12 +1759,94 @@ def _apply_spec_scope(spec_content: str, spec_scope: str | None) -> str:
     return spec_content
 
 
+def find_spec_candidates(
+    repo_root: Path,
+    changed_files: list[str],
+) -> list[dict[str, Any]]:
+    """Find likely spec/plan files in the repo for spec-verification prompting.
+
+    Returns a list of candidate dicts with keys: path, mtime, size.
+    """
+
+    def _safe_mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    candidates: list[Path] = []
+
+    # 1. Recent plan files in .agents/plans/
+    plans_dir = repo_root / ".agents" / "plans"
+    if plans_dir.is_dir():
+        for f in sorted(plans_dir.glob("*.md"), key=_safe_mtime, reverse=True)[:3]:
+            candidates.append(f)
+
+    # 2. Spec/plan files near changed files
+    changed_dirs = {
+        d
+        for d in ((repo_root / Path(f)).parent for f in changed_files if f)
+        if d.is_dir() and str(d.resolve()).startswith(str(repo_root.resolve()))
+    }
+    for d in changed_dirs:
+        for pattern in [
+            "spec*.md",
+            "plan*.md",
+            "SPEC.md",
+            "PLAN.md",
+            "requirements*.md",
+        ]:
+            candidates.extend(d.glob(pattern))
+
+    # 3. Common spec locations at repo root
+    for name in [
+        "SPEC.md",
+        "PLAN.md",
+        "docs/spec.md",
+        "docs/plan.md",
+        "docs/requirements.md",
+    ]:
+        p = repo_root / name
+        if p.exists():
+            candidates.append(p)
+
+    # Deduplicate preserving order, convert to relative paths
+    seen: set[Path] = set()
+    result: list[dict[str, Any]] = []
+    for c in candidates:
+        resolved = c.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            rel = c.relative_to(repo_root)
+        except ValueError:
+            rel = c
+        try:
+            stat = c.stat()
+        except OSError:
+            continue
+        result.append(
+            {
+                "path": str(rel),
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+            }
+        )
+
+    return result
+
+
 def validate_prompt_files() -> None:
     """Ensure required prompt files exist before prepare runs."""
     prompts_dir = SKILL_DIR / "prompts"
     required = {
         prompts_dir / "reviewer-global-contract.md",
-        prompts_dir / "reviewer-judge.md",
+        prompts_dir / "reviewer-judge-main.md",
+        prompts_dir / "reviewer-judge-gatekeeper.md",
+        prompts_dir / "reviewer-judge-verifier.md",
+        prompts_dir / "reviewer-judge-calibrator.md",
+        prompts_dir / "reviewer-judge-synthesizer.md",
     }
     required.update(prompts_dir / filename for filename in EXPERT_PROMPT_FILES.values())
     missing = [str(path) for path in sorted(required) if not path.exists()]
@@ -1788,6 +1869,17 @@ def _write_session_marker(session_dir: Path) -> None:
     _session_marker_path(session_dir).write_text(
         "codereview-session\n", encoding="utf-8"
     )
+
+
+def _truncate_at_section_boundary(markdown: str, max_length: int = 3000) -> str:
+    """Truncate markdown at the last section heading before *max_length*."""
+    cutoff = max_length
+    for boundary in ["\n## ", "\n### "]:
+        idx = markdown.rfind(boundary, 0, cutoff)
+        if idx > 0:
+            cutoff = idx
+            break
+    return markdown[:cutoff]
 
 
 def _write_last_review_marker(
@@ -1960,24 +2052,13 @@ def _determine_diff_mode(args: argparse.Namespace) -> str:
         return "path"
     if getattr(args, "base", None):
         return "base"
-    return "worktree"
+    return "staged"
 
 
 def _changed_files_input(changed_files: list[str]) -> str:
     if not changed_files:
         return ""
     return "\n".join(changed_files) + "\n"
-
-
-def _truncate_at_section_boundary(markdown: str, max_length: int = 3000) -> str:
-    """Truncate markdown at the last section heading before *max_length*."""
-    cutoff = max_length
-    for boundary in ["\n## ", "\n### "]:
-        idx = markdown.rfind(boundary, 0, cutoff)
-        if idx > 0:
-            cutoff = idx
-            break
-    return markdown[:cutoff]
 
 
 def _format_functions_summary(functions_json: dict[str, Any]) -> str:
@@ -2072,7 +2153,7 @@ def _format_prescan_context(prescan_json: dict[str, Any]) -> str:
 def _scan_base_ref(diff_result: DiffResult) -> str:
     if diff_result.base_ref:
         return diff_result.base_ref
-    if diff_result.mode == "worktree":
+    if diff_result.mode == "staged":
         return "HEAD"
     return "HEAD~1"
 
@@ -2213,32 +2294,18 @@ def prepare(args: argparse.Namespace) -> int:
         # Apply REVIEW.md Skip patterns as file exclusions
         skip_patterns = load_review_md_skip_patterns(repo_root)
         if skip_patterns:
-            filtered_files = [
-                f
-                for f in diff_result.changed_files
-                if not any(fnmatch.fnmatch(f, pat) for pat in skip_patterns)
-            ]
-            # Also filter diff_text to remove hunks for skipped files
-            kept_diff_sections = []
-            for section in re.split(
-                r"(?=^diff --git )", diff_result.diff_text, flags=re.MULTILINE
-            ):
-                if not section.strip():
-                    continue
-                # Extract filename from diff header
-                header = re.match(r"diff --git a/\S+ b/(\S+)", section)
-                if header:
-                    fpath = header.group(1)
-                    if any(fnmatch.fnmatch(fpath, pat) for pat in skip_patterns):
-                        continue
-                kept_diff_sections.append(section)
-            filtered_diff_text = "".join(kept_diff_sections)
+            import fnmatch as _fnmatch
+
             diff_result = DiffResult(
                 mode=diff_result.mode,
                 base_ref=diff_result.base_ref,
                 merge_base=diff_result.merge_base,
-                changed_files=filtered_files,
-                diff_text=filtered_diff_text,
+                changed_files=[
+                    f
+                    for f in diff_result.changed_files
+                    if not any(_fnmatch.fnmatch(f, pat) for pat in skip_patterns)
+                ],
+                diff_text=diff_result.diff_text,
                 head_ref=diff_result.head_ref,
                 pr_number=diff_result.pr_number,
             )
@@ -2279,7 +2346,6 @@ def prepare(args: argparse.Namespace) -> int:
             "scans": {},
             "coverage": {},
         }
-        _context_errors: dict[str, str] = {}
         with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
             futures = {
                 executor.submit(
@@ -2314,31 +2380,7 @@ def prepare(args: argparse.Namespace) -> int:
                             context_results[name] = {}
                         continue
                     progress("context_gather_failed", task=name, error=str(exc))
-                    _context_errors[name] = str(exc)
                     context_results[name] = {}
-
-        # Fail fast if scans failed due to missing jq
-        if (
-            not context_results["scans"]
-            and "scans" in _context_errors
-            and "jq" in _context_errors["scans"].lower()
-        ):
-            packet = build_launch_packet(
-                session_dir=session_dir,
-                diff_result=diff_result,
-                review_mode="standard",
-                waves=[],
-                judge={},
-                scan_results={},
-                spec_file=getattr(args, "spec", None),
-                config=config,
-                status="error",
-                error="jq is required for deterministic scans",
-            )
-            (session_dir / "launch.json").write_text(
-                json.dumps(packet, indent=2), encoding="utf-8"
-            )
-            return 1
 
         # Run functions, graph, and prescan in parallel
         _code_intel = str(Path(__file__).resolve().parent / "code_intel.py")
@@ -2401,7 +2443,6 @@ def prepare(args: argparse.Namespace) -> int:
             progress("format_diff_failed", error=str(exc))
 
         # Budget-aware expansion: if formatted diff is small, re-run with more context
-        # Note: --expand-context runs even without tree-sitter; falls back to keyword heuristic
         prompt_budget_cfg = config.get("token_budget", {}).get(
             "explorer_prompt", 70_000
         )
@@ -2422,8 +2463,8 @@ def prepare(args: argparse.Namespace) -> int:
                     (session_dir / "diff-formatted.patch").write_text(
                         formatted_diff, encoding="utf-8"
                     )
-            except Exception as exc:
-                progress("format_diff_expand_failed", error=str(exc))
+            except Exception:
+                pass  # keep non-expanded formatted diff
 
         # Build a DiffResult with formatted diff for explorer prompts only;
         # raw diff stays for deterministic tools (scans, prescan already ran).
@@ -2507,6 +2548,10 @@ def prepare(args: argparse.Namespace) -> int:
             SKILL_DIR / "prompts" / "reviewer-global-contract.md"
         ).read_text(encoding="utf-8")
         prompt_budget = config.get("token_budget", {}).get("explorer_prompt", 70_000)
+        _provenance_val = getattr(args, "provenance", "unknown")
+        _provenance_content = ""
+        if _provenance_val not in ("unknown", "human"):
+            _provenance_content = f"Code Provenance: {_provenance_val}\n\nSee the Provenance-Aware Investigation section in the Global Contract for risk patterns to check."
         waves: list[dict[str, Any]] = []
         if review_mode == "chunked" and chunks:
             for chunk in chunks:
@@ -2544,6 +2589,7 @@ def prepare(args: argparse.Namespace) -> int:
                         functions_summary=functions_summary,
                         graph_summary=graph_summary,
                         prescan_signals=prescan_signals,
+                        provenance=_provenance_content,
                     )
                     rendered_prompt = check_token_budget(
                         prompt_context,
@@ -2589,6 +2635,7 @@ def prepare(args: argparse.Namespace) -> int:
                     functions_summary=functions_summary,
                     graph_summary=graph_summary,
                     prescan_signals=prescan_signals,
+                    provenance=_provenance_content,
                 )
                 rendered_prompt = check_token_budget(
                     prompt_context,
@@ -2612,36 +2659,31 @@ def prepare(args: argparse.Namespace) -> int:
             waves = [{"wave": 1, "tasks": wave_tasks}]
 
         progress("prepare_step", step=7, total=8, message="Building launch packet")
+        # Determine spec_source
+        _spec_file = getattr(args, "spec", None)
+        if _spec_file:
+            _spec_source = "file"
+        else:
+            _spec_source = "none"
         packet = build_launch_packet(
             session_dir=session_dir,
             diff_result=diff_result,
             review_mode=review_mode,
             waves=waves,
             judge={
-                "prompt_file": str(
-                    (SKILL_DIR / "prompts" / "reviewer-judge.md").absolute()
-                ),
+                "prompt_file": str((SKILL_DIR / "prompts").absolute()),
                 "model": config.get("judge_model", "sonnet"),
                 "output_file": str((session_dir / "judge.json").absolute()),
             },
             scan_results=context_results["scans"],
-            spec_file=getattr(args, "spec", None),
+            spec_file=_spec_file,
             config=config,
+            spec_source=_spec_source,
             chunks=chunks,
             triage_result=triage_result,
             triage_summary=triage_summary,
+            provenance=getattr(args, "provenance", "unknown"),
         )
-        try:
-            import jsonschema
-
-            schema_path = SKILL_DIR / "schemas" / "launch-packet-schema.json"
-            if schema_path.exists():
-                schema = json.loads(schema_path.read_text(encoding="utf-8"))
-                jsonschema.validate(packet, schema)
-        except ImportError:
-            pass  # jsonschema not installed, skip validation
-        except Exception as exc:
-            progress("launch_packet_validation_warning", error=str(exc))
         (session_dir / "launch.json").write_text(
             json.dumps(packet, indent=2), encoding="utf-8"
         )
@@ -2704,20 +2746,46 @@ def prepare(args: argparse.Namespace) -> int:
 
 def parse_explorer_output(
     raw: Any, explorer_name: str
-) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]]]:
-    """Normalize explorer output into findings and optional requirements."""
+) -> tuple[
+    list[dict[str, Any]] | None,
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+]:
+    """Normalize explorer output into findings, requirements, certification, and completeness_gate.
+
+    Returns a 4-tuple: (findings, requirements, certification, completeness_gate).
+    findings is None when the input has an unrecognized shape.
+    requirements, certification, and completeness_gate default to [] / None / None.
+    Unknown keys in a dict trigger a warning log.
+    """
+    _KNOWN_KEYS = {
+        "findings",
+        "requirements",
+        "certification",
+        "completeness_gate",
+        "pass",
+    }
+
     if isinstance(raw, list):
         findings = [
             dict(item, **({"pass": explorer_name} if "pass" not in item else {}))
             for item in raw
             if isinstance(item, dict)
         ]
-        return findings, []
+        return findings, [], None, None
     if isinstance(raw, dict):
         findings = raw.get("findings", [])
         requirements = raw.get("requirements", [])
         if not isinstance(findings, list) or not isinstance(requirements, list):
-            return None, []
+            return None, [], None, None
+        unknown = set(raw.keys()) - _KNOWN_KEYS
+        if unknown:
+            progress(
+                "parse_explorer_output_unexpected_keys",
+                explorer=explorer_name,
+                keys=sorted(unknown),
+            )
         normalized = [
             dict(
                 item,
@@ -2730,8 +2798,10 @@ def parse_explorer_output(
             for item in findings
             if isinstance(item, dict)
         ]
-        return normalized, requirements
-    return None, []
+        certification = raw.get("certification")
+        completeness_gate = raw.get("completeness_gate")
+        return normalized, requirements, certification, completeness_gate
+    return None, [], None, None
 
 
 def dedup_exact(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2753,6 +2823,15 @@ def dedup_exact(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(deduped.values())
 
 
+JUDGE_PROMPT_PARTS = [
+    "reviewer-judge-main.md",
+    "reviewer-judge-gatekeeper.md",
+    "reviewer-judge-verifier.md",
+    "reviewer-judge-calibrator.md",
+    "reviewer-judge-synthesizer.md",
+]
+
+
 def assemble_judge_prompt(
     *,
     judge_prompt_file: Path,
@@ -2762,12 +2841,51 @@ def assemble_judge_prompt(
     spec_file: str | None = None,
     context_summary: str = "",
 ) -> str:
-    """Render the judge prompt with findings and supporting context."""
-    prompt = judge_prompt_file.read_text(encoding="utf-8")
+    """Render the judge prompt with findings and supporting context.
+
+    The judge prompt is composed from multiple part files in a fixed order.
+    ``judge_prompt_file`` may point to the prompts directory (preferred) or
+    to a single legacy file for backward compatibility.
+    """
+    path = judge_prompt_file
+    if path.is_dir():
+        parts = []
+        for name in JUDGE_PROMPT_PARTS:
+            parts.append((path / name).read_text(encoding="utf-8"))
+        prompt = "\n\n---\n\n".join(parts)
+    elif path.name in JUDGE_PROMPT_PARTS:
+        # Pointer is to one of the part files — use its parent as the dir
+        parts = []
+        for name in JUDGE_PROMPT_PARTS:
+            parts.append((path.parent / name).read_text(encoding="utf-8"))
+        prompt = "\n\n---\n\n".join(parts)
+    else:
+        # Legacy single-file fallback
+        prompt = path.read_text(encoding="utf-8")
+    # Build explorer summary table for judge triage
+    pass_groups: dict[str, list[dict[str, Any]]] = {}
+    for f in explorer_findings:
+        pass_groups.setdefault(f.get("pass", "unknown"), []).append(f)
+
+    summary_lines = [
+        "| Explorer | Findings | Signals |",
+        "|----------|----------|---------|",
+    ]
+    for pass_name in sorted(pass_groups):
+        findings = pass_groups[pass_name]
+        high_count = sum(
+            1 for f in findings if f.get("severity") in ("high", "critical")
+        )
+        signal = (
+            f"{high_count} high/critical" if high_count else f"{len(findings)} total"
+        )
+        summary_lines.append(f"| {pass_name} | {len(findings)} | {signal} |")
+    summary_table = "\n".join(summary_lines)
+
     sections = [
         prompt,
-        "## Explorer Findings",
-        json.dumps(explorer_findings, indent=2),
+        "## Explorer Findings\n\n### Summary\n\n" + summary_table,
+        "### Details\n\n" + json.dumps(explorer_findings, indent=2),
         "## Spec Requirements",
         json.dumps(spec_requirements, indent=2),
         "## Deterministic Scan Results",
@@ -2777,7 +2895,10 @@ def assemble_judge_prompt(
         sections.extend(["## Spec File", spec_file])
     if context_summary:
         sections.extend(["## Context Summary", context_summary])
-    return "\n\n".join(section for section in sections if section)
+    result = "\n\n".join(section for section in sections if section)
+    if len(result) > 100_000:
+        progress("judge_prompt_large", chars=len(result), threshold=100_000)
+    return result
 
 
 def post_explorers(args: argparse.Namespace) -> int:
@@ -2810,10 +2931,16 @@ def post_explorers(args: argparse.Namespace) -> int:
     explorer_status: dict[str, Any] = {}
     spec_requirements: list[dict[str, Any]] = []
     chunk_counts: dict[int, int] = {}
+    explorer_certifications: dict[str, Any] = {}
+    explorer_completeness_gates: dict[str, Any] = {}
 
     for task in get_all_tasks(launch_packet):
         output_path = Path(task["output_file"])
         name = task["name"]
+        # Strip chunk prefix for chunked mode (e.g., "chunk1-correctness" -> "correctness")
+        pass_name = (
+            name.split("-", 1)[1] if name.startswith("chunk") and "-" in name else name
+        )
         if not output_path.exists():
             explorer_status[name] = {"status": "missing", "findings": 0}
             continue
@@ -2826,17 +2953,34 @@ def post_explorers(args: argparse.Namespace) -> int:
                 "error": str(exc),
             }
             continue
-        findings, requirements = parse_explorer_output(raw, name)
+        findings, requirements, certification, completeness_gate = (
+            parse_explorer_output(raw, pass_name)
+        )
         if findings is None:
             explorer_status[name] = {"status": "wrong_shape", "findings": 0}
             continue
         all_findings.extend(findings)
         spec_requirements.extend(requirements)
+        if certification is not None:
+            explorer_certifications[name] = certification
+        if completeness_gate is not None:
+            explorer_completeness_gates[name] = completeness_gate
         explorer_status[name] = {"status": "ok", "findings": len(findings)}
         if task.get("chunk_id") is not None:
             chunk_counts[task["chunk_id"]] = chunk_counts.get(
                 task["chunk_id"], 0
             ) + len(findings)
+
+    # Deduplicate spec_requirements across chunks
+    seen_req_ids: set[str] = set()
+    unique_requirements: list[dict[str, Any]] = []
+    for req in spec_requirements:
+        req_id = req.get("id", "")
+        if req_id and req_id in seen_req_ids:
+            continue
+        seen_req_ids.add(req_id)
+        unique_requirements.append(req)
+    spec_requirements = unique_requirements
 
     raw_count = len(all_findings)
     all_findings = dedup_exact(all_findings)
@@ -2853,18 +2997,33 @@ def post_explorers(args: argparse.Namespace) -> int:
         )
         all_findings = all_findings[:50]
 
-    judge_prompt = assemble_judge_prompt(
-        judge_prompt_file=Path(launch_packet["judge"]["prompt_file"]),
-        explorer_findings=all_findings,
-        spec_requirements=spec_requirements,
-        scan_results=launch_packet.get("scan_results", {}),
-        spec_file=launch_packet.get("spec_file"),
-        context_summary=launch_packet.get("context_summary", ""),
-    )
+    try:
+        judge_prompt = assemble_judge_prompt(
+            judge_prompt_file=Path(launch_packet["judge"]["prompt_file"]),
+            explorer_findings=all_findings,
+            spec_requirements=spec_requirements,
+            scan_results=launch_packet.get("scan_results", {}),
+            spec_file=launch_packet.get("spec_file"),
+            context_summary=launch_packet.get("context_summary", ""),
+        )
+    except (FileNotFoundError, OSError) as exc:
+        progress("post_explorers_error", error=f"Cannot assemble judge prompt: {exc}")
+        return 1
     judge_prompt_path = session_dir / "judge-prompt.md"
     judge_prompt_path.write_text(judge_prompt, encoding="utf-8")
 
-    judge_input = {
+    # F5: Validate certifications — file coverage check
+    certification_warnings: list[str] = []
+    for pass_name, cert in explorer_certifications.items():
+        if not isinstance(cert, dict):
+            continue
+        files_checked = set(cert.get("files_checked", []))
+        if not files_checked:
+            certification_warnings.append(
+                f"Explorer {pass_name} certified clean but listed no files_checked"
+            )
+
+    judge_input: dict[str, Any] = {
         "status": "ready_for_judge",
         "raw_finding_count": raw_count,
         "explorer_finding_count": len(all_findings),
@@ -2875,6 +3034,12 @@ def post_explorers(args: argparse.Namespace) -> int:
         "judge_output_file": launch_packet["judge"]["output_file"],
         "judge_model": launch_packet["judge"].get("model", "sonnet"),
     }
+    if certification_warnings:
+        judge_input["certification_warnings"] = certification_warnings
+    if explorer_certifications:
+        judge_input["explorer_certifications"] = explorer_certifications
+    if explorer_completeness_gates:
+        judge_input["explorer_completeness_gates"] = explorer_completeness_gates
     (session_dir / "judge-input.json").write_text(
         json.dumps(judge_input, indent=2), encoding="utf-8"
     )
@@ -2957,14 +3122,7 @@ def assemble_report_envelope(
         "findings": final_findings,
         "suppressed_findings": lifecycle.get("suppressed_findings", []),
         "tier_summary": tier_summary,
-        "dropped": enriched.get(
-            "dropped",
-            {
-                "below_confidence_floor": 0,
-                "below_minimum_severity": 0,
-                "downgraded_to_medium": 0,
-            },
-        ),
+        "dropped": enriched.get("dropped", {"below_confidence_floor": 0}),
         "lifecycle_summary": lifecycle.get(
             "lifecycle_summary",
             {
@@ -3017,9 +3175,11 @@ def render_strengths(strengths: list[str]) -> str:
 def render_tier(title: str, findings: list[dict[str, Any]], lifecycle_key: str) -> str:
     lines = [f"## {title} ({len(findings)} findings)"]
     for finding in findings:
+        label = " (pre-existing)" if finding.get("pre_existing") else ""
         lines.append(
-            "- {summary} [{severity}] {file}:{line} ({lifecycle})".format(
+            "- {summary}{label} [{severity}] {file}:{line} ({lifecycle})".format(
                 summary=finding.get("summary", ""),
+                label=label,
                 severity=finding.get("severity", "low"),
                 file=finding.get("file", ""),
                 line=finding.get("line", 0),
@@ -3172,6 +3332,10 @@ def finalize(args: argparse.Namespace) -> int:
     code_intel_path = session_dir / "code-intel.json"
     if code_intel_path.exists():
         enrich_cmd.extend(["--code-intel-output", str(code_intel_path)])
+    # Pass provenance when not unknown
+    _provenance = launch_packet.get("provenance", "unknown")
+    if _provenance != "unknown":
+        enrich_cmd.extend(["--provenance", _provenance])
     try:
         enriched = run_subprocess_json(enrich_cmd, cwd=repo_root)
     except Exception as exc:
@@ -3182,9 +3346,6 @@ def finalize(args: argparse.Namespace) -> int:
             if isinstance(judge_output, list)
             else judge_output.get("findings", [])
         )
-        # Merge scan findings so they aren't lost in the fallback path
-        scan_findings = launch_packet.get("scan_results", {}).get("findings", [])
-        findings.extend(scan_findings)
         tier_counts: dict[str, int] = {}
         for f in findings:
             sev = f.get("severity", "low")
@@ -3301,11 +3462,16 @@ def finalize(args: argparse.Namespace) -> int:
     md_artifact.write_text(markdown, encoding="utf-8")
     _append_timing(session_dir, "finalize", phase_started)
 
+    _finalize_provenance = launch_packet.get("provenance", "unknown")
+    _preview_provenance = (
+        f"**Provenance:** {_finalize_provenance}\n"
+        if _finalize_provenance != "unknown"
+        else ""
+    )
+    report_preview = _preview_provenance + _truncate_at_section_boundary(markdown, 3000)
+
     # Write last-review marker for "since last review" default
-    try:
-        _write_last_review_marker(repo_root, report, launch_packet)
-    except OSError as exc:
-        progress("last_review_marker_failed", error=str(exc))
+    _write_last_review_marker(repo_root, report, launch_packet)
 
     finalize_result = {
         "status": "complete",
@@ -3315,7 +3481,8 @@ def finalize(args: argparse.Namespace) -> int:
         "json_artifact": str(json_artifact),
         "markdown_artifact": str(md_artifact),
         "session_dir": str(session_dir),
-        "report_preview": _truncate_at_section_boundary(markdown, 3000),
+        "report_preview": report_preview,
+        "provenance": _finalize_provenance,
         "validation_status": validation_status,
         "validation_note": validation_note,
         "lifecycle_status": lifecycle_status,
@@ -3346,6 +3513,28 @@ def cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_find_spec_candidates(args: argparse.Namespace) -> int:
+    """Find spec file candidates and output as JSON."""
+    session_dir = getattr(args, "session_dir", None)
+    repo_root = detect_repo_root()
+
+    # Get changed files from launch.json if available
+    changed_files: list[str] = []
+    if session_dir:
+        try:
+            launch_data = json.loads(
+                (Path(session_dir) / "launch.json").read_text(encoding="utf-8")
+            )
+            diff_result = launch_data.get("diff_result", {})
+            changed_files = diff_result.get("changed_files", [])
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            pass
+
+    candidates = find_spec_candidates(repo_root, changed_files)
+    print(json.dumps(candidates, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Create the orchestrator CLI parser."""
     parser = argparse.ArgumentParser(prog="orchestrate.py")
@@ -3361,6 +3550,7 @@ def build_parser() -> argparse.ArgumentParser:
         "post-explorers": post_explorers,
         "finalize": finalize,
         "cleanup": cleanup,
+        "find-spec-candidates": cmd_find_spec_candidates,
     }
     for name, handler in commands.items():
         command_parser = subparsers.add_parser(name)
@@ -3387,6 +3577,11 @@ def build_parser() -> argparse.ArgumentParser:
                 help="Enable 'you should add a test for X' suggestions (default: off)",
             )
             command_parser.add_argument("--confidence-floor", type=float)
+            command_parser.add_argument(
+                "--provenance",
+                choices=["human", "ai-assisted", "autonomous", "unknown"],
+                default="unknown",
+            )
             command_parser.add_argument("--no-config", action="store_true")
             command_parser.add_argument("--timeout", type=int, default=1200)
         if name == "finalize":
@@ -3403,8 +3598,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Handle --setup: delete the setup-complete marker so Step 0 re-runs.
     if getattr(args, "setup", False):
-        repo_root = detect_repo_root()
-        marker = repo_root / ".agents" / "codereview" / "setup-complete"
+        marker = Path(".agents/codereview/setup-complete")
         if marker.exists():
             marker.unlink()
             print(
@@ -3416,7 +3610,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.command:
         parser.error(
-            "a subcommand is required (prepare, post-explorers, finalize, cleanup)"
+            "a subcommand is required (prepare, post-explorers, finalize, cleanup, find-spec-candidates)"
         )
 
     return args.handler(args)

@@ -32,11 +32,8 @@ try:
     )
 
     _CODE_INTEL_AVAILABLE = True
-except Exception as exc:
-    print(
-        f"WARNING: code_intel unavailable ({type(exc).__name__}: {exc}) — using regex-only mode.",
-        file=sys.stderr,
-    )
+except ImportError:
+    pass
 
 WALL_CLOCK_LIMIT = 15.0
 PER_FILE_LIMIT = 0.5

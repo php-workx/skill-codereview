@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Explorer Output",
+  "description": "Output schema for codereview explorer sub-agents. Supports 3 shapes: bare findings array, findings+requirements object, or full object with certification and completeness gate.",
+  "anyOf": [
+    {
+      "type": "array",
+      "description": "Bare findings array (legacy format)",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    {
+      "type": "object",
+      "description": "Object with findings and optional requirements",
+      "required": ["findings"],
+      "properties": {
+        "pass": { "type": "string" },
+        "findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" }
+        },
+        "requirements": {
+          "type": "array",
+          "items": { "type": "object" },
+          "description": "Spec requirements (from spec-verification explorer)"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "description": "Full object with certification and completeness gate (post-F5/F6)",
+      "required": ["findings"],
+      "properties": {
+        "pass": { "type": "string" },
+        "certification": {
+          "type": "object",
+          "description": "Per-file certification data from explorer, as defined in the global contract.",
+          "properties": {
+            "status": { "type": "string", "enum": ["clean", "not_applicable"] },
+            "files_checked": { "type": "array", "items": { "type": "string" } },
+            "checks_performed": { "type": "array", "items": { "type": "string" } },
+            "tools_used": { "type": "array", "items": { "type": "string" } },
+            "reason": { "type": "string", "description": "Reason for not_applicable status" }
+          },
+          "required": ["status", "files_checked"]
+        },
+        "findings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" }
+        },
+        "requirements": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "completeness_gate": {
+          "type": "object",
+          "description": "Contract completeness gate from spec-verification explorer Phase 6.",
+          "properties": {
+            "state_transitions": {
+              "type": "object",
+              "properties": {
+                "status": { "type": "string", "enum": ["PASS", "GAP", "N/A"] },
+                "detail": { "type": "string" }
+              },
+              "required": ["status", "detail"]
+            },
+            "error_edge_behavior": {
+              "type": "object",
+              "properties": {
+                "status": { "type": "string", "enum": ["PASS", "GAP", "N/A"] },
+                "detail": { "type": "string" }
+              },
+              "required": ["status", "detail"]
+            },
+            "cross_requirement_consistency": {
+              "type": "object",
+              "properties": {
+                "status": { "type": "string", "enum": ["PASS", "GAP", "N/A"] },
+                "detail": { "type": "string" }
+              },
+              "required": ["status", "detail"]
+            },
+            "testability": {
+              "type": "object",
+              "properties": {
+                "status": { "type": "string", "enum": ["PASS", "GAP", "N/A"] },
+                "detail": { "type": "string" }
+              },
+              "required": ["status", "detail"]
+            },
+            "overall": { "type": "string", "enum": ["PASS", "GAP"] },
+            "gap_count": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["overall", "gap_count"]
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "required": ["summary"],
+      "properties": {
+        "pass": { "type": "string" },
+        "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+        "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 0 },
+        "summary": { "type": "string" },
+        "evidence": { "type": ["string", "null"] },
+        "evidence_source": { "type": ["string", "null"] },
+        "failure_mode": { "type": ["string", "null"] },
+        "fix": { "type": ["string", "null"] },
+        "tests_to_add": { "type": "array", "items": { "type": "string" } },
+        "test_category_needed": { "type": "array", "items": { "type": "string" } },
+        "test_level": { "type": ["string", "null"] },
+        "bug_finding_level": { "type": ["string", "null"] },
+        "gap_reason": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
