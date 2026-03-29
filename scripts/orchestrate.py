@@ -762,6 +762,7 @@ def build_launch_packet(
         "chunks": chunks,
         "triage_result": triage_result if triage_result else None,
         "triage_summary": triage_summary if triage_summary else None,
+        "post_wave_task": None,
         "diff_result": {
             "mode": diff_result.mode,
             "scope": diff_result.scope,
@@ -1968,6 +1969,17 @@ def _changed_files_input(changed_files: list[str]) -> str:
     return "\n".join(changed_files) + "\n"
 
 
+def _truncate_at_section_boundary(markdown: str, max_length: int = 3000) -> str:
+    """Truncate markdown at the last section heading before *max_length*."""
+    cutoff = max_length
+    for boundary in ["\n## ", "\n### "]:
+        idx = markdown.rfind(boundary, 0, cutoff)
+        if idx > 0:
+            cutoff = idx
+            break
+    return markdown[:cutoff]
+
+
 def _format_functions_summary(functions_json: dict[str, Any]) -> str:
     """Convert functions JSON from code_intel.py to a compact markdown table."""
     try:
@@ -2253,6 +2265,7 @@ def prepare(args: argparse.Namespace) -> int:
             "scans": {},
             "coverage": {},
         }
+        _context_errors: dict[str, str] = {}
         with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
             futures = {
                 executor.submit(
@@ -2287,7 +2300,31 @@ def prepare(args: argparse.Namespace) -> int:
                             context_results[name] = {}
                         continue
                     progress("context_gather_failed", task=name, error=str(exc))
+                    _context_errors[name] = str(exc)
                     context_results[name] = {}
+
+        # Fail fast if scans failed due to missing jq
+        if (
+            not context_results["scans"]
+            and "scans" in _context_errors
+            and "jq" in _context_errors["scans"].lower()
+        ):
+            packet = build_launch_packet(
+                session_dir=session_dir,
+                diff_result=diff_result,
+                review_mode="standard",
+                waves=[],
+                judge={},
+                scan_results={},
+                spec_file=getattr(args, "spec", None),
+                config=config,
+                status="error",
+                error="jq is required for deterministic scans",
+            )
+            (session_dir / "launch.json").write_text(
+                json.dumps(packet, indent=2), encoding="utf-8"
+            )
+            return 1
 
         # Run functions, graph, and prescan in parallel
         _code_intel = str(Path(__file__).resolve().parent / "code_intel.py")
@@ -2580,6 +2617,17 @@ def prepare(args: argparse.Namespace) -> int:
             triage_result=triage_result,
             triage_summary=triage_summary,
         )
+        try:
+            import jsonschema
+
+            schema_path = SKILL_DIR / "schemas" / "launch-packet-schema.json"
+            if schema_path.exists():
+                schema = json.loads(schema_path.read_text(encoding="utf-8"))
+                jsonschema.validate(packet, schema)
+        except ImportError:
+            pass  # jsonschema not installed, skip validation
+        except Exception as exc:
+            progress("launch_packet_validation_warning", error=str(exc))
         (session_dir / "launch.json").write_text(
             json.dumps(packet, indent=2), encoding="utf-8"
         )
@@ -3250,7 +3298,7 @@ def finalize(args: argparse.Namespace) -> int:
         "json_artifact": str(json_artifact),
         "markdown_artifact": str(md_artifact),
         "session_dir": str(session_dir),
-        "report_preview": markdown[:3000],
+        "report_preview": _truncate_at_section_boundary(markdown, 3000),
         "validation_status": validation_status,
         "validation_note": validation_note,
         "lifecycle_status": lifecycle_status,

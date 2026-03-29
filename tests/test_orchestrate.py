@@ -27,6 +27,7 @@ from scripts.orchestrate import (
     assemble_explorer_prompt,
     assemble_report_envelope,
     build_cross_file_context,
+    build_launch_packet,
     build_parser,
     check_token_budget,
     drop_least_relevant_checklist,
@@ -2143,6 +2144,32 @@ class ConfigAllowlistTests(unittest.TestCase):
 
     def test_allowlist_contains_suggest_missing_tests(self) -> None:
         self.assertIn("suggest_missing_tests", CONFIG_ALLOWLIST)
+
+
+class BuildLaunchPacketTests(unittest.TestCase):
+    def test_post_wave_task_present_and_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir)
+            diff = DiffResult(
+                mode="base",
+                base_ref="main",
+                merge_base="abc123",
+                changed_files=["a.py"],
+                diff_text="--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new",
+                head_ref="HEAD",
+            )
+            packet = build_launch_packet(
+                session_dir=session_dir,
+                diff_result=diff,
+                review_mode="standard",
+                waves=[],
+                judge={},
+                scan_results={},
+                spec_file=None,
+                config=DEFAULT_CONFIG,
+            )
+            self.assertIn("post_wave_task", packet)
+            self.assertIsNone(packet["post_wave_task"])
 
 
 if __name__ == "__main__":
