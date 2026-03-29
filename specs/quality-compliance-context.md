@@ -8,7 +8,7 @@
 
 ## Problem
 
-After the verification architecture improves finding precision, several quality-of-life and compliance features are needed: the review report needs a copy-pasteable summary, findings need finer-grained scoring, the context gathering phase needs a sufficiency check, documentation context should be available to explorers, local planning artifacts should be auto-detected for compliance checks, and malformed model output should be auto-repaired.
+After the verification architecture improves finding precision, several quality-of-life and compliance features are needed: the review report needs a copy-pasteable summary, findings need finer-grained scoring, the context gathering phase needs a sufficiency check, documentation context should be available to explorers, local planning artifacts should inform compliance checks, and malformed model output should be auto-repaired.
 
 ## Features Overview
 
@@ -36,15 +36,19 @@ If --spec provided:
   Read spec_requirements from output
 
   If >50% of "must" requirements are "not_implemented":
-    Skip remaining explorers
-    Report: "Spec verification found major implementation gaps.
-             Detailed code review deferred until implementation catches up."
-    Verdict: FAIL (spec gaps)
+    Add prominent "Incomplete Implementation" banner to report
+    Warning: "Spec verification found major implementation gaps.
+             Review proceeds, but findings may be superseded by
+             unfinished work."
+    Run remaining explorers normally (do NOT skip)
+    Include spec results + banner in judge input
 
   Else:
     Run remaining explorers normally
     Include spec results in judge input
 ```
+
+**Rationale:** Hard-gating (skipping explorers) was removed because it prevents discovering real bugs in the code that _is_ implemented. The banner ensures visibility without suppressing useful feedback. Use `--force-review` to suppress the banner entirely.
 
 ### Activation
 
@@ -60,7 +64,7 @@ Modify Step 4a to support sequential spec-first execution when `--spec` is activ
 
 ### Interaction with Feature 9
 
-Auto-detected plan context (F9) serves as the spec source when no `--spec` is provided. `--spec` takes precedence if explicitly given. Same gating threshold applies to ticket-derived requirements.
+Explicit plan context from F9 (`--ticket`, `--bead`, `--plan`) serves as the spec source when no `--spec` is provided. `--spec` takes precedence if explicitly given. Same gating threshold applies to ticket-derived requirements.
 
 ---
 
@@ -274,14 +278,14 @@ Inspired by PR-Agent's self-reflection scoring with calibrated bands and explici
 ```yaml
 scoring:
   min_score: 0      # drop findings below this (0 = keep all)
-  show_scores: true
+  show_scores: false # scores used for internal ranking, not shown in report by default
 ```
 
 ---
 
 ## Feature 9: Ticket & Task Verification
 
-**Goal:** Auto-detect local planning artifacts (tk tickets, bd beads, plan files) that describe what the current branch should implement. Verify implementation against them.
+**Goal:** Accept explicit references to local planning artifacts (tk tickets, bd beads, plan files) that describe what the current branch should implement. Verify implementation against them.
 
 ### Planning Artifact Sources
 
@@ -291,16 +295,16 @@ scoring:
 | `bd` beads | `.beads/issues.jsonl` | `.beads/` dir exists | `bd show <id>` | id, status, deps, description |
 | Plan files | `docs/plan-*.md` | glob | Read directly | Features with goals, files, acceptance criteria |
 
-### Auto-Detection Logic
+### Detection Logic (Explicit Only)
 
 New script: `scripts/detect-plan-context.sh`
 
-1. Parse commit messages on current branch for ticket/bead IDs (regex: `/\b[a-z]{2,4}-[a-z0-9]{4}\b/`)
-2. Parse branch name for IDs (`feat/att-0ogy-claim-store` → `att-0ogy`)
-3. If IDs found + `.tickets/` exists: `tk query` for matched IDs (include parent + deps)
-4. If IDs found + `.beads/` exists: `bd show` for matched IDs
-5. If no IDs but `docs/plan-*.md` exists: heuristic match branch name against feature titles
-6. Accept explicit overrides: `--ticket <id>`, `--bead <id>`, `--plan <file>[#N]`
+Plan context is sourced exclusively via explicit flags. No auto-detection from branch names or commit messages — heuristic matching produces too many false positives and creates confusion about which ticket is being verified.
+
+Accepted flags:
+- `--ticket <id>` — look up ticket via `tk show <id>` (requires `.tickets/` directory)
+- `--bead <id>` — look up bead via `bd show <id>` (requires `.beads/` directory)
+- `--plan <file>[#N]` — read plan file directly, optionally scoped to feature N
 
 ### Detection Output Schema
 
@@ -375,16 +379,15 @@ When no tickets/beads are found but a plan file matches, the `source` is `"plan"
 - **Step 2 (gather context):** Plan context included in context packet for all explorers.
 - **Step 3.5 (expert selection):** Spec-verification pass auto-enabled when plan context detected (no `--spec` flag needed).
 - **Step 4a (explorers):** The spec-verification explorer receives full plan context and produces `spec_requirements` + `scope_analysis`. Other explorers receive a one-line summary ("This branch implements ticket att-0ogy: Add ClaimableStore interface...") for awareness but don't perform compliance checks.
-- **Feature 2 (spec-gated):** Auto-detected plan context serves as spec source when no `--spec`. `--spec` takes precedence if explicitly provided. The skill distinguishes source: `source: "ticket:att-0ogy"` vs `source: "spec:docs/spec.md"`.
+- **Feature 2 (spec-gated):** Explicit plan context (`--ticket`, `--bead`, `--plan`) serves as spec source when no `--spec`. `--spec` takes precedence if explicitly provided. The skill distinguishes source: `source: "ticket:att-0ogy"` vs `source: "spec:docs/spec.md"`.
 - **Judge:** Receives plan context, includes compliance summary in verdict reasoning.
 
 ### Activation
 
-On by default when `.tickets/` or `.beads/` exist. Disable via `/codereview --no-plan-context`. Configurable:
+Activated only via explicit flags (`--ticket <id>`, `--bead <id>`, `--plan <file>`). No auto-detection. Configurable:
 ```yaml
 plan_context:
-  auto_detect: true
-  source: "auto"       # auto | tk | bd | plan | none
+  source: "none"       # tk | bd | plan | none (explicit flags override this)
   verify_deps: true
   scope_analysis: true
 ```

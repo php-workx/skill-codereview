@@ -13,7 +13,7 @@ The judge currently does everything in one pass: verify findings, check contradi
 ## Goals
 
 1. **Add a 3-stage verification pipeline** between explorers and the judge that individually assesses each finding as `confirmed`, `false_positive`, or `needs_investigation`
-2. **Restructure the judge into two explicit passes** — verify-then-synthesize — so verification completes before narrative construction begins
+2. **Strengthen the existing judge panel handoffs** — Gatekeeper receives pre-verified findings, Verifier handles `needs_investigation` — so verification completes before narrative construction begins
 3. **Validate suggested fixes** so broken code suggestions don't erode trust in the review
 
 ## Non-Goals
@@ -71,9 +71,8 @@ New prompt: `prompts/reviewer-feature-extractor.md`
 | `duplicates_linter_result` | Redundancy | Finding restates what a linter/tool already caught |
 
 Derived from Kodus-AI's 13-feature SafeguardFeatureSet, adapted for our use case. Key differences:
-- Dropped `requires_assumed_workload` (merged into `requires_assumed_behavior`)
-- Dropped `is_anti_pattern_only` (merged into `is_quality_opinion`)
-- Removed `improved_code_is_correct` — fix validation is owned entirely by Feature 5 (Stage 3), which has tool access
+- Renamed `requires_assumed_workload` to `requires_assumed_behavior` (broader scope)
+- Renamed `is_anti_pattern_only` to `is_quality_opinion` (clearer intent)
 - Added `has_concurrency_issue` — race conditions need a structural feature; without it they hit no structural feature and survive triage only by accident
 - Added `targets_test_code` — test files generate disproportionate low-value findings; detectable from file paths (`test`, `spec`, `__tests__`, `fixtures`) and code patterns (`assert`, `mock`, `@pytest.fixture`)
 - Added `duplicates_linter_result` — catches linter duplicates at triage (free) instead of in the judge (expensive)
@@ -371,7 +370,7 @@ After verdict assignment, add to `prompts/reviewer-verifier.md`:
    If valid or no fix suggested: `fix_valid: true` (default).
 ```
 
-**Interaction with Stage 1:** The `improved_code_is_correct` feature already flags broken fixes. Stage 2 does NOT discard based on this — a real bug with a broken fix is still a real bug.
+**Interaction with Stage 1:** Stage 1 does not evaluate fix correctness — fix validation is owned entirely by Stage 3 (this step), which has tool access. Stage 2 does NOT discard based on fix quality — a real bug with a broken fix is still a real bug.
 
 **Judge handling:** Finding with `fix_valid: false` → keep finding, remove or flag the `fix` field. Optionally note "Fix suggestion removed — \<reason\>" in the finding.
 
@@ -385,7 +384,7 @@ After verdict assignment, add to `prompts/reviewer-verifier.md`:
 | Stage 2 logic | TypeScript service | Python script | Consistent with scripts-over-prompts |
 | Stage 3 approach | Multi-turn agent, max 6 turns | Single verification pass with tools | No sandbox infrastructure; Read/Grep/Glob sufficient |
 | Stage 3 default | Discard if unverifiable | `false_positive` if unverifiable | Same principle — skeptical by default |
-| Features count | 13 | 11 | Merged redundant features |
+| Features count | 13 | 13 | Renamed 2, added 3 (concurrency, test-code, linter-dupe) |
 
 Key Kodus-AI lessons:
 1. Feature extraction is a batch operation — one LLM call, not per-finding
@@ -504,7 +503,7 @@ Add `"verification"` to `CONFIG_ALLOWLIST`.
 | File | Features | Change |
 |------|----------|--------|
 | `SKILL.md` | F0 | Add Step 4a.5 |
-| `prompts/reviewer-judge.md` | F0, F1, F5 | Pre-verified note, two-pass structure, fix handling |
+| `prompts/reviewer-judge.md` | F0, F1, F5 | Pre-verified note, Gatekeeper/Verifier handoff updates, fix handling |
 | `references/design.md` | F0, F1, F5 | Rationale entries |
 | `references/acceptance-criteria.md` | F0, F5 | Verification scenarios |
 | `scripts/enrich-findings.py` or new `scripts/triage-findings.py` | F0 | Triage logic |
@@ -518,4 +517,4 @@ Add `"verification"` to `CONFIG_ALLOWLIST`.
 | Verification adds 15-40s latency | Threshold gating (≤5 findings → skip Stage 3); Stages 1-2 are cheap |
 | Feature extractor hallucinates features | Conservative defaults (false for structural, true for speculation) |
 | Verification agent is too aggressive (discards real findings) | Judge still runs Pass 1 verification on `needs_investigation`; `--force-verify` for safety-critical reviews |
-| Two-pass judge is longer/more expensive | Same total content, just reordered; no additional LLM calls |
+| Strengthened handoffs add prompt length | Same total content, just reordered; no additional LLM calls |

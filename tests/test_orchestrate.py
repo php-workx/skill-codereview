@@ -917,30 +917,24 @@ class OrchestratePlumbingTests(unittest.TestCase):
 
     @staticmethod
     def _run(command: list[str], cwd: Path) -> None:
-        env = {
-            k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")
-        }
         subprocess.run(
             command,
             cwd=cwd,
             check=True,
             capture_output=True,
             text=True,
-            env=env,
+            env=OrchestratePlumbingTests._git_env(),
         )
 
     @staticmethod
     def _capture(command: list[str], cwd: Path) -> str:
-        env = {
-            k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")
-        }
         result = subprocess.run(
             command,
             cwd=cwd,
             check=True,
             capture_output=True,
             text=True,
-            env=env,
+            env=OrchestratePlumbingTests._git_env(),
         )
         return result.stdout
 

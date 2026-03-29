@@ -30,9 +30,9 @@ The deterministic triage has 5 rules with 2 outcomes: `discard` or `verify`. The
 - The spec says "no `keep` outcome — even obvious structural defects go through verification." In SonarQube or Semgrep workflows, is there an equivalent of "this is definitely a bug, skip verification"? Is skipping verification ever safe?
 
 **3. Verification agent behavior.**
-The verifier gets 3 tool calls (Read, Grep, Glob) and defaults to `false_positive` if it can't confirm within that budget.
-- Is 3 tool calls enough? In your experience, how many steps does it typically take to verify a code finding (read the cited line, check the caller, check for a guard clause)?
-- The default-to-`false_positive` rule is skeptical. In practice, does this cause Type II errors (real bugs discarded)? What's the typical false negative rate of a 3-call verification budget?
+The verifier gets up to 10 tool calls per finding (Read, Grep, Glob) and defaults to `false_positive` if it can't confirm within that budget.
+- Is 10 tool calls per finding enough? In your experience, how many steps does it typically take to verify a code finding (read the cited line, check the caller, check for a guard clause, trace cross-module defenses)?
+- The default-to-`false_positive` rule is skeptical. In practice, does this cause Type II errors (real bugs discarded)? What's the typical false negative rate with a 10-call budget?
 - The "quick reference by defect type" gives 6 search strategies. Are these the right 6? Is there a defect type that's hard to verify with Read/Grep/Glob alone (e.g., concurrency issues that require understanding execution order)?
 - The `verification_command` requirement (a concrete grep/read command that proves the finding) is inspired by CodeRabbit. In your experience, does requiring reproducible evidence improve or hurt the verifier's accuracy? (It forces rigor but may cause the verifier to reject findings it can't mechanically reproduce.)
 

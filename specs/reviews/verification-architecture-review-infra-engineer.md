@@ -4,6 +4,16 @@
 **Spec reviewed:** `specs/verification-architecture.md`
 **Date:** 2026-03-28
 
+> **Note (2026-03-28):** This review was conducted against an earlier draft of the spec. The following recommendations have since been incorporated into the current spec:
+> - **Q1 (features):** `targets_test_code`, `duplicates_linter_result`, and `has_concurrency_issue` were added; `improved_code_is_correct` was removed. Feature count is now 13.
+> - **Q2 (Rule 3):** Changed from `discard` to `verify` as recommended.
+> - **Q3 (tool budget):** Increased from 3 to 10 tool calls per finding. Verifier is now one LLM call per finding (not batched).
+> - **Q5 (two-pass judge):** Replaced with strengthened Gatekeeper/Verifier handoffs per recommendation #3 from the prompt engineer review.
+> - **Q8 (index validation):** Added to the spec.
+> - **Q8 (structured triage logging):** Added to the spec.
+>
+> The review text below is preserved as-is for provenance. Read the current spec for the authoritative design.
+
 ---
 
 ## Feature 0: 3-Stage Verification

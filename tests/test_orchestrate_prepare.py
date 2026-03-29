@@ -595,77 +595,83 @@ class OrchestratePrepareTests(unittest.TestCase):
 
         text_mock = mock.MagicMock(side_effect=format_diff_responses)
 
-        tmpdir = tempfile.mkdtemp()
-        session_dir = Path(tmpdir) / "session"
-        session_dir.mkdir(parents=True, exist_ok=True)
-        (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir) / "session"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
 
-        args = Namespace(
-            session_dir=session_dir,
-            no_config=True,
-            spec=None,
-            spec_scope=None,
-            base="main",
-            mode="base",
-        )
-        diff_result = DiffResult(
-            mode="base",
-            base_ref="main",
-            merge_base="abc123",
-            changed_files=["tracked.txt"],
-            diff_text="@@\n+two\n",
-        )
-
-        def fake_json_run(command, cwd=None, timeout=None, input_text=None):
-            script_name = next(
-                Path(part).name for part in command if part.endswith((".py", ".sh"))
+            args = Namespace(
+                session_dir=session_dir,
+                no_config=True,
+                spec=None,
+                spec_scope=None,
+                base="main",
+                mode="base",
             )
-            if script_name == "code_intel.py":
-                sub = command[-1] if len(command) > 2 else "complexity"
-                script_name = f"code_intel.py:{sub}"
-            mapping = {
-                "discover-project.py": {"language": "python"},
-                "code_intel.py:complexity": {
-                    "hotspots": [],
-                    "analyzer": "regex-only",
-                    "tool_status": {},
-                },
-                "code_intel.py:functions": {"functions": []},
-                "code_intel.py:graph": {},
-                "git-risk.sh": {"tiers": []},
-                "run-scans.sh": {"findings": [], "tool_status": {}},
-                "coverage-collect.py": {"coverage": []},
-                "prescan.py": {},
-            }
-            return mapping.get(script_name, {})
+            diff_result = DiffResult(
+                mode="base",
+                base_ref="main",
+                merge_base="abc123",
+                changed_files=["tracked.txt"],
+                diff_text="@@\n+two\n",
+            )
 
-        with (
-            mock.patch("scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT),
-            mock.patch("scripts.orchestrate.extract_diff", return_value=diff_result),
-            mock.patch(
-                "scripts.orchestrate.run_subprocess_json", side_effect=fake_json_run
-            ),
-            mock.patch("scripts.orchestrate.run_subprocess_text", text_mock),
-        ):
-            result = prepare(args)
+            def fake_json_run(command, cwd=None, timeout=None, input_text=None):
+                script_name = next(
+                    Path(part).name for part in command if part.endswith((".py", ".sh"))
+                )
+                if script_name == "code_intel.py":
+                    sub = command[-1] if len(command) > 2 else "complexity"
+                    script_name = f"code_intel.py:{sub}"
+                mapping = {
+                    "discover-project.py": {"language": "python"},
+                    "code_intel.py:complexity": {
+                        "hotspots": [],
+                        "analyzer": "regex-only",
+                        "tool_status": {},
+                    },
+                    "code_intel.py:functions": {"functions": []},
+                    "code_intel.py:graph": {},
+                    "git-risk.sh": {"tiers": []},
+                    "run-scans.sh": {"findings": [], "tool_status": {}},
+                    "coverage-collect.py": {"coverage": []},
+                    "prescan.py": {},
+                }
+                return mapping.get(script_name, {})
 
-        self.assertEqual(result, 0)
+            with (
+                mock.patch(
+                    "scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT
+                ),
+                mock.patch(
+                    "scripts.orchestrate.extract_diff", return_value=diff_result
+                ),
+                mock.patch(
+                    "scripts.orchestrate.run_subprocess_json", side_effect=fake_json_run
+                ),
+                mock.patch("scripts.orchestrate.run_subprocess_text", text_mock),
+            ):
+                result = prepare(args)
 
-        # Should have called format-diff twice: once plain, once with --expand-context
-        format_diff_calls = [
-            c
-            for c in text_mock.call_args_list
-            if any("format-diff" in str(a) for a in c.args)
-        ]
-        self.assertEqual(len(format_diff_calls), 2, "Expected plain + expanded calls")
+            self.assertEqual(result, 0)
 
-        # Second call should include --expand-context flag
-        second_cmd = format_diff_calls[1].args[0]
-        self.assertIn("--expand-context", second_cmd)
+            # Should have called format-diff twice: once plain, once with --expand-context
+            format_diff_calls = [
+                c
+                for c in text_mock.call_args_list
+                if any("format-diff" in str(a) for a in c.args)
+            ]
+            self.assertEqual(
+                len(format_diff_calls), 2, "Expected plain + expanded calls"
+            )
 
-        # Final diff-formatted.patch should contain expanded output
-        saved = (session_dir / "diff-formatted.patch").read_text(encoding="utf-8")
-        self.assertEqual(saved, expanded_formatted)
+            # Second call should include --expand-context flag
+            second_cmd = format_diff_calls[1].args[0]
+            self.assertIn("--expand-context", second_cmd)
+
+            # Final diff-formatted.patch should contain expanded output
+            saved = (session_dir / "diff-formatted.patch").read_text(encoding="utf-8")
+            self.assertEqual(saved, expanded_formatted)
 
     def test_prepare_format_diff_no_expansion_when_large(self) -> None:
         """When formatted diff >= 50% of budget, no expansion call is made."""
@@ -701,70 +707,74 @@ class OrchestratePrepareTests(unittest.TestCase):
 
         text_mock = mock.MagicMock(side_effect=format_diff_responses)
 
-        tmpdir = tempfile.mkdtemp()
-        session_dir = Path(tmpdir) / "session"
-        session_dir.mkdir(parents=True, exist_ok=True)
-        (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_dir = Path(tmpdir) / "session"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            (session_dir / ".codereview-session").write_text("1", encoding="utf-8")
 
-        args = Namespace(
-            session_dir=session_dir,
-            no_config=True,
-            spec=None,
-            spec_scope=None,
-            base="main",
-            mode="base",
-        )
-        diff_result = DiffResult(
-            mode="base",
-            base_ref="main",
-            merge_base="abc123",
-            changed_files=["tracked.txt"],
-            diff_text="@@\n+two\n",
-        )
-
-        def fake_json_run(command, cwd=None, timeout=None, input_text=None):
-            script_name = next(
-                Path(part).name for part in command if part.endswith((".py", ".sh"))
+            args = Namespace(
+                session_dir=session_dir,
+                no_config=True,
+                spec=None,
+                spec_scope=None,
+                base="main",
+                mode="base",
             )
-            if script_name == "code_intel.py":
-                sub = command[-1] if len(command) > 2 else "complexity"
-                script_name = f"code_intel.py:{sub}"
-            mapping = {
-                "discover-project.py": {"language": "python"},
-                "code_intel.py:complexity": {
-                    "hotspots": [],
-                    "analyzer": "regex-only",
-                    "tool_status": {},
-                },
-                "code_intel.py:functions": {"functions": []},
-                "code_intel.py:graph": {},
-                "git-risk.sh": {"tiers": []},
-                "run-scans.sh": {"findings": [], "tool_status": {}},
-                "coverage-collect.py": {"coverage": []},
-                "prescan.py": {},
-            }
-            return mapping.get(script_name, {})
+            diff_result = DiffResult(
+                mode="base",
+                base_ref="main",
+                merge_base="abc123",
+                changed_files=["tracked.txt"],
+                diff_text="@@\n+two\n",
+            )
 
-        with (
-            mock.patch("scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT),
-            mock.patch("scripts.orchestrate.extract_diff", return_value=diff_result),
-            mock.patch(
-                "scripts.orchestrate.run_subprocess_json", side_effect=fake_json_run
-            ),
-            mock.patch("scripts.orchestrate.run_subprocess_text", text_mock),
-            mock.patch("scripts.orchestrate.progress") as mock_progress,
-        ):
-            result = prepare(args)
+            def fake_json_run(command, cwd=None, timeout=None, input_text=None):
+                script_name = next(
+                    Path(part).name for part in command if part.endswith((".py", ".sh"))
+                )
+                if script_name == "code_intel.py":
+                    sub = command[-1] if len(command) > 2 else "complexity"
+                    script_name = f"code_intel.py:{sub}"
+                mapping = {
+                    "discover-project.py": {"language": "python"},
+                    "code_intel.py:complexity": {
+                        "hotspots": [],
+                        "analyzer": "regex-only",
+                        "tool_status": {},
+                    },
+                    "code_intel.py:functions": {"functions": []},
+                    "code_intel.py:graph": {},
+                    "git-risk.sh": {"tiers": []},
+                    "run-scans.sh": {"findings": [], "tool_status": {}},
+                    "coverage-collect.py": {"coverage": []},
+                    "prescan.py": {},
+                }
+                return mapping.get(script_name, {})
 
-        self.assertEqual(result, 0)
+            with (
+                mock.patch(
+                    "scripts.orchestrate.detect_repo_root", return_value=REPO_ROOT
+                ),
+                mock.patch(
+                    "scripts.orchestrate.extract_diff", return_value=diff_result
+                ),
+                mock.patch(
+                    "scripts.orchestrate.run_subprocess_json", side_effect=fake_json_run
+                ),
+                mock.patch("scripts.orchestrate.run_subprocess_text", text_mock),
+                mock.patch("scripts.orchestrate.progress") as mock_progress,
+            ):
+                result = prepare(args)
 
-        # Verify the expand failure was reported via progress
-        progress_events = [c.args[0] for c in mock_progress.call_args_list]
-        self.assertIn("format_diff_expand_failed", progress_events)
+            self.assertEqual(result, 0)
 
-        # The non-expanded formatted diff should still be used
-        saved = (session_dir / "diff-formatted.patch").read_text(encoding="utf-8")
-        self.assertEqual(saved, short_formatted)
+            # Verify the expand failure was reported via progress
+            progress_events = [c.args[0] for c in mock_progress.call_args_list]
+            self.assertIn("format_diff_expand_failed", progress_events)
+
+            # The non-expanded formatted diff should still be used
+            saved = (session_dir / "diff-formatted.patch").read_text(encoding="utf-8")
+            self.assertEqual(saved, short_formatted)
 
     def test_prepare_raw_diff_preserved_for_scans(self) -> None:
         """Raw diff is saved to diff.patch even when format-diff succeeds."""

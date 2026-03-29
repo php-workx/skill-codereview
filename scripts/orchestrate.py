@@ -2213,18 +2213,32 @@ def prepare(args: argparse.Namespace) -> int:
         # Apply REVIEW.md Skip patterns as file exclusions
         skip_patterns = load_review_md_skip_patterns(repo_root)
         if skip_patterns:
-            import fnmatch as _fnmatch
-
+            filtered_files = [
+                f
+                for f in diff_result.changed_files
+                if not any(fnmatch.fnmatch(f, pat) for pat in skip_patterns)
+            ]
+            # Also filter diff_text to remove hunks for skipped files
+            kept_diff_sections = []
+            for section in re.split(
+                r"(?=^diff --git )", diff_result.diff_text, flags=re.MULTILINE
+            ):
+                if not section.strip():
+                    continue
+                # Extract filename from diff header
+                header = re.match(r"diff --git a/\S+ b/(\S+)", section)
+                if header:
+                    fpath = header.group(1)
+                    if any(fnmatch.fnmatch(fpath, pat) for pat in skip_patterns):
+                        continue
+                kept_diff_sections.append(section)
+            filtered_diff_text = "".join(kept_diff_sections)
             diff_result = DiffResult(
                 mode=diff_result.mode,
                 base_ref=diff_result.base_ref,
                 merge_base=diff_result.merge_base,
-                changed_files=[
-                    f
-                    for f in diff_result.changed_files
-                    if not any(_fnmatch.fnmatch(f, pat) for pat in skip_patterns)
-                ],
-                diff_text=diff_result.diff_text,
+                changed_files=filtered_files,
+                diff_text=filtered_diff_text,
                 head_ref=diff_result.head_ref,
                 pr_number=diff_result.pr_number,
             )
@@ -3168,6 +3182,9 @@ def finalize(args: argparse.Namespace) -> int:
             if isinstance(judge_output, list)
             else judge_output.get("findings", [])
         )
+        # Merge scan findings so they aren't lost in the fallback path
+        scan_findings = launch_packet.get("scan_results", {}).get("findings", [])
+        findings.extend(scan_findings)
         tier_counts: dict[str, int] = {}
         for f in findings:
             sev = f.get("severity", "low")
@@ -3386,7 +3403,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # Handle --setup: delete the setup-complete marker so Step 0 re-runs.
     if getattr(args, "setup", False):
-        marker = Path(".agents/codereview/setup-complete")
+        repo_root = detect_repo_root()
+        marker = repo_root / ".agents" / "codereview" / "setup-complete"
         if marker.exists():
             marker.unlink()
             print(

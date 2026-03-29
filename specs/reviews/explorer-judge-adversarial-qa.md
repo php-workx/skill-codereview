@@ -15,7 +15,7 @@
 
 The self-check is 30 lines of "ask yourself these 4 questions before every finding." This is the classic "think about this before answering" pattern. The model reads the self-check at token position ~800 of the global contract. By the time it is deep into Phase 2 investigation (token position 40k+), the self-check has been diluted by 40k tokens of code, grep results, and intermediate reasoning. The model will not stop mid-reasoning to re-derive the 4 questions from memory.
 
-Research on LLM self-correction (Huang et al. 2023, "Large Language Models Cannot Self-Correct Reasoning Without External Feedback") demonstrates that self-checks without new information generation degrade to no-ops. The proposed self-check generates no new information -- it asks the model to re-evaluate claims it already made, using the same context it already has.
+Research on LLM self-correction (Huang et al. 2023, "Large Language Models Cannot Self-Correct Reasoning Yet") demonstrates that self-checks without new information generation degrade to no-ops. The proposed self-check generates no new information -- it asks the model to re-evaluate claims it already made, using the same context it already has.
 
 **Specific failure modes:**
 

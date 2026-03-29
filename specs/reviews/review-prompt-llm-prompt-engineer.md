@@ -43,16 +43,16 @@ The verifier has a structured 5-step protocol (read code, check claim, search fo
 - The "skeptical by default — looking for reasons the finding is WRONG" framing is strong. But does it cause the opposite problem — a verifier that's too aggressive in discarding findings because it was told to be skeptical?
 - Step 4 (generate verification_command) requires the LLM to produce a concrete grep/read command. In your experience, do LLMs generate valid, runnable grep commands with correct regex syntax? Or is this a common failure point (wrong flags, invalid regex, wrong file paths)?
 
-**5. Default-to-false_positive within 3 tool calls.**
-The spec says if the verifier can't confirm within 3 tool calls, default to `false_positive`.
-- Is "3 tool calls" the right framing? The LLM may interpret this as "I get exactly 3 Read/Grep calls" or as "I should give up after 3 attempts." The ambiguity could cause the verifier to either underuse tools (stops at 2) or overuse them (makes 3 calls even when 1 would suffice).
-- Should the instruction be more specific? e.g., "Use up to 3 tool calls. If after 3 calls you cannot find concrete evidence that the defect exists, assign false_positive."
+**5. Default-to-false_positive within tool call budget.**
+The spec says the verifier gets up to 10 tool calls per finding and defaults to `false_positive` if it can't confirm within that budget.
+- Is "up to 10 tool calls" the right framing? The LLM may interpret this as a hard budget or as a soft guideline. The ambiguity could cause the verifier to either underuse tools (stops early) or overuse them.
+- Should the instruction be more specific? e.g., "Use up to 10 tool calls. If after exhausting your budget you cannot find concrete evidence that the defect exists, assign false_positive."
 
 **6. Verifier output format.**
-The verifier produces `[{finding_index, verdict, reason, verification_command}]`.
+The verifier produces `[{finding_index, verdict, reason, verification_command}]`. The spec already mandates JSON-only output ("Output ONLY the JSON array below. No commentary before or after. Use lowercase verdict strings exactly: `confirmed`, `false_positive`, `needs_investigation`.").
 - Will the LLM reliably produce a JSON array with one entry per finding, matching the finding indices from the input?
-- Common failure modes: LLM adds narrative text before/after the JSON, omits findings it deems obvious, reorders findings, or uses inconsistent verdict strings ("Confirmed" vs "confirmed" vs "CONFIRMED").
-- Should the spec prescribe output format enforcement? (e.g., "Output ONLY the JSON array. No commentary before or after. Use lowercase verdict strings exactly: confirmed, false_positive, needs_investigation.")
+- Even with the JSON-only mandate, common failure modes include: the LLM omitting findings it deems obvious, reordering findings, or producing inconsistent verdict strings despite explicit enumeration.
+- Are there additional enforcement mechanisms (e.g., completeness constraint requiring exactly one entry per input finding) that would improve reliability?
 
 **7. Quick reference effectiveness.**
 The spec includes 6 defect-type-specific search strategies (resource leak → search for close/defer, race condition → search for lock/mutex, etc.).

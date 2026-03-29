@@ -220,6 +220,8 @@ def parse_expert_frontmatter(prompt_text: str, filename: str) -> ExpertMeta | No
         deactivates_on=DeactivationRule(
             max_files=deact.get("max_files"),
             file_types_only=deact.get("file_types_only", []),
+            ignore_paths=deact.get("ignore_paths", []),
+            min_signals=deact.get("min_signals", 1),
         ),
         groups=data.get("groups", []),
         requires_context=data.get("requires_context", []),
@@ -691,14 +693,17 @@ def _should_deactivate(expert: ExpertMeta, signals: ReviewSignals) -> bool:
         if signals.file_extensions and signals.file_extensions.issubset(only_exts):
             return True
 
-    # ignore_paths: skip if ALL changed files match ignore patterns
-    # e.g., ["**/test_*", "**/*_test.*", "**/tests/**"] suppresses activation
-    # when the only matches are in test files
+    # ignore_paths: skip if ALL files that matched this expert's activation
+    # signals are in ignored paths.  We check matched_files (the files that
+    # triggered activation), NOT all changed_files.  If the expert was
+    # activated by src/auth.py but tests/test_auth.py also changed, we
+    # should NOT deactivate just because a test file is present.
     if rules.ignore_paths:
         from fnmatch import fnmatch
+        matched = signals.matched_files or signals.changed_files
         all_ignored = all(
             any(fnmatch(f, pat) for pat in rules.ignore_paths)
-            for f in signals.changed_files
+            for f in matched
         )
         if all_ignored:
             return True

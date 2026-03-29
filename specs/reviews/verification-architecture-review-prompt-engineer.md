@@ -5,6 +5,14 @@
 **Date:** 2026-03-28
 **Verdict:** WARN
 
+> **Note (2026-03-28):** This review was conducted against an earlier draft of the spec. Key recommendations that have since been incorporated:
+> - **Q1-Q3 (Stage 1):** Batch size capped at 15, calibration examples added, output enforcement added, `improved_code_is_correct` removed. Feature count is now 13.
+> - **Q5 (tool budget):** Clarified as one LLM call per finding with up to 10 tool calls each (not batched).
+> - **Q6 (output format):** Strict JSON enforcement, lowercase verdict enum, and completeness constraint added.
+> - **Q8 (two-pass judge):** Replaced with strengthened existing Expert Panel handoffs as recommended in this review's top recommendation #3.
+>
+> The review text below is preserved as-is for provenance. Read the current spec for the authoritative design.
+
 ---
 
 ## Question 1: Will the feature extractor produce consistent boolean outputs?

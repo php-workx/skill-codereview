@@ -727,7 +727,7 @@ def cmd_callers(files: list[str], target: str) -> dict[str, Any]:
                 continue
             caller = "<module>"
             for fname, ls, le in func_ranges:
-                if ls <= i < le:
+                if ls <= i <= le:
                     caller = fname
                     break
             call_sites.append(asdict(CallSite(fpath, caller, i, stripped)))

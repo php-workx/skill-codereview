@@ -784,7 +784,7 @@ def prepare(args, config, session: Path, repo_root: Path):
     packet = build_launch_packet(
         session_dir=str(session),
         diff_result=diff_result,
-        mode=mode,
+        review_mode=review_mode,
         waves=waves,
         judge=judge_config,
         scan_results=scan_results,  # full dict — build_launch_packet extracts tool_status
