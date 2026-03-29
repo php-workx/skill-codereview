@@ -106,12 +106,15 @@ def _try_llm_planning(
         for q in raw_queries[:MAX_QUERIES]:
             if not isinstance(q, dict) or "pattern" not in q:
                 continue
+            pattern = str(q["pattern"]).strip()
+            if not pattern:
+                continue
             category = q.get("category", "consumers")
             if category not in VALID_CATEGORIES:
                 category = "consumers"
             queries.append(
                 {
-                    "pattern": str(q["pattern"]),
+                    "pattern": pattern,
                     "rationale": str(q.get("rationale", "")),
                     "risk_level": str(q.get("risk_level", "medium")),
                     "category": category,
@@ -208,7 +211,7 @@ def _execute_queries(queries: list[dict[str, Any]]) -> dict[str, Any]:
             cmd = ["grep", "-rnl", "-E"] + exclude_args
             if q.get("file_glob"):
                 cmd.extend(["--include", q["file_glob"]])
-            cmd.extend([pattern, "."])
+            cmd.extend(["-e", pattern, "."])
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -218,7 +221,7 @@ def _execute_queries(queries: list[dict[str, Any]]) -> dict[str, Any]:
                 check=False,
             )
             matches = [
-                line.lstrip("./")
+                line.removeprefix("./")
                 for line in proc.stdout.strip().split("\n")
                 if line.strip()
             ][:MAX_RESULTS_PER_QUERY]

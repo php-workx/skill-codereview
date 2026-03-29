@@ -1568,17 +1568,6 @@ class TestFormatDiffExpandContext(unittest.TestCase):
         cb_pos = result.index("__context_before__")
         nh_pos = result.index("__new hunk__")
         self.assertLess(cb_pos, nh_pos)
-        # The enclosing function line number (3) should appear
-        context_lines = []
-        for line in result.split("\n"):
-            if line == "__context_before__":
-                collecting = True
-                continue
-            elif line.startswith("__"):
-                collecting = False
-                continue
-            if "collecting" in dir() and collecting:
-                context_lines.append(line)
         # Verify line numbers are present in context_before
         self.assertTrue(
             any("3" in ln and "def compute" in ln for ln in result.split("\n")),
