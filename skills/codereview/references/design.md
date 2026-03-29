@@ -14,29 +14,27 @@ The launch packet should capture the review scope, diff metadata, wave plan, jud
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Step 2: Context Gathering                                    │
-│  - Diff analysis, callers/callees, dead code check            │
-│  - Complexity analysis (radon/gocyclo)                        │
-│  - Spec/plan loading                                          │
-│  → Produces context packet                                    │
+│  Step 2: Context Gathering (parallel)                         │
+│  - Diff extraction + format-diff (LLM-optimized before/after) │
+│  - code_intel.py: complexity, functions, graph (callers,      │
+│    co-change, depth-2), imports/exports                       │
+│  - prescan.py: 8 pattern checkers (P-SEC through P-STUB)     │
+│  - Deterministic scans: ruff, semgrep, trivy, shellcheck,    │
+│    gitleaks, ast-grep (per-language file filtering)           │
+│  - Cross-file planner: LLM search for related code outside   │
+│    diff (callers, symmetric ops, test/impl, config deps)     │
+│  - REVIEW.md directives, domain checklists, path instructions │
+│  - Spec/plan loading, coverage data, git risk scoring         │
+│  → Produces enriched PromptContext (12 context sources)       │
 └──────────────────────────────────────────────────────────────┘
                               │
 ┌──────────────────────────────────────────────────────────────┐
-│  Step 3: Deterministic Scans                                  │
-│  semgrep, trivy, osv-scanner, shellcheck, pre-commit,         │
-│  sonarqube (via skill-sonarqube, if installed)                 │
-│  → Produces deterministic findings                            │
-└──────────────────────────────────────────────────────────────┘
-                              │
-┌──────────────────────────────────────────────────────────────┐
-│  Step 3.5: Adaptive Pass Selection                            │
-│  - Evaluate skip signals for extended passes                  │
-│  - Skip concurrency pass if no concurrency primitives         │
-│  - Skip api-contract pass if no public API changes            │
-│  - Skip error-handling pass if test/docs/config only          │
-│  - Skip spec-verification pass if no spec loaded              │
-│  - Core passes (correctness, security, reliability, tests)    │
-│    are never skipped                                          │
+│  Step 3: Adaptive Pass Selection                              │
+│  - Structural detection from code_intel function signatures   │
+│  - Regex fallback when code_intel unavailable                 │
+│  - Core passes always run (correctness, security, tests)      │
+│  - Extended passes auto-activate when relevant                │
+│  - Per-explorer cross-file context routing by category        │
 └──────────────────────────────────────────────────────────────┘
                               │
     ┌────────┬────────┬───────┼───────┬────────┬────────┬────────┐
@@ -68,9 +66,16 @@ The launch packet should capture the review scope, diff metadata, wave plan, jud
 └──────────────────────────────────────────────────────────────┘
                               │
 ┌──────────────────────────────────────────────────────────────┐
-│  Step 5: Classify into tiers                                  │
-│  Step 6: Format report with Next Steps                        │
-│  Step 7: Save artifacts (.md + .json)                         │
+│  Step 5: Enrich findings (enrich-findings.py)                 │
+│  - Merge AI + deterministic findings                          │
+│  - Confidence floor filter, minimum severity filter           │
+│  - Code-intel severity boost (caller count)                   │
+│  - Evidence check (downgrade AI high/critical without         │
+│    failure_mode)                                              │
+│  - Action tier assignment (must_fix/should_fix/consider)      │
+│  Step 6: Lifecycle tracking (fingerprint, suppress, defer)    │
+│  Step 7: Format report + save artifacts (.md + .json)         │
+│  Step 8: Write last-review marker for scope tracking          │
 └──────────────────────────────────────────────────────────────┘
 ```
 
